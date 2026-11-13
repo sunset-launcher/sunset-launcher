@@ -16,6 +16,8 @@ use ui::McLauncherApp;
 
 fn main() -> eframe::Result<()> {
     let paths = get_launcher_paths().expect("Failed to initialize launcher directories");
+    #[cfg(target_os = "linux")]
+    let _ = storage::ensure_linux_desktop_entry(&paths);
     let profiles = load_profiles(&paths);
     let accounts = load_accounts(&paths);
 

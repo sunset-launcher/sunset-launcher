@@ -1563,7 +1563,8 @@ mod tests {
         );
         assert_eq!(
             resolve_processor_arg("[com.example:helper:1.2]", &vars, libs).unwrap(),
-            "/tmp/libs/com/example/helper/1.2/helper-1.2.jar"
+            libs.join("com/example/helper/1.2/helper-1.2.jar")
+                .to_string_lossy()
         );
     }
 }

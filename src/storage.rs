@@ -141,6 +141,49 @@ pub fn resolve_selected_profile_index(profiles: &[Profile], saved_id: Option<&st
         .unwrap_or(0)
 }
 
+/// Installs the Svarka Launcher icon and `.desktop` menu entry on Linux so the binary
+/// appears in desktop application launchers with its icon.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn ensure_linux_desktop_entry(paths: &LauncherPaths) -> Result<PathBuf, String> {
+    const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
+    let exe_path = std::env::current_exe()
+        .map_err(|e| format!("Failed to locate current executable: {e}"))?;
+    let exe_escaped = exe_path.to_string_lossy().replace('"', "\\\"");
+
+    let icon_path = paths.root.join("svarka-launcher.png");
+    fs::write(&icon_path, LOGO_PNG)
+        .map_err(|e| format!("Failed to write icon {}: {e}", icon_path.display()))?;
+
+    let data_dir = dirs::data_local_dir()
+        .ok_or_else(|| "Could not determine XDG data directory".to_string())?;
+    let hicolor_dir = data_dir.join("icons/hicolor/512x512/apps");
+    if fs::create_dir_all(&hicolor_dir).is_ok() {
+        let _ = fs::write(hicolor_dir.join("svarka-launcher.png"), LOGO_PNG);
+    }
+
+    let apps_dir = data_dir.join("applications");
+    fs::create_dir_all(&apps_dir)
+        .map_err(|e| format!("Failed to create {}: {e}", apps_dir.display()))?;
+    let desktop_path = apps_dir.join("svarka-launcher.desktop");
+    let desktop_contents = format!(
+        "[Desktop Entry]\n\
+Type=Application\n\
+Version=1.0\n\
+Name=Svarka Launcher\n\
+Comment=Native Minecraft launcher in Rust with Modrinth & Multi-Loader support\n\
+Exec=\"{exe_escaped}\"\n\
+Icon={}\n\
+Terminal=false\n\
+Categories=Game;\n\
+StartupNotify=true\n\
+StartupWMClass=Svarka Launcher\n",
+        icon_path.display()
+    );
+    fs::write(&desktop_path, desktop_contents)
+        .map_err(|e| format!("Failed to write {}: {e}", desktop_path.display()))?;
+    Ok(desktop_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
