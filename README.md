@@ -37,7 +37,12 @@ cargo test
 ```
 
 ## Data Storage
-By default, launcher data is stored in `~/.local/share/mc-launcher`:
+By default, launcher data is stored in:
+- **Linux**: `~/.local/share/mc-launcher`
+- **Windows**: `%LOCALAPPDATA%\mc-launcher` (`C:\Users\<User>\AppData\Local\mc-launcher`)
+- **macOS**: `~/Library/Application Support/mc-launcher`
+
+Inside this folder:
 - `profiles.json` — instance profiles
 - `accounts.json` — saved accounts
 - `versions/` — version JSONs, client JARs, loader overlays, and extracted `natives`
@@ -50,7 +55,6 @@ By default, launcher data is stored in `~/.local/share/mc-launcher`:
 - **Author**: `svarka` ([@svarkawm](https://github.com/svarkawm))
 - **Co-Author / AI Contributor**: **Antigravity (Gemini)**
 - **License**: [MIT](LICENSE)
-
 
 
 
