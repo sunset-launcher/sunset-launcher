@@ -1,0 +1,32 @@
+# Rust build & debug artifacts
+/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+lcov.info
+
+# Note: Cargo.lock is intentionally tracked for binary applications.
+
+# IDEs & editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Environment & secrets
+.env
+.env.*
+
+# Accidental local launcher/game runtime files
+logs/
+crash-reports/
+*.log
+accounts.json
+profiles.json
+

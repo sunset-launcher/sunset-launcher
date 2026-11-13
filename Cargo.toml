@@ -1,0 +1,24 @@
+[package]
+name = "mc-launcher"
+version = "0.1.0"
+edition = "2021"
+authors = ["svarka (@svarkawm)", "Antigravity (Gemini)"]
+license = "MIT"
+description = "Native Minecraft launcher in Rust with Vanilla, Fabric, Quilt, Forge, and NeoForge support"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "sync", "time"] }
+sha1 = "0.10"
+hex = "0.4"
+zip = "2.2"
+dirs = "5.0"
+uuid = { version = "1.11", features = ["v3", "v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+md5 = "0.7"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "ico", "bmp"] }
+
