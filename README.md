@@ -1,3 +1,8 @@
+<img width="1881" height="1007" alt="screenshot_2026-11-13_22-03-30" src="https://github.com/user-attachments/assets/926a4243-2ce9-4b93-8d6d-6c1eb5d41ddc" />
+<img width="1883" height="1007" alt="screenshot_2026-11-13_22-03-22" src="https://github.com/user-attachments/assets/4e664c71-5f38-4eb8-9c67-5116fdcb4dd6" />
+<img width="1882" height="1008" alt="screenshot_2026-11-13_22-03-17" src="https://github.com/user-attachments/assets/addc6e05-f003-4708-a5e8-f299b83dac26" />
+<img width="1882" height="1006" alt="screenshot_2026-11-13_22-03-09" src="https://github.com/user-attachments/assets/ec388498-8890-4041-a68a-d5444caca487" />
+<img width="1880" height="1006" alt="screenshot_2026-11-13_22-02-57" src="https://github.com/user-attachments/assets/4415462e-0d49-4631-8143-429063fcaf02" />
 # Svarka Launcher
 
 Native Minecraft launcher built in Rust (`eframe` / `egui`).
