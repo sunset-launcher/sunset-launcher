@@ -411,7 +411,7 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
 /// Draws the bespoke Svarka Launcher emblem: obsidian-emerald squircle,
 /// 3-face shaded isometric Minecraft cube, and bright welding arc spark bolt.
 pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
-    let accent = crate::theme::ACCENT;
+    let accent = crate::theme::accent();
     let s = rect.width().min(rect.height());
     let rounding = Rounding::same((s * 0.26).clamp(6.0, 12.0));
 

@@ -1,4 +1,4 @@
-use crate::models::{Account, AccountStore, LauncherPaths, ModLoader, Profile};
+use crate::models::{Account, AccountStore, LauncherPaths, LauncherSettings, ModLoader, Profile};
 use std::fs;
 use std::path::PathBuf;
 
@@ -182,6 +182,24 @@ StartupWMClass=Svarka Launcher\n",
     fs::write(&desktop_path, desktop_contents)
         .map_err(|e| format!("Failed to write {}: {e}", desktop_path.display()))?;
     Ok(desktop_path)
+}
+
+pub fn load_launcher_settings(paths: &LauncherPaths) -> LauncherSettings {
+    let path = paths.root.join("settings.json");
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_launcher_settings(
+    paths: &LauncherPaths,
+    settings: &LauncherSettings,
+) -> Result<(), String> {
+    let path = paths.root.join("settings.json");
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("Failed to serialize settings: {e}"))?;
+    fs::write(&path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
 
 #[cfg(test)]

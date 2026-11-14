@@ -4,7 +4,7 @@ use crate::models::{
 use crate::mojang::{rules_allow, PreparedLaunch};
 use crate::storage::instance_dir;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -74,9 +74,12 @@ fn push_java_vendor_dirs(root: &Path, candidates: &mut Vec<PathBuf>) {
     }
 }
 
-/// Finds Java runtimes in JAVA_HOME, standard OS vendor locations, and PATH.
+/// Finds Java runtimes in the launcher's managed `java/` folder, JAVA_HOME, standard OS vendor locations, and PATH.
 pub fn detect_java_installations() -> Vec<JavaInstall> {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(base) = dirs::data_local_dir().or_else(dirs::home_dir) {
+        push_java_vendor_dirs(&base.join("mc-launcher").join("java"), &mut candidates);
+    }
     if let Ok(home) = std::env::var("JAVA_HOME") {
         candidates.push(PathBuf::from(home).join("bin").join(JAVA_BIN));
     }
@@ -197,6 +200,379 @@ pub fn resolve_java_binary(profile: &Profile, required: Option<u32>) -> Result<P
     }
 }
 
+fn adoptium_jre_url_for(
+    major: u32,
+    os: &str,
+    arch: &str,
+) -> Result<(&'static str, String), String> {
+    let api_os = match os {
+        "windows" => "windows",
+        "macos" => "mac",
+        "linux" => "linux",
+        other => {
+            return Err(format!(
+                "Auto-downloading Java is not supported on OS '{other}'."
+            ))
+        }
+    };
+    let api_arch = match arch {
+        "x86_64" => "x64",
+        "aarch64" => "aarch64",
+        "x86" => "x32",
+        other => {
+            return Err(format!(
+                "Auto-downloading Java is not supported on CPU '{other}'."
+            ))
+        }
+    };
+    let ext = if api_os == "windows" { "zip" } else { "tar.gz" };
+    let url = format!(
+        "https://api.adoptium.net/v3/binary/latest/{major}/ga/{api_os}/{api_arch}/jre/hotspot/normal/eclipse"
+    );
+    Ok((ext, url))
+}
+
+fn find_java_in_dir(dir: &Path) -> Option<PathBuf> {
+    let direct = [
+        dir.join("bin").join(JAVA_BIN),
+        dir.join("jre").join("bin").join(JAVA_BIN),
+        dir.join("Contents").join("Home").join("bin").join(JAVA_BIN),
+    ];
+    for p in direct {
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let sub = entry.path();
+            if sub.is_dir() {
+                for p in [
+                    sub.join("bin").join(JAVA_BIN),
+                    sub.join("jre").join("bin").join(JAVA_BIN),
+                    sub.join("Contents").join("Home").join("bin").join(JAVA_BIN),
+                ] {
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_zip_archive(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| format!("Failed to open Java archive: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Invalid Java zip archive: {e}"))?;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read zip entry {i}: {e}"))?;
+        let Some(rel_path) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
+            continue;
+        };
+        let out_path = dest_dir.join(rel_path);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)
+                .map_err(|e| format!("Failed to create dir {}: {e}", out_path.display()))?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent dir {}: {e}", parent.display()))?;
+        }
+        let mut out_file = std::fs::File::create(&out_path)
+            .map_err(|e| format!("Failed to create {}: {e}", out_path.display()))?;
+        std::io::copy(&mut entry, &mut out_file)
+            .map_err(|e| format!("Failed to write {}: {e}", out_path.display()))?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
+        }
+    }
+    Ok(())
+}
+
+fn emit_progress(tx: Option<&Sender<WorkerEvent>>, stage: impl Into<String>, fraction: f32) {
+    if let Some(tx) = tx {
+        let _ = tx.send(WorkerEvent::Progress {
+            stage: stage.into(),
+            fraction,
+        });
+    }
+}
+
+fn emit_log(tx: Option<&Sender<WorkerEvent>>, msg: impl Into<String>) {
+    if let Some(tx) = tx {
+        let _ = tx.send(WorkerEvent::Log(msg.into()));
+    }
+}
+
+fn download_adoptium_jre(
+    paths: &LauncherPaths,
+    major: u32,
+    tx: Option<&Sender<WorkerEvent>>,
+) -> Result<PathBuf, String> {
+    let java_root = paths.root.join("java");
+    let target_dir = java_root.join(format!("temurin-{major}"));
+    if let Some(existing) = find_java_in_dir(&target_dir) {
+        if java_major_version(&existing) == Some(major) {
+            return Ok(existing);
+        }
+    }
+
+    let (ext, url) = adoptium_jre_url_for(major, std::env::consts::OS, std::env::consts::ARCH)?;
+    std::fs::create_dir_all(&java_root)
+        .map_err(|e| format!("Failed to create launcher java directory: {e}"))?;
+
+    emit_log(
+        tx,
+        format!(
+            "[Java] Required Java {major} not found locally; downloading Eclipse Temurin {major} into {}...",
+            target_dir.display()
+        ),
+    );
+    emit_progress(tx, format!("Downloading Java {major} (Temurin)..."), 0.02);
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("svarka-launcher/0.1")
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(600))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client for Java download: {e}"))?;
+
+    let mut resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("Failed to download Java {major}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Adoptium API returned HTTP {} while downloading Java {major}",
+            resp.status()
+        ));
+    }
+
+    let total_bytes = resp.content_length();
+    let archive_part = java_root.join(format!("temurin-{major}.{ext}.part"));
+    {
+        let mut out = std::fs::File::create(&archive_part)
+            .map_err(|e| format!("Failed to create temp Java archive: {e}"))?;
+        let mut buf = [0u8; 64 * 1024];
+        let mut downloaded: u64 = 0;
+        let mut last_pct: u32 = 0;
+        loop {
+            let n = resp
+                .read(&mut buf)
+                .map_err(|e| format!("Error reading Java {major} download stream: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])
+                .map_err(|e| format!("Failed to write Java {major} archive: {e}"))?;
+            downloaded += n as u64;
+            if let Some(total) = total_bytes {
+                if total > 0 {
+                    let pct = ((downloaded * 100) / total) as u32;
+                    if pct >= last_pct + 5 || pct == 100 {
+                        last_pct = pct;
+                        let frac = 0.02 + 0.14 * (downloaded as f32 / total as f32);
+                        emit_progress(
+                            tx,
+                            format!(
+                                "Downloading Java {major} ({:.1} / {:.1} MB)...",
+                                downloaded as f64 / (1024.0 * 1024.0),
+                                total as f64 / (1024.0 * 1024.0)
+                            ),
+                            frac,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    emit_progress(tx, format!("Extracting Java {major}..."), 0.17);
+    let stage_dir = java_root.join(format!(".tmp-temurin-{major}"));
+    if stage_dir.exists() {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+    }
+    std::fs::create_dir_all(&stage_dir)
+        .map_err(|e| format!("Failed to create Java staging directory: {e}"))?;
+
+    let extract_res = if ext == "zip" {
+        extract_zip_archive(&archive_part, &stage_dir)
+    } else {
+        let mut cmd = Command::new("tar");
+        cmd.args([
+            "-xzf",
+            &archive_part.to_string_lossy(),
+            "-C",
+            &stage_dir.to_string_lossy(),
+        ]);
+        configure_background_command(&mut cmd);
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run tar to extract Java {major}: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Failed to extract Java {major} archive: {stderr}"))
+        }
+    };
+    let _ = std::fs::remove_file(&archive_part);
+    if let Err(err) = extract_res {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(err);
+    }
+
+    // Flatten a single top-level directory (e.g. `jdk-21.0.5+11-jre/`) into `target_dir`.
+    let mut top_dirs = Vec::new();
+    let mut top_files = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&stage_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                top_dirs.push(entry.path());
+            } else {
+                top_files += 1;
+            }
+        }
+    }
+    let source_dir = if top_dirs.len() == 1 && top_files == 0 {
+        top_dirs.remove(0)
+    } else {
+        stage_dir.clone()
+    };
+
+    if target_dir.exists() {
+        let _ = std::fs::remove_dir_all(&target_dir);
+    }
+    if let Err(e) = std::fs::rename(&source_dir, &target_dir) {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        return Err(format!(
+            "Failed to move extracted Java {major} into {}: {e}",
+            target_dir.display()
+        ));
+    }
+    if stage_dir.exists() {
+        let _ = std::fs::remove_dir_all(&stage_dir);
+    }
+
+    let bin = find_java_in_dir(&target_dir).ok_or_else(|| {
+        format!(
+            "Extracted Java {major} in {}, but {} binary was not found.",
+            target_dir.display(),
+            JAVA_BIN
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&bin) {
+            let mut perms = meta.permissions();
+            if perms.mode() & 0o111 == 0 {
+                perms.set_mode(perms.mode() | 0o755);
+                let _ = std::fs::set_permissions(&bin, perms);
+            }
+        }
+    }
+
+    if let Some(actual) = java_major_version(&bin) {
+        emit_log(
+            tx,
+            format!(
+                "[Java] Installed Eclipse Temurin {actual} at {}",
+                bin.display()
+            ),
+        );
+    }
+    Ok(bin)
+}
+
+/// Resolves the Java binary for `profile`, automatically downloading the required
+/// Eclipse Temurin JRE into `paths.root/java` when Auto mode finds no suitable local runtime.
+pub fn ensure_java_runtime(
+    paths: &LauncherPaths,
+    profile: &Profile,
+    required: Option<u32>,
+    tx: Option<&Sender<WorkerEvent>>,
+) -> Result<PathBuf, String> {
+    if !profile.java_path.trim().is_empty() {
+        return resolve_java_binary(profile, required);
+    }
+
+    let installs = detect_java_installations();
+    if let Some(req) = required {
+        // Prefer an exact major version match so older MC versions (e.g. 1.12.2 -> Java 8,
+        // 1.18-1.20.4 -> Java 17) don't break on newer runtimes like Java 21/25.
+        if let Some(exact) = installs.iter().find(|j| j.major == req) {
+            return Ok(exact.path.clone());
+        }
+        match download_adoptium_jre(paths, req, tx) {
+            Ok(bin) => return Ok(bin),
+            Err(dl_err) => {
+                // Offline/fallback: try a newer installed Java if one exists.
+                if let Ok(bin) = resolve_java_binary(profile, Some(req)) {
+                    emit_log(
+                        tx,
+                        format!(
+                            "[Java] Could not download Java {req} ({dl_err}); falling back to {}",
+                            bin.display()
+                        ),
+                    );
+                    return Ok(bin);
+                }
+                return Err(dl_err);
+            }
+        }
+    }
+
+    if let Ok(bin) = resolve_java_binary(profile, None) {
+        return Ok(bin);
+    }
+    download_adoptium_jre(paths, 21, tx)
+}
+
+/// Downloads a specific Eclipse Temurin JRE major version into `paths.root/java`.
+pub fn download_java_major(
+    paths: &LauncherPaths,
+    major: u32,
+    tx: Option<&Sender<WorkerEvent>>,
+) -> Result<PathBuf, String> {
+    download_adoptium_jre(paths, major, tx)
+}
+
+/// Returns true if `java_bin` lives inside the launcher's managed `java/` directory.
+pub fn is_managed_java_path(paths: &LauncherPaths, java_bin: &Path) -> bool {
+    let managed_root = paths.root.join("java");
+    java_bin.starts_with(&managed_root)
+}
+
+/// Removes a launcher-managed Java runtime directory safely.
+pub fn remove_managed_java(paths: &LauncherPaths, java_bin: &Path) -> Result<(), String> {
+    let managed_root = paths.root.join("java");
+    if !java_bin.starts_with(&managed_root) {
+        return Err("Refusing to remove non-launcher Java runtime".to_string());
+    }
+    let rel = java_bin
+        .strip_prefix(&managed_root)
+        .map_err(|e| e.to_string())?;
+    let Some(first_comp) = rel.components().next() else {
+        return Err("Invalid managed Java path".to_string());
+    };
+    let runtime_dir = managed_root.join(first_comp.as_os_str());
+    if runtime_dir.exists() {
+        std::fs::remove_dir_all(&runtime_dir)
+            .map_err(|e| format!("Failed to remove {}: {e}", runtime_dir.display()))?;
+    }
+    Ok(())
+}
+
 fn replace_placeholders(arg: &str, vars: &HashMap<&str, String>) -> String {
     let mut result = arg.to_string();
     for (key, val) in vars {
@@ -256,7 +632,7 @@ pub fn launch_game(
         .java_version
         .as_ref()
         .map(|j| j.major_version);
-    let java_bin = resolve_java_binary(profile, required_java)?;
+    let java_bin = ensure_java_runtime(paths, profile, required_java, Some(&tx))?;
     let game_dir = instance_dir(paths, profile);
 
     let sep = if cfg!(windows) { ";" } else { ":" };
@@ -550,5 +926,56 @@ mod tests {
         let mut args = Vec::new();
         append_profile_launch_args(&profile, &mut args);
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_adoptium_jre_url_for_platforms() {
+        let (ext_lin, url_lin) = adoptium_jre_url_for(21, "linux", "x86_64").unwrap();
+        assert_eq!(ext_lin, "tar.gz");
+        assert_eq!(
+            url_lin,
+            "https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jre/hotspot/normal/eclipse"
+        );
+
+        let (ext_win, url_win) = adoptium_jre_url_for(17, "windows", "x86_64").unwrap();
+        assert_eq!(ext_win, "zip");
+        assert_eq!(
+            url_win,
+            "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jre/hotspot/normal/eclipse"
+        );
+
+        let (ext_mac, url_mac) = adoptium_jre_url_for(8, "macos", "aarch64").unwrap();
+        assert_eq!(ext_mac, "tar.gz");
+        assert_eq!(
+            url_mac,
+            "https://api.adoptium.net/v3/binary/latest/8/ga/mac/aarch64/jre/hotspot/normal/eclipse"
+        );
+
+        let (ext_25, url_25) = adoptium_jre_url_for(25, "windows", "x86_64").unwrap();
+        assert_eq!(ext_25, "zip");
+        assert_eq!(
+            url_25,
+            "https://api.adoptium.net/v3/binary/latest/25/ga/windows/x64/jre/hotspot/normal/eclipse"
+        );
+    }
+
+    #[test]
+    fn test_find_java_in_dir_direct_and_nested() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mc_launcher_java_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bin_dir = tmp.join("jdk-21.0.5+11-jre").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let fake_java = bin_dir.join(JAVA_BIN);
+        std::fs::write(&fake_java, b"").unwrap();
+
+        let found = find_java_in_dir(&tmp).expect("should find nested java binary");
+        assert_eq!(found, fake_java);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

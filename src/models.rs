@@ -214,17 +214,6 @@ pub enum VersionType {
     OldAlpha,
 }
 
-impl VersionType {
-    pub fn label(&self) -> &'static str {
-        match self {
-            VersionType::Release => "Release",
-            VersionType::Snapshot => "Snapshot",
-            VersionType::OldBeta => "Old Beta",
-            VersionType::OldAlpha => "Old Alpha",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionEntry {
     pub id: String,
@@ -445,15 +434,6 @@ impl ModrinthSort {
             ModrinthSort::Updated => "updated",
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ModrinthSort::Relevance => "Relevance",
-            ModrinthSort::Downloads => "Downloads",
-            ModrinthSort::Newest => "Newest",
-            ModrinthSort::Updated => "Updated",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -648,5 +628,96 @@ pub struct LauncherPaths {
     pub instances_dir: PathBuf,
     pub profiles_file: PathBuf,
     pub accounts_file: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ThemePreset {
+    #[default]
+    Emerald,
+    Cyan,
+    Crimson,
+    Nord,
+    Amber,
+    Amethyst,
+    Custom,
+}
+
+impl ThemePreset {
+    pub const ALL: [ThemePreset; 7] = [
+        ThemePreset::Emerald,
+        ThemePreset::Cyan,
+        ThemePreset::Crimson,
+        ThemePreset::Nord,
+        ThemePreset::Amber,
+        ThemePreset::Amethyst,
+        ThemePreset::Custom,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemePreset::Emerald => "Emerald",
+            ThemePreset::Cyan => "Obsidian Cyan",
+            ThemePreset::Crimson => "Crimson",
+            ThemePreset::Nord => "Nord Blue",
+            ThemePreset::Amber => "Amber Gold",
+            ThemePreset::Amethyst => "Amethyst",
+            ThemePreset::Custom => "Custom",
+        }
+    }
+
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            ThemePreset::Emerald => [27, 217, 106],
+            ThemePreset::Cyan => [34, 211, 238],
+            ThemePreset::Crimson => [239, 68, 68],
+            ThemePreset::Nord => [96, 165, 250],
+            ThemePreset::Amber => [245, 158, 11],
+            ThemePreset::Amethyst => [168, 85, 247],
+            ThemePreset::Custom => [27, 217, 106],
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_custom_accent() -> [u8; 3] {
+    [27, 217, 106]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LauncherSettings {
+    pub language: crate::i18n::Language,
+    pub theme_preset: ThemePreset,
+    #[serde(default = "default_custom_accent")]
+    pub custom_accent: [u8; 3],
+    #[serde(default = "default_true")]
+    pub discord_rpc_enabled: bool,
+    #[serde(default)]
+    pub discord_client_id: String,
+}
+
+impl Default for LauncherSettings {
+    fn default() -> Self {
+        Self {
+            language: crate::i18n::Language::En,
+            theme_preset: ThemePreset::Emerald,
+            custom_accent: default_custom_accent(),
+            discord_rpc_enabled: true,
+            discord_client_id: String::new(),
+        }
+    }
+}
+
+impl LauncherSettings {
+    pub fn effective_accent_rgb(&self) -> [u8; 3] {
+        if self.theme_preset == ThemePreset::Custom {
+            self.custom_accent
+        } else {
+            self.theme_preset.rgb()
+        }
+    }
 }
 

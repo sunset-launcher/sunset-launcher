@@ -2,18 +2,23 @@ use crate::auth::{
     ensure_authlib_injector, ensure_valid_account, login_ely_by, start_microsoft_device_login,
     DEFAULT_MS_CLIENT_ID,
 };
+use crate::discord::{
+    format_presence, unix_now_secs, DiscordActivityKind, DiscordRpc, PresenceState,
+};
+use crate::i18n::{tr, Language};
 use crate::icons::{draw_brand_logo, draw_icon, draw_player_pixel_avatar, Icon};
 use crate::launcher::{
-    detect_java_installations, launch_game, open_in_file_manager, resolve_java_binary,
+    detect_java_installations, download_java_major, ensure_java_runtime, is_managed_java_path,
+    launch_game, open_in_file_manager, remove_managed_java,
 };
 use crate::models::{
     Account, AccountKind, AccountStore, DeviceCodeInfo, GameHandle, InstalledProject, JavaInstall,
-    LauncherPaths, LoaderKind, LoaderVersionEntry, ModLoader, ModrinthInstallOutcome,
-    ModrinthProjectType, ModrinthSearchHit, ModrinthSort, ModrinthVersion, Profile,
-    VersionManifest, VersionType, WorkerEvent,
+    LauncherPaths, LauncherSettings, LoaderKind, LoaderVersionEntry, ModLoader,
+    ModrinthInstallOutcome, ModrinthProjectType, ModrinthSearchHit, ModrinthSort, ModrinthVersion,
+    Profile, ThemePreset, VersionManifest, VersionType, WorkerEvent,
 };
 use crate::modrinth::{
-    delete_content_file, disable_incompatible_mods_for_loader, fetch_icon,
+    delete_content_file, disable_incompatible_mods_for_loader, export_instance_mrpack, fetch_icon,
     fetch_project_versions_for_profile, import_local_file, install_project,
     install_specific_version, list_content_items, list_screenshots, list_worlds,
     load_installed_index, search_projects, set_all_content_enabled, toggle_content_file,
@@ -22,19 +27,19 @@ use crate::modrinth::{
 use crate::mojang::{fetch_loader_versions, fetch_version_manifest, prepare_version};
 use crate::storage::{
     instance_dir, is_version_installed, load_selected_profile_id, resolve_selected_profile_index,
-    save_accounts, save_profiles, save_selected_profile_id,
+    save_accounts, save_launcher_settings, save_profiles, save_selected_profile_id,
 };
 use crate::theme::{
-    self, animated_card, animated_progress_bar, badge, badge_sized, card_frame,
-    draw_icon_placeholder, draw_instance_avatar, draw_mini_gauge, draw_ram_allocation_bar,
-    draw_skeleton_card, hero_spotlight_card, lerp_color, loader_badge, loader_badge_sized,
-    loader_colors, mod_toggle_switch, mono_spinner,
-    primary_action_button, section_header, solid_accent_badge, ui_alert_banner, ui_button,
+    self, animated_card, animated_progress_bar, apply_modrinth_theme, badge, badge_sized,
+    card_frame, draw_icon_placeholder, draw_instance_avatar, draw_mini_gauge,
+    draw_ram_allocation_bar, draw_skeleton_card, hero_spotlight_card, lerp_color, loader_badge,
+    loader_badge_sized, loader_colors, mod_toggle_switch, mono_spinner, primary_action_button,
+    section_header, set_accent_rgb, solid_accent_badge, ui_alert_banner, ui_button,
     ui_button_icon, ui_button_sized, ui_checkbox, ui_icon_button, ui_loader_pill, ui_pill_tab,
     ui_pill_tab_icon, ui_ram_slider, ui_search_input, ui_text_input, ui_toolbar_row, ui_wrap_row,
     with_alpha, AlertKind,
-    ButtonVariant, ACCENT, ACCENT_DIM,
-    BG_CARD, BG_CARD_ACTIVE, BG_CARD_HOVER, BG_INPUT, BG_SIDEBAR, BORDER_STRONG, BORDER_SUBTLE,
+    ButtonVariant, accent, accent_dim,
+    BG_CARD, bg_card_active, BG_CARD_HOVER, BG_INPUT, BG_SIDEBAR, BORDER_STRONG, BORDER_SUBTLE,
     DANGER, INFO,
     PURE_WHITE, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, WARNING,
 };
@@ -53,15 +58,17 @@ enum NavPage {
     Instance,
     Console,
     Accounts,
+    Settings,
 }
 
 impl NavPage {
-    const ALL: [NavPage; 5] = [
+    const ALL: [NavPage; 6] = [
         NavPage::Library,
         NavPage::Discover,
         NavPage::Instance,
         NavPage::Console,
         NavPage::Accounts,
+        NavPage::Settings,
     ];
 
     fn label(self) -> &'static str {
@@ -71,6 +78,18 @@ impl NavPage {
             NavPage::Instance => "Instance",
             NavPage::Console => "Console",
             NavPage::Accounts => "Accounts",
+            NavPage::Settings => "Settings",
+        }
+    }
+
+    fn translated_label(self, lang: Language) -> &'static str {
+        match self {
+            NavPage::Library => tr(lang, "nav.library"),
+            NavPage::Discover => tr(lang, "nav.discover"),
+            NavPage::Instance => tr(lang, "nav.instance"),
+            NavPage::Console => tr(lang, "nav.console"),
+            NavPage::Accounts => tr(lang, "nav.accounts"),
+            NavPage::Settings => tr(lang, "nav.settings"),
         }
     }
 
@@ -81,6 +100,7 @@ impl NavPage {
             NavPage::Instance => Icon::Sliders,
             NavPage::Console => Icon::Terminal,
             NavPage::Accounts => Icon::User,
+            NavPage::Settings => Icon::Sparkle,
         }
     }
 }
@@ -91,16 +111,14 @@ enum InstanceSubTab {
     Worlds,
     Screenshots,
     Settings,
-    Versions,
 }
 
 impl InstanceSubTab {
-    const ALL: [InstanceSubTab; 5] = [
+    const ALL: [InstanceSubTab; 4] = [
         InstanceSubTab::Content,
         InstanceSubTab::Worlds,
         InstanceSubTab::Screenshots,
         InstanceSubTab::Settings,
-        InstanceSubTab::Versions,
     ];
 
     fn label(self) -> &'static str {
@@ -109,7 +127,15 @@ impl InstanceSubTab {
             InstanceSubTab::Worlds => "Worlds",
             InstanceSubTab::Screenshots => "Screenshots",
             InstanceSubTab::Settings => "Settings",
-            InstanceSubTab::Versions => "MC Versions",
+        }
+    }
+
+    fn translated_label(self, lang: Language) -> &'static str {
+        match self {
+            InstanceSubTab::Content => tr(lang, "inst.content"),
+            InstanceSubTab::Worlds => tr(lang, "inst.worlds"),
+            InstanceSubTab::Screenshots => tr(lang, "inst.screenshots"),
+            InstanceSubTab::Settings => tr(lang, "inst.settings"),
         }
     }
 }
@@ -141,6 +167,14 @@ impl ContentFolder {
             ContentFolder::Mods => "Mods",
             ContentFolder::Resourcepacks => "Resourcepacks",
             ContentFolder::Shaderpacks => "Shaderpacks",
+        }
+    }
+
+    fn translated_label(self, lang: Language) -> &'static str {
+        match self {
+            ContentFolder::Mods => tr(lang, "content.mods"),
+            ContentFolder::Resourcepacks => tr(lang, "content.resourcepacks"),
+            ContentFolder::Shaderpacks => tr(lang, "content.shaderpacks"),
         }
     }
 }
@@ -253,7 +287,6 @@ pub struct McLauncherApp {
     java_scanning: bool,
 
     show_snapshots: bool,
-    version_search: String,
 
     is_busy: bool,
     game_handle: Option<GameHandle>,
@@ -327,13 +360,23 @@ pub struct McLauncherApp {
 
     toast: Option<ToastMessage>,
 
+    settings: LauncherSettings,
+    discord_rpc: DiscordRpc,
+    rpc_started_at: i64,
+    java_downloading_major: Option<u32>,
+
     tx: Sender<WorkerEvent>,
     rx: Receiver<WorkerEvent>,
     icon_tx: Sender<String>,
 }
 
 impl McLauncherApp {
-    pub fn new(paths: LauncherPaths, profiles: Vec<Profile>, account_store: AccountStore) -> Self {
+    pub fn new(
+        paths: LauncherPaths,
+        profiles: Vec<Profile>,
+        account_store: AccountStore,
+        settings: LauncherSettings,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let (icon_tx, icon_rx) = mpsc::channel::<String>();
         let icon_rx = Arc::new(Mutex::new(icon_rx));
@@ -377,13 +420,12 @@ impl McLauncherApp {
             java_installs: Vec::new(),
             java_scanning: true,
             show_snapshots: false,
-            version_search: String::new(),
             is_busy: false,
             game_handle: None,
             running_profile_id: None,
             launch_started_at: None,
             progress: 0.0,
-            status_text: "Ready".to_string(),
+            status_text: String::new(),
             logs: VecDeque::with_capacity(MAX_LOG_LINES),
             log_search: String::new(),
             log_errors_only: false,
@@ -437,6 +479,10 @@ impl McLauncherApp {
             cmd_palette_category: PaletteCategory::All,
             cmd_palette_just_opened: false,
             toast: None,
+            settings,
+            discord_rpc: DiscordRpc::spawn(),
+            rpc_started_at: unix_now_secs(),
+            java_downloading_major: None,
             tx,
             rx,
             icon_tx,
@@ -445,6 +491,7 @@ impl McLauncherApp {
         app.scan_java();
         app.sync_installed_index();
         app.trigger_modrinth_search(false);
+        app.sync_discord_presence();
         app
     }
 
@@ -453,6 +500,67 @@ impl McLauncherApp {
         self.toast = Some(ToastMessage {
             text: text.into(),
             created_at: now,
+        });
+    }
+
+    fn current_discord_kind(&self) -> DiscordActivityKind {
+        if let Some(rid) = &self.running_profile_id {
+            if let Some(p) = self.profiles.iter().find(|p| &p.id == rid) {
+                return DiscordActivityKind::Playing {
+                    instance: p.name.clone(),
+                    version: p.version_id.clone(),
+                    loader: p.loader.kind().label().to_string(),
+                };
+            }
+        }
+        match self.nav_page {
+            NavPage::Library | NavPage::Settings => DiscordActivityKind::InLauncher,
+            NavPage::Discover => DiscordActivityKind::BrowsingModrinth,
+            NavPage::Instance => {
+                let name = self
+                    .profiles
+                    .get(self.selected_idx)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "Instance".to_string());
+                DiscordActivityKind::ConfiguringInstance { name }
+            }
+            NavPage::Console => DiscordActivityKind::Console,
+            NavPage::Accounts => DiscordActivityKind::Accounts,
+        }
+    }
+
+    fn sync_discord_presence(&self) {
+        self.discord_rpc.update(PresenceState {
+            enabled: self.settings.discord_rpc_enabled,
+            language: self.settings.language,
+            kind: self.current_discord_kind(),
+            started_at: self.rpc_started_at,
+            client_id: self.settings.discord_client_id.trim().to_string(),
+        });
+    }
+
+    fn download_java_version(&mut self, major: u32) {
+        if self.java_downloading_major.is_some() {
+            return;
+        }
+        self.java_downloading_major = Some(major);
+        let paths = self.paths.clone();
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            match download_java_major(&paths, major, Some(&tx)) {
+                Ok(bin) => {
+                    let _ = tx.send(WorkerEvent::Log(format!(
+                        "[Java] Ready: Java {major} at {}",
+                        bin.display()
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(WorkerEvent::Log(format!(
+                        "[Java ERROR] Failed to download Java {major}: {e}"
+                    )));
+                }
+            }
+            let _ = tx.send(WorkerEvent::JavaDetected(detect_java_installations()));
         });
     }
 
@@ -465,6 +573,7 @@ impl McLauncherApp {
             } else if page == NavPage::Discover {
                 self.sync_discover_for_profile();
             }
+            self.sync_discord_presence();
         }
     }
 
@@ -710,7 +819,7 @@ impl McLauncherApp {
                     &profile_clone.version_id,
                     &profile_clone.loader,
                     manifest.as_ref(),
-                    &|req| resolve_java_binary(&profile_clone, req),
+                    &|req| ensure_java_runtime(&paths, &profile_clone, req, Some(&tx)),
                     &tx,
                 )?;
                 launch_game(
@@ -784,6 +893,7 @@ impl McLauncherApp {
                 }
                 WorkerEvent::JavaDetected(installs) => {
                     self.java_scanning = false;
+                    self.java_downloading_major = None;
                     self.java_installs = installs;
                 }
                 WorkerEvent::Progress { stage, fraction } => {
@@ -814,6 +924,8 @@ impl McLauncherApp {
                             self.status_text = "Minecraft running".to_string();
                             self.push_log("[Launcher] Minecraft process started".to_string());
                             self.show_toast(ctx, "Game launched");
+                            self.scan_java();
+                            self.sync_discord_presence();
                         }
                         Err(e) => {
                             self.running_profile_id = None;
@@ -822,6 +934,7 @@ impl McLauncherApp {
                             self.status_text = format!("Error: {e}");
                             self.push_log(format!("[Launcher ERROR] {e}"));
                             self.show_toast(ctx, format!("Launch failed: {e}"));
+                            self.sync_discord_presence();
                         }
                     }
                 }
@@ -845,6 +958,7 @@ impl McLauncherApp {
                     };
                     self.status_text = msg.clone();
                     self.push_log(format!("[Launcher] {msg}"));
+                    self.sync_discord_presence();
                 }
                 WorkerEvent::MsDeviceCodeReady(res) => match res {
                     Ok(info) => {
@@ -1117,7 +1231,7 @@ impl McLauncherApp {
                     .active_account()
                     .map(|a| {
                         let col = match a.kind {
-                            AccountKind::Microsoft { .. } => ACCENT,
+                            AccountKind::Microsoft { .. } => accent(),
                             AccountKind::ElyBy { .. } => INFO,
                             AccountKind::Offline => TEXT_SECONDARY,
                         };
@@ -1202,12 +1316,12 @@ impl McLauncherApp {
             let brand_hov_prev = ui.ctx().data_mut(|d| d.get_temp::<bool>(brand_id).unwrap_or(false));
             let brand_ht = ui.ctx().animate_bool_with_time(brand_id, brand_hov_prev, 0.14);
             let brand_fill = if brand_ht > 0.01 {
-                with_alpha(ACCENT, (brand_ht * 16.0) as u8)
+                with_alpha(accent(), (brand_ht * 16.0) as u8)
             } else {
                 Color32::TRANSPARENT
             };
             let brand_stroke = if brand_ht > 0.01 {
-                Stroke::new(1.0_f32, with_alpha(ACCENT, (brand_ht * 110.0) as u8))
+                Stroke::new(1.0_f32, with_alpha(accent(), (brand_ht * 110.0) as u8))
             } else {
                 Stroke::NONE
             };
@@ -1235,7 +1349,7 @@ impl McLauncherApp {
                         clipped.circle_filled(
                             Pos2::new(text_x + 3.0, row_rect.top() + 26.5),
                             2.5,
-                            ACCENT,
+                            accent(),
                         );
                         clipped.text(
                             Pos2::new(text_x + 10.0, row_rect.top() + 26.5),
@@ -1306,7 +1420,7 @@ impl McLauncherApp {
 
                             let bg = lerp_color(
                                 lerp_color(Color32::TRANSPARENT, BG_CARD, hover_t),
-                                BG_CARD_ACTIVE,
+                                bg_card_active(),
                                 active_t,
                             );
                             let painter = ui.painter();
@@ -1315,7 +1429,7 @@ impl McLauncherApp {
                                 painter.rect_stroke(
                                     rect,
                                     Rounding::same(8.0),
-                                    Stroke::new(1.0_f32, with_alpha(ACCENT, (active_t * 95.0) as u8)),
+                                    Stroke::new(1.0_f32, with_alpha(accent(), (active_t * 95.0) as u8)),
                                 );
                             }
 
@@ -1323,7 +1437,7 @@ impl McLauncherApp {
                                 lerp_color(TEXT_SECONDARY, PURE_WHITE, active_t.max(hover_t * 0.7));
                             let icon_col = lerp_color(
                                 lerp_color(TEXT_MUTED, TEXT_SECONDARY, hover_t),
-                                ACCENT,
+                                accent(),
                                 active_t,
                             );
                             let slide_x = if compact || rect.width() < 64.0 {
@@ -1344,7 +1458,7 @@ impl McLauncherApp {
                                     let dot_col = if self.log_error_count > 0 {
                                         DANGER
                                     } else {
-                                        ACCENT
+                                        accent()
                                     };
                                     painter.circle_filled(
                                         Pos2::new(rect.right() - 7.0, rect.top() + 7.0),
@@ -1357,7 +1471,7 @@ impl McLauncherApp {
                                 clipped.text(
                                     Pos2::new(rect.left() + 38.0 + slide_x, rect.center().y),
                                     egui::Align2::LEFT_CENTER,
-                                    page.label(),
+                                    page.translated_label(self.settings.language),
                                     egui::FontId::proportional(13.5),
                                     fg,
                                 );
@@ -1375,7 +1489,7 @@ impl McLauncherApp {
                                             pill,
                                             Rounding::same(6.0),
                                             if is_active {
-                                                ACCENT_DIM
+                                                accent_dim()
                                             } else {
                                                 Color32::from_rgb(30, 34, 42)
                                             },
@@ -1385,7 +1499,7 @@ impl McLauncherApp {
                                             egui::Align2::CENTER_CENTER,
                                             label,
                                             egui::FontId::proportional(10.5),
-                                            if is_active { ACCENT } else { TEXT_MUTED },
+                                            if is_active { accent() } else { TEXT_MUTED },
                                         );
                                     }
                                     NavPage::Instance => {
@@ -1405,7 +1519,7 @@ impl McLauncherApp {
                                                 pill,
                                                 Rounding::same(6.0),
                                                 if is_active {
-                                                    ACCENT_DIM
+                                                    accent_dim()
                                                 } else {
                                                     Color32::from_rgb(30, 34, 42)
                                                 },
@@ -1415,7 +1529,7 @@ impl McLauncherApp {
                                                 egui::Align2::CENTER_CENTER,
                                                 text,
                                                 egui::FontId::proportional(10.5),
-                                                if is_active { ACCENT } else { TEXT_MUTED },
+                                                if is_active { accent() } else { TEXT_MUTED },
                                             );
                                         }
                                     }
@@ -1448,10 +1562,10 @@ impl McLauncherApp {
                                                 4.0 + pulse * 1.5,
                                                 Stroke::new(
                                                     1.0_f32,
-                                                    with_alpha(ACCENT, (120.0 * (1.0 - pulse * 0.5)) as u8),
+                                                    with_alpha(accent(), (120.0 * (1.0 - pulse * 0.5)) as u8),
                                                 ),
                                             );
-                                            painter.circle_filled(dot_c, 3.2, ACCENT);
+                                            painter.circle_filled(dot_c, 3.2, accent());
                                             ui.ctx().request_repaint();
                                         }
                                     }
@@ -1483,7 +1597,7 @@ impl McLauncherApp {
                                 Pos2::new(active_nav_rect.left() + 2.5, anim_y),
                                 Vec2::new(3.2, 18.0),
                             );
-                            ui.painter().rect_filled(bar, Rounding::same(1.6), ACCENT);
+                            ui.painter().rect_filled(bar, Rounding::same(1.6), accent());
                         }
 
                         let expand_t = ui.ctx().animate_bool_with_time(
@@ -1543,7 +1657,7 @@ impl McLauncherApp {
                             hdr_clip.text(
                                 Pos2::new(hdr_slide.left() + 4.0, hdr_slide.center().y),
                                 egui::Align2::LEFT_CENTER,
-                                "QUICK SWITCH",
+                                tr(self.settings.language, "side.quick_switch"),
                                 egui::FontId::proportional(11.0),
                                 scale_alpha(TEXT_MUTED, expand_t),
                             );
@@ -1593,15 +1707,15 @@ impl McLauncherApp {
                                     ui.ctx().request_repaint();
                                 }
                                 let bg = if sel {
-                                    ACCENT_DIM
+                                    accent_dim()
                                 } else {
                                     lerp_color(Color32::TRANSPARENT, BG_CARD, hov_t)
                                 };
-                                let border = if sel { ACCENT } else { Color32::TRANSPARENT };
+                                let border = if sel { accent() } else { Color32::TRANSPARENT };
                                 let (_, loader_dot_col, _) = loader_colors(p.loader.kind());
-                                let dot_col = if is_running { ACCENT } else { loader_dot_col };
+                                let dot_col = if is_running { accent() } else { loader_dot_col };
                                 let fg = if is_running {
-                                    ACCENT
+                                    accent()
                                 } else if sel {
                                     Color32::from_rgb(168, 250, 202)
                                 } else {
@@ -1818,19 +1932,19 @@ impl McLauncherApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let is_running = self.game_handle.is_some();
-                let compact_btn = btn_w < 130.0;
+                let _compact_btn = btn_w < 130.0;
                 let (btn_text, icon, enabled, stop_style, pulsing) = if self.is_busy {
                     (
-                        if compact_btn { "WAIT..." } else { "LOADING..." },
+                        tr(self.settings.language, "top.loading"),
                         None,
                         false,
                         false,
                         true,
                     )
                 } else if is_running {
-                    ("STOP", Some(Icon::Stop), true, true, true)
+                    (tr(self.settings.language, "top.stop"), Some(Icon::Stop), true, true, true)
                 } else {
-                    ("PLAY", Some(Icon::Play), true, false, false)
+                    (tr(self.settings.language, "top.play"), Some(Icon::Play), true, false, false)
                 };
 
                 if primary_action_button(
@@ -1857,7 +1971,7 @@ impl McLauncherApp {
                         .active_account()
                         .map(|a| {
                             let col = match a.kind {
-                                AccountKind::Microsoft { .. } => ACCENT,
+                                AccountKind::Microsoft { .. } => accent(),
                                 AccountKind::ElyBy { .. } => INFO,
                                 AccountKind::Offline => TEXT_SECONDARY,
                             };
@@ -1924,7 +2038,7 @@ impl McLauncherApp {
                             ui,
                             "topbar_cmd_palette_btn",
                             Some(Icon::Search),
-                            "Search • Ctrl+K",
+                            tr(self.settings.language, "top.search"),
                             ButtonVariant::Subtle,
                             true,
                             34.0,
@@ -1968,9 +2082,8 @@ impl McLauncherApp {
         } else {
             let avail_w = ui.available_width();
             let show_console_btn = avail_w >= 360.0;
-            let show_author_credit = avail_w >= 660.0;
-            let right_w = if show_author_credit {
-                360.0
+            let right_w = if avail_w >= 540.0 {
+                240.0
             } else if show_console_btn {
                 110.0
             } else {
@@ -1992,18 +2105,23 @@ impl McLauncherApp {
                                 3.8 + pulse * 1.4,
                                 Stroke::new(
                                     1.0_f32,
-                                    with_alpha(ACCENT, (120.0 * (1.0 - pulse * 0.5)) as u8),
+                                    with_alpha(accent(), (120.0 * (1.0 - pulse * 0.5)) as u8),
                                 ),
                             );
-                            ui.painter().circle_filled(dot.center(), 3.5, ACCENT);
+                            ui.painter().circle_filled(dot.center(), 3.5, accent());
                             ui.ctx().request_repaint();
                         } else {
                             ui.painter()
                                 .circle_filled(dot.center(), 3.5, Color32::from_rgb(82, 92, 108));
                         }
+                        let status_display = if self.status_text == "Ready" {
+                            tr(self.settings.language, "status.ready")
+                        } else {
+                            self.status_text.as_str()
+                        };
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(&self.status_text)
+                                egui::RichText::new(status_display)
                                     .small()
                                     .color(TEXT_SECONDARY),
                             )
@@ -2024,9 +2142,17 @@ impl McLauncherApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let log_lbl = if self.log_error_count > 0 {
-                            format!("Logs ({}!)", self.log_error_count)
+                            format!(
+                                "{} ({}!)",
+                                tr(self.settings.language, "bar.logs"),
+                                self.log_error_count
+                            )
                         } else {
-                            format!("Logs ({})", self.logs.len())
+                            format!(
+                                "{} ({})",
+                                tr(self.settings.language, "bar.logs"),
+                                self.logs.len()
+                            )
                         };
                         let log_variant = if self.log_error_count > 0 {
                             ButtonVariant::Danger
@@ -2061,13 +2187,6 @@ impl McLauncherApp {
                                 open_active_inst = true;
                             }
                         }
-                        if show_author_credit {
-                            ui.label(
-                                egui::RichText::new("by svarka (@svarkawm)")
-                                    .small()
-                                    .color(TEXT_MUTED),
-                            );
-                        }
                     });
                     if open_active_inst {
                         self.switch_page(ui.ctx(), NavPage::Instance);
@@ -2078,10 +2197,11 @@ impl McLauncherApp {
     }
 
     fn render_library_page(&mut self, ui: &mut egui::Ui) {
+        let lang = self.settings.language;
         let avail_w = ui.available_width();
         let wide_hdr = avail_w >= 540.0;
         ui_toolbar_row(ui, 30.0, |ui| {
-            ui.heading(egui::RichText::new("Instances").size(21.0).color(PURE_WHITE));
+            ui.heading(egui::RichText::new(tr(lang, "lib.title")).size(21.0).color(PURE_WHITE));
             badge(ui, &format!("{}", self.profiles.len()), false);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -2089,7 +2209,7 @@ impl McLauncherApp {
                     ui,
                     "new_instance_btn",
                     Some(Icon::Plus),
-                    "Create",
+                    tr(lang, "btn.create"),
                     ButtonVariant::Primary,
                     true,
                     30.0,
@@ -2103,7 +2223,7 @@ impl McLauncherApp {
                         ui,
                         "lib_search_w",
                         &mut self.library_search,
-                        "Search instances...",
+                        tr(lang, "lib.search"),
                         210.0,
                     );
                 }
@@ -2117,7 +2237,7 @@ impl McLauncherApp {
                     ui,
                     "lib_search_n",
                     &mut self.library_search,
-                    "Search instances...",
+                    tr(lang, "lib.search"),
                     (avail_w - 10.0).max(120.0),
                 );
             });
@@ -2131,9 +2251,21 @@ impl McLauncherApp {
             let vanilla_cnt = total_cnt.saturating_sub(modded_cnt);
             ui_wrap_row(ui, 30.0, |ui| {
                 for (f, key, lbl) in [
-                    (LibraryFilter::All, "all", format!("All ({total_cnt})")),
-                    (LibraryFilter::Modded, "modded", format!("Modded ({modded_cnt})")),
-                    (LibraryFilter::Vanilla, "vanilla", format!("Vanilla ({vanilla_cnt})")),
+                    (
+                        LibraryFilter::All,
+                        "all",
+                        format!("{} ({total_cnt})", tr(lang, "lib.all")),
+                    ),
+                    (
+                        LibraryFilter::Modded,
+                        "modded",
+                        format!("{} ({modded_cnt})", tr(lang, "lib.modded")),
+                    ),
+                    (
+                        LibraryFilter::Vanilla,
+                        "vanilla",
+                        format!("{} ({vanilla_cnt})", tr(lang, "lib.vanilla")),
+                    ),
                 ] {
                     if ui_pill_tab(ui, ("lib_filter", key), &lbl, self.library_filter == f)
                         .clicked()
@@ -2143,18 +2275,26 @@ impl McLauncherApp {
                 }
                 egui::ComboBox::from_id_salt("lib_sort_combo")
                     .selected_text(match self.library_sort {
-                        LibrarySort::Recent => "Sort: Recent",
-                        LibrarySort::Name => "Sort: Name",
-                        LibrarySort::Playtime => "Sort: Playtime",
+                        LibrarySort::Recent => tr(lang, "lib.sort_recent"),
+                        LibrarySort::Name => tr(lang, "lib.sort_name"),
+                        LibrarySort::Playtime => tr(lang, "lib.sort_playtime"),
                     })
                     .width(136.0)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.library_sort, LibrarySort::Recent, "Recent");
-                        ui.selectable_value(&mut self.library_sort, LibrarySort::Name, "Name (A-Z)");
+                        ui.selectable_value(
+                            &mut self.library_sort,
+                            LibrarySort::Recent,
+                            tr(lang, "lib.sort_recent"),
+                        );
+                        ui.selectable_value(
+                            &mut self.library_sort,
+                            LibrarySort::Name,
+                            tr(lang, "lib.sort_name"),
+                        );
                         ui.selectable_value(
                             &mut self.library_sort,
                             LibrarySort::Playtime,
-                            "Playtime",
+                            tr(lang, "lib.sort_playtime"),
                         );
                     });
                 if ui_icon_button(
@@ -2244,19 +2384,19 @@ impl McLauncherApp {
                                 ui.set_max_width(text_w);
                                 ui_wrap_row(ui, 20.0, |ui| {
                                     ui.label(
-                                        egui::RichText::new("ACTIVE INSTANCE")
+                                        egui::RichText::new(tr(lang, "lib.active_instance"))
                                             .size(9.5)
                                             .strong()
-                                            .color(ACCENT),
+                                            .color(accent()),
                                     );
                                     if is_running {
-                                        badge(ui, "Running", true);
+                                        badge(ui, tr(lang, "lib.running"), true);
                                     } else if cached {
-                                        badge(ui, "Ready", true);
+                                        badge(ui, tr(lang, "lib.ready"), true);
                                     }
                                     if let Some(rel) = format_relative_time(cur.last_played.as_deref()) {
                                         ui.label(
-                                            egui::RichText::new(format!("• Played {rel}"))
+                                            egui::RichText::new(format!("• {} {rel}", tr(lang, "lib.played_rel")))
                                                 .size(10.5)
                                                 .color(TEXT_MUTED),
                                         );
@@ -2274,17 +2414,21 @@ impl McLauncherApp {
                                 ui_wrap_row(ui, 22.0, |ui| {
                                     badge(ui, &cur.version_id, false);
                                     loader_badge(ui, cur.loader.kind(), &cur.loader.label());
-                                    badge(ui, &format!("{enabled_mods}/{total_mods} mods"), false);
-                                    badge(ui, &format!("{} MB RAM", cur.max_ram_mb), false);
+                                    badge(ui, &format!("{enabled_mods}/{total_mods} {}", tr(lang, "lib.mods_count")), false);
+                                    badge(ui, &format!("{} {}", cur.max_ram_mb, tr(lang, "lib.mb_ram")), false);
                                     if cur.playtime_secs > 0 {
                                         badge(
                                             ui,
-                                            &format!("{} played", format_playtime(cur.playtime_secs)),
+                                            &format!("{} {}", format_playtime(cur.playtime_secs), tr(lang, "lib.played")),
                                             false,
                                         );
                                     }
                                     if let Some(acc) = self.active_account() {
-                                        badge(ui, &format!("Player: {}", acc.username), false);
+                                        badge(
+                                            ui,
+                                            &format!("{}: {}", tr(lang, "lib.player"), acc.username),
+                                            false,
+                                        );
                                     }
                                 });
                             });
@@ -2298,7 +2442,11 @@ impl McLauncherApp {
                                 ui,
                                 "hero_play_btn",
                                 Some(if is_running { Icon::Stop } else { Icon::Play }),
-                                if is_running { "Stop" } else { "Launch" },
+                                if is_running {
+                                    tr(lang, "btn.stop")
+                                } else {
+                                    tr(lang, "btn.launch")
+                                },
                                 if is_running {
                                     ButtonVariant::Danger
                                 } else {
@@ -2319,7 +2467,7 @@ impl McLauncherApp {
                                 ui,
                                 "hero_discover_btn",
                                 Some(Icon::Compass),
-                                "Add Content",
+                                tr(lang, "btn.add_content"),
                                 ButtonVariant::Secondary,
                                 true,
                                 30.0,
@@ -2332,7 +2480,7 @@ impl McLauncherApp {
                                 ui,
                                 "hero_mods_btn",
                                 Some(Icon::Layers),
-                                "Content",
+                                tr(lang, "inst.content"),
                                 ButtonVariant::Subtle,
                                 true,
                                 30.0,
@@ -2345,7 +2493,7 @@ impl McLauncherApp {
                                 ui,
                                 "hero_cfg_btn",
                                 Some(Icon::Sliders),
-                                "Settings",
+                                tr(lang, "inst.settings_btn"),
                                 ButtonVariant::Subtle,
                                 true,
                                 30.0,
@@ -2358,7 +2506,7 @@ impl McLauncherApp {
                                 ui,
                                 "hero_console_btn",
                                 Some(Icon::Terminal),
-                                "Console",
+                                tr(lang, "nav.console"),
                                 ButtonVariant::Subtle,
                                 true,
                                 30.0,
@@ -2459,13 +2607,13 @@ impl McLauncherApp {
                     ui.set_max_width(inner_w);
                     ui_wrap_row(ui, 30.0, |ui| {
                         ui.label(
-                            egui::RichText::new("No instances match your filter.")
+                            egui::RichText::new(tr(lang, "lib.no_match"))
                                 .color(TEXT_SECONDARY),
                         );
                         if ui_button(
                             ui,
                             "lib_clear_filters",
-                            "Reset filters",
+                            tr(self.settings.language, "btn.reset_filters"),
                             ButtonVariant::Secondary,
                             true,
                             30.0,
@@ -2525,14 +2673,15 @@ impl McLauncherApp {
                                             badge(ui, &p.version_id, false);
                                             loader_badge(ui, p.loader.kind(), p.loader.short_name());
                                             if selected {
-                                                badge(ui, "Active", true);
+                                                badge(ui, tr(lang, "acc.active"), true);
                                             }
                                         });
-                                        let mut meta = format!("{enabled_mods}/{total_mods} mods");
+                                        let mut meta = format!("{enabled_mods}/{total_mods} {}", tr(lang, "lib.mods_count"));
                                         if p.playtime_secs > 0 {
                                             meta.push_str(&format!(
-                                                " • {} played",
-                                                format_playtime(p.playtime_secs)
+                                                " • {} {}",
+                                                format_playtime(p.playtime_secs),
+                                                tr(lang, "lib.played")
                                             ));
                                         }
                                         if let Some(rel) = format_relative_time(p.last_played.as_deref()) {
@@ -2618,7 +2767,7 @@ impl McLauncherApp {
                                     ui,
                                     ("list_play", &p.id),
                                     Some(Icon::Play),
-                                    "Play",
+                                    tr(lang, "btn.play"),
                                     if selected {
                                         ButtonVariant::Primary
                                     } else {
@@ -2695,17 +2844,17 @@ impl McLauncherApp {
                                                         p.loader.short_name(),
                                                     );
                                                     if selected {
-                                                        badge(ui, "Active", true);
+                                                        badge(ui, tr(lang, "acc.active"), true);
                                                     }
                                                 });
                                                 let mut sub = if is_running {
-                                                    "Running now".to_string()
+                                                    tr(lang, "lib.running").to_string()
                                                 } else if total_mods == 0 {
-                                                    "0 mods".to_string()
+                                                    format!("0 {}", tr(lang, "lib.mods_count"))
                                                 } else if enabled_mods == total_mods {
-                                                    format!("{total_mods} mods")
+                                                    format!("{total_mods} {}", tr(lang, "lib.mods_count"))
                                                 } else {
-                                                    format!("{enabled_mods}/{total_mods} mods")
+                                                    format!("{enabled_mods}/{total_mods} {}", tr(lang, "lib.mods_count"))
                                                 };
                                                 if !is_running {
                                                     if p.playtime_secs > 0 {
@@ -2725,7 +2874,7 @@ impl McLauncherApp {
                                                         egui::RichText::new(sub)
                                                             .small()
                                                             .color(if is_running {
-                                                                ACCENT
+                                                                accent()
                                                             } else {
                                                                 TEXT_MUTED
                                                             }),
@@ -2754,8 +2903,12 @@ impl McLauncherApp {
                                         } else {
                                             ButtonVariant::Secondary
                                         };
-                                        let play_lbl = if inner_w < 240.0 { "" } else { "Play" };
-                                        let mods_lbl = if inner_w < 200.0 { "" } else { "Mods" };
+                                        let play_lbl = if inner_w < 240.0 {
+                                            ""
+                                        } else {
+                                            tr(lang, "btn.play")
+                                        };
+                                        let mods_lbl = if inner_w < 200.0 { "" } else { tr(lang, "content.mods") };
                                         if ui_button_icon(
                                             ui,
                                             ("card_play", &p.id),
@@ -2935,7 +3088,7 @@ impl McLauncherApp {
         }
 
         let profile = self.profiles[self.selected_idx].clone();
-        let wide = ui.available_width() >= 520.0;
+        let wide = ui.available_width() >= 760.0;
         if wide {
             ui_toolbar_row(ui, 30.0, |ui| {
                 let (av_r, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
@@ -2957,7 +3110,7 @@ impl McLauncherApp {
                         ui,
                         "inst_mr_btn",
                         Some(Icon::Compass),
-                        "Discover",
+                        tr(self.settings.language, "nav.discover"),
                         ButtonVariant::Primary,
                         true,
                         30.0,
@@ -2970,7 +3123,7 @@ impl McLauncherApp {
                         ui,
                         "inst_dir_btn",
                         Some(Icon::Folder),
-                        "Open Folder",
+                        tr(self.settings.language, "btn.open_folder"),
                         ButtonVariant::Secondary,
                         true,
                         30.0,
@@ -2978,6 +3131,32 @@ impl McLauncherApp {
                     .clicked()
                     {
                         open_in_file_manager(&instance_dir(&self.paths, &profile));
+                    }
+                    if ui_button_icon(
+                        ui,
+                        "inst_export_mrpack_btn",
+                        Some(Icon::Download),
+                        tr(self.settings.language, "btn.export_mrpack"),
+                        ButtonVariant::Secondary,
+                        true,
+                        30.0,
+                    )
+                    .clicked()
+                    {
+                        match export_instance_mrpack(&self.paths, &profile) {
+                            Ok(out_path) => {
+                                self.show_toast(
+                                    ui.ctx(),
+                                    format!("Exported: {}", out_path.display()),
+                                );
+                                if let Some(parent) = out_path.parent() {
+                                    open_in_file_manager(parent);
+                                }
+                            }
+                            Err(e) => {
+                                self.show_toast(ui.ctx(), format!("Export failed: {e}"));
+                            }
+                        }
                     }
                 });
             });
@@ -2988,13 +3167,13 @@ impl McLauncherApp {
                 loader_badge(ui, profile.loader.kind(), &profile.loader.label());
             });
             ui.add_space(4.0);
-            ui_toolbar_row(ui, 30.0, |ui| {
+            ui_wrap_row(ui, 30.0, |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if ui_button_icon(
                     ui,
                     "inst_mr_btn_narrow",
                     Some(Icon::Compass),
-                    "Discover",
+                    tr(self.settings.language, "nav.discover"),
                     ButtonVariant::Primary,
                     true,
                     30.0,
@@ -3007,7 +3186,7 @@ impl McLauncherApp {
                     ui,
                     "inst_dir_btn_narrow",
                     Some(Icon::Folder),
-                    "Folder",
+                    tr(self.settings.language, "btn.folder"),
                     ButtonVariant::Secondary,
                     true,
                     30.0,
@@ -3015,6 +3194,32 @@ impl McLauncherApp {
                 .clicked()
                 {
                     open_in_file_manager(&instance_dir(&self.paths, &profile));
+                }
+                if ui_button_icon(
+                    ui,
+                    "inst_export_mrpack_btn_narrow",
+                    Some(Icon::Download),
+                    tr(self.settings.language, "btn.export_mrpack"),
+                    ButtonVariant::Secondary,
+                    true,
+                    30.0,
+                )
+                .clicked()
+                {
+                    match export_instance_mrpack(&self.paths, &profile) {
+                        Ok(out_path) => {
+                            self.show_toast(
+                                ui.ctx(),
+                                format!("Exported: {}", out_path.display()),
+                            );
+                            if let Some(parent) = out_path.parent() {
+                                open_in_file_manager(parent);
+                            }
+                        }
+                        Err(e) => {
+                            self.show_toast(ui.ctx(), format!("Export failed: {e}"));
+                        }
+                    }
                 }
             });
         }
@@ -3037,12 +3242,12 @@ impl McLauncherApp {
                     ui.ctx().request_repaint();
                 }
                 let bg = if is_active {
-                    BG_CARD_ACTIVE
+                    bg_card_active()
                 } else {
                     lerp_color(Color32::TRANSPARENT, BG_CARD_HOVER, hov_t)
                 };
                 let border = if is_active {
-                    with_alpha(ACCENT, 130)
+                    with_alpha(accent(), 130)
                 } else if hov_t > 0.05 {
                     with_alpha(BORDER_STRONG, (hov_t * 140.0) as u8)
                 } else {
@@ -3053,7 +3258,6 @@ impl McLauncherApp {
                     InstanceSubTab::Worlds => Icon::Grid,
                     InstanceSubTab::Screenshots => Icon::External,
                     InstanceSubTab::Settings => Icon::Sliders,
-                    InstanceSubTab::Versions => Icon::Sparkle,
                 };
                 let count_tag: Option<String> = match tab {
                     InstanceSubTab::Content if profile.loader.is_modded() => {
@@ -3065,11 +3269,10 @@ impl McLauncherApp {
                     }
                     InstanceSubTab::Worlds if worlds_cnt > 0 => Some(format!("{worlds_cnt}")),
                     InstanceSubTab::Screenshots if shots_cnt > 0 => Some(format!("{shots_cnt}")),
-                    InstanceSubTab::Versions => Some(profile.version_id.clone()),
                     _ => None,
                 };
                 let icon_col = if is_active {
-                    ACCENT
+                    accent()
                 } else {
                     lerp_color(TEXT_MUTED, TEXT_PRIMARY, hov_t)
                 };
@@ -3092,13 +3295,15 @@ impl McLauncherApp {
                             draw_icon(ui.painter(), ic_r, tab_icon, icon_col);
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(tab.label()).strong().color(text_col),
+                                    egui::RichText::new(tab.translated_label(self.settings.language))
+                                        .strong()
+                                        .color(text_col),
                                 )
                                 .selectable(false),
                             );
                             if let Some(tag) = count_tag {
                                 egui::Frame::none()
-                                    .fill(if is_active { ACCENT_DIM } else { BG_CARD })
+                                    .fill(if is_active { accent_dim() } else { BG_CARD })
                                     .rounding(Rounding::same(6.0))
                                     .inner_margin(Margin::symmetric(5.0, 1.0))
                                     .show(ui, |ui| {
@@ -3156,7 +3361,7 @@ impl McLauncherApp {
                     Vec2::new((anim_w - 16.0).max(12.0), 2.0),
                 ),
                 Rounding::same(1.0),
-                ACCENT,
+                accent(),
             );
         }
         ui.add_space(2.0);
@@ -3168,7 +3373,6 @@ impl McLauncherApp {
             InstanceSubTab::Worlds => self.render_worlds_tab(ui, &profile),
             InstanceSubTab::Screenshots => self.render_screenshots_tab(ui, &profile),
             InstanceSubTab::Settings => self.render_instance_settings_tab(ui),
-            InstanceSubTab::Versions => self.render_versions_tab(ui),
         }
     }
 
@@ -3178,7 +3382,7 @@ impl McLauncherApp {
         let worlds = list_worlds(&inst);
         ui_toolbar_row(ui, 30.0, |ui| {
             ui.label(
-                egui::RichText::new(format!("{} saved world(s)", worlds.len()))
+                egui::RichText::new(format!("{} {}", worlds.len(), tr(self.settings.language, "inst.saved_worlds")))
                     .small()
                     .color(TEXT_SECONDARY),
             );
@@ -3187,7 +3391,7 @@ impl McLauncherApp {
                     ui,
                     "worlds_open_dir",
                     Some(Icon::Folder),
-                    "Open Saves Folder",
+                    tr(self.settings.language, "btn.open_saves"),
                     ButtonVariant::Secondary,
                     true,
                     28.0,
@@ -3207,7 +3411,7 @@ impl McLauncherApp {
                     ui.set_min_width(card_inner_w);
                     ui.set_max_width(card_inner_w);
                     ui.label(
-                        egui::RichText::new("No worlds saved in this instance yet.")
+                        egui::RichText::new(tr(self.settings.language, "inst.no_worlds"))
                             .color(TEXT_SECONDARY),
                     );
                 });
@@ -3236,7 +3440,7 @@ impl McLauncherApp {
                                 ui,
                                 ("world_open", &w.folder_name),
                                 Some(Icon::Folder),
-                                "Open",
+                                tr(self.settings.language, "btn.open"),
                                 ButtonVariant::Subtle,
                                true,
                                 28.0,
@@ -3268,7 +3472,7 @@ impl McLauncherApp {
                     ui,
                     "shots_open_dir",
                     Some(Icon::Folder),
-                    "Open Screenshots Folder",
+                    tr(self.settings.language, "btn.open_shots"),
                     ButtonVariant::Secondary,
                     true,
                     28.0,
@@ -3288,7 +3492,7 @@ impl McLauncherApp {
                     ui.set_min_width(card_inner_w);
                     ui.set_max_width(card_inner_w);
                     ui.label(
-                        egui::RichText::new("No screenshots captured yet (press F2 in-game).")
+                        egui::RichText::new(tr(self.settings.language, "inst.no_screenshots"))
                             .color(TEXT_SECONDARY),
                     );
                 });
@@ -3313,7 +3517,7 @@ impl McLauncherApp {
                                 ui,
                                 ("shot_open", &shot.filename),
                                 Some(Icon::External),
-                                "Open Image",
+                                tr(self.settings.language, "btn.open_image"),
                                 ButtonVariant::Subtle,
                                 true,
                                 28.0,
@@ -3356,7 +3560,7 @@ impl McLauncherApp {
         ui_wrap_row(ui, 30.0, |ui| {
             for f in ContentFolder::ALL {
                 let count = list_content_items(&inst.join(f.dir_name())).len();
-                let lbl = format!("{} ({count})", f.label());
+                let lbl = format!("{} ({count})", f.translated_label(self.settings.language));
                 let ic = match f {
                     ContentFolder::Mods => Icon::Layers,
                     ContentFolder::Resourcepacks => Icon::Grid,
@@ -3378,7 +3582,7 @@ impl McLauncherApp {
                 ui,
                 "content_open_dir_btn",
                 Some(Icon::Folder),
-                "Open folder",
+                tr(self.settings.language, "btn.open_folder"),
                 ButtonVariant::Subtle,
                 true,
                 28.0,
@@ -3392,7 +3596,7 @@ impl McLauncherApp {
                 ui,
                 "content_get_more_btn",
                 Some(Icon::Compass),
-                "Get More",
+                tr(self.settings.language, "content.get_more"),
                 ButtonVariant::Secondary,
                 true,
                 28.0,
@@ -3407,9 +3611,9 @@ impl McLauncherApp {
                     "content_check_updates_btn",
                     Some(Icon::Refresh),
                     if self.mr_installing {
-                        "Checking..."
+                        tr(self.settings.language, "content.checking")
                     } else {
-                        "Check Updates"
+                        tr(self.settings.language, "btn.check_updates")
                     },
                     ButtonVariant::Secondary,
                     !self.mr_installing,
@@ -3437,13 +3641,13 @@ impl McLauncherApp {
                 ui,
                 "content_search_input",
                 &mut self.content_search,
-                "Filter files...",
+                tr(self.settings.language, "content.filter"),
                 (avail_w * 0.36).clamp(115.0, 230.0),
             );
             if ui_pill_tab(
                 ui,
                 "state_all",
-                &format!("All ({total_count})"),
+                &format!("{} ({total_count})", tr(self.settings.language, "lib.all")),
                 self.content_state_filter == ContentStateFilter::All,
             )
             .clicked()
@@ -3453,7 +3657,7 @@ impl McLauncherApp {
             if ui_pill_tab(
                 ui,
                 "state_on",
-                &format!("Enabled ({enabled_count})"),
+                &format!("{} ({enabled_count})", tr(self.settings.language, "content.enabled")),
                 self.content_state_filter == ContentStateFilter::Enabled,
             )
             .clicked()
@@ -3463,7 +3667,7 @@ impl McLauncherApp {
             if ui_pill_tab(
                 ui,
                 "state_off",
-                &format!("Disabled ({disabled_count})"),
+                &format!("{} ({disabled_count})", tr(self.settings.language, "content.disabled")),
                 self.content_state_filter == ContentStateFilter::Disabled,
             )
             .clicked()
@@ -3474,7 +3678,7 @@ impl McLauncherApp {
                 && ui_button(
                     ui,
                     "bulk_enable_btn",
-                    "Enable all",
+                    tr(self.settings.language, "btn.enable_all"),
                     ButtonVariant::Secondary,
                     true,
                     30.0,
@@ -3490,7 +3694,7 @@ impl McLauncherApp {
                 && ui_button(
                     ui,
                     "bulk_disable_btn",
-                    "Disable all",
+                    tr(self.settings.language, "btn.disable_all"),
                     ButtonVariant::Subtle,
                     true,
                     30.0,
@@ -3513,8 +3717,10 @@ impl McLauncherApp {
                 draw_mini_gauge(ui, "mods_enabled_ratio", ratio, 84.0, 6.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{enabled_count}/{total_count} active • {} total",
-                        format_size(total_bytes)
+                        "{enabled_count}/{total_count} {} • {} {}",
+                        tr(self.settings.language, "content.active"),
+                        format_size(total_bytes),
+                        tr(self.settings.language, "content.total")
                     ))
                     .small()
                     .color(TEXT_MUTED),
@@ -3578,7 +3784,7 @@ impl McLauncherApp {
                             ui,
                             "empty_find_mr_btn",
                             Some(Icon::Compass),
-                            "Browse Modrinth",
+                            tr(self.settings.language, "btn.browse_modrinth"),
                             ButtonVariant::Primary,
                             true,
                             30.0,
@@ -3710,7 +3916,7 @@ impl McLauncherApp {
                                     ui,
                                     ("mod_del", &item.disk_name),
                                     Some(Icon::Trash),
-                                    "Remove",
+                                    tr(self.settings.language, "btn.remove"),
                                     ButtonVariant::Danger,
                                     true,
                                     28.0,
@@ -3817,7 +4023,7 @@ impl McLauncherApp {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui_toolbar_row(ui, 24.0, |ui| {
-                    section_header(ui, "INSTANCE & LOADER");
+                    section_header(ui, tr(self.settings.language, "inst.sec_loader"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         if can_delete
@@ -3825,7 +4031,7 @@ impl McLauncherApp {
                                 ui,
                                 "cfg_del_inst",
                                 Some(Icon::Trash),
-                                "Delete",
+                                tr(self.settings.language, "btn.delete"),
                                 ButtonVariant::Danger,
                                 true,
                                 24.0,
@@ -3838,7 +4044,7 @@ impl McLauncherApp {
                             ui,
                             "cfg_dup_inst",
                             Some(Icon::Duplicate),
-                            "Duplicate",
+                            tr(self.settings.language, "btn.duplicate"),
                             ButtonVariant::Subtle,
                             true,
                             24.0,
@@ -3851,7 +4057,7 @@ impl McLauncherApp {
                             ui,
                             "cfg_open_inst",
                             Some(Icon::Folder),
-                            "Folder",
+                            tr(self.settings.language, "btn.folder"),
                             ButtonVariant::Subtle,
                             true,
                             24.0,
@@ -3869,7 +4075,7 @@ impl McLauncherApp {
                         .num_columns(2)
                         .spacing([16.0, 10.0])
                         .show(ui, |ui| {
-                            ui.label("Instance Name:");
+                            ui.label(tr(self.settings.language, "inst.name"));
                             if ui_text_input(
                                 ui,
                                 "cfg_inst_name_w",
@@ -3884,14 +4090,14 @@ impl McLauncherApp {
                             }
                             ui.end_row();
 
-                            ui.label("Minecraft Version:");
+                            ui.label(tr(self.settings.language, "inst.mc_version"));
                             ui_wrap_row(ui, 30.0, |ui| {
                                 egui::ComboBox::from_id_salt("version_combo")
                                     .selected_text(&profile.version_id)
                                     .width(160.0)
                                     .show_ui(ui, |ui| {
                                         if filtered_versions.is_empty() {
-                                            ui.label("Loading versions...");
+                                            ui.label(tr(self.settings.language, "inst.loading_versions"));
                                         } else {
                                             for vid in &filtered_versions {
                                                 if ui
@@ -3916,12 +4122,12 @@ impl McLauncherApp {
                                     ui,
                                     "cfg_snapshots_w",
                                     &mut self.show_snapshots,
-                                    "Snapshots",
+                                    tr(self.settings.language, "inst.snapshots"),
                                 );
                             });
                             ui.end_row();
 
-                            ui.label("Mod Loader:");
+                            ui.label(tr(self.settings.language, "inst.mod_loader"));
                             if render_loader_kind_pills(ui, "inst_cfg_w", &mut profile.loader) {
                                 changed = true;
                             }
@@ -3944,7 +4150,11 @@ impl McLauncherApp {
                             }
                         });
                 } else {
-                    ui.label(egui::RichText::new("Instance Name:").small().color(TEXT_SECONDARY));
+                    ui.label(
+                        egui::RichText::new(tr(self.settings.language, "inst.name"))
+                            .small()
+                            .color(TEXT_SECONDARY),
+                    );
                     if ui_text_input(ui, "cfg_inst_name_n", &mut profile.name, "My Instance", field_w, false)
                         .changed()
                     {
@@ -3952,14 +4162,18 @@ impl McLauncherApp {
                     }
                     ui.add_space(6.0);
 
-                    ui.label(egui::RichText::new("Minecraft Version:").small().color(TEXT_SECONDARY));
+                    ui.label(
+                        egui::RichText::new(tr(self.settings.language, "inst.mc_version"))
+                            .small()
+                            .color(TEXT_SECONDARY),
+                    );
                     ui_wrap_row(ui, 30.0, |ui| {
                         egui::ComboBox::from_id_salt("version_combo")
                             .selected_text(&profile.version_id)
                             .width(140.0)
                             .show_ui(ui, |ui| {
                                 if filtered_versions.is_empty() {
-                                    ui.label("Loading versions...");
+                                    ui.label(tr(self.settings.language, "inst.loading_versions"));
                                 } else {
                                     for vid in &filtered_versions {
                                         if ui
@@ -3983,12 +4197,16 @@ impl McLauncherApp {
                             ui,
                             "cfg_snapshots_n",
                             &mut self.show_snapshots,
-                            "Snapshots",
+                            tr(self.settings.language, "inst.snapshots"),
                         );
                     });
                     ui.add_space(6.0);
 
-                    ui.label(egui::RichText::new("Mod Loader:").small().color(TEXT_SECONDARY));
+                    ui.label(
+                        egui::RichText::new(tr(self.settings.language, "inst.mod_loader"))
+                            .small()
+                            .color(TEXT_SECONDARY),
+                    );
                     if render_loader_kind_pills(ui, "inst_cfg_n", &mut profile.loader) {
                         changed = true;
                     }
@@ -4022,7 +4240,7 @@ impl McLauncherApp {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui_toolbar_row(ui, 24.0, |ui| {
-                    section_header(ui, "MEMORY ALLOCATION (RAM)");
+                    section_header(ui, tr(self.settings.language, "inst.sec_ram"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         badge(
                             ui,
@@ -4042,7 +4260,7 @@ impl McLauncherApp {
 
                 let slider_w = (field_w - 90.0).max(100.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Max RAM:").small().color(TEXT_SECONDARY));
+                    ui.label(egui::RichText::new(tr(self.settings.language, "inst.max_ram")).small().color(TEXT_SECONDARY));
                     if ui_ram_slider(ui, &mut profile.max_ram_mb, 512..=16384, slider_w).changed()
                     {
                         if profile.min_ram_mb > profile.max_ram_mb {
@@ -4052,7 +4270,7 @@ impl McLauncherApp {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Min RAM:").small().color(TEXT_SECONDARY));
+                    ui.label(egui::RichText::new(tr(self.settings.language, "inst.min_ram")).small().color(TEXT_SECONDARY));
                     let max_cap = profile.max_ram_mb.max(256);
                     if ui_ram_slider(ui, &mut profile.min_ram_mb, 256..=max_cap, slider_w).changed()
                     {
@@ -4097,7 +4315,7 @@ impl McLauncherApp {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui_toolbar_row(ui, 26.0, |ui| {
-                    section_header(ui, "JAVA RUNTIME & JVM FLAGS");
+                    section_header(ui, tr(self.settings.language, "inst.sec_java"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if java_scanning {
                             mono_spinner(ui, 14.0);
@@ -4105,7 +4323,7 @@ impl McLauncherApp {
                             ui,
                             "refresh_java_btn",
                             Some(Icon::Refresh),
-                            "Rescan Java",
+                            tr(self.settings.language, "inst.rescan_java"),
                             ButtonVariant::Secondary,
                             true,
                             24.0,
@@ -4128,10 +4346,14 @@ impl McLauncherApp {
                     ui.add_space(6.0);
                 }
 
-                ui.label(egui::RichText::new("Detected Runtimes:").small().color(TEXT_SECONDARY));
+                ui.label(
+                    egui::RichText::new(tr(self.settings.language, "inst.detected_runtimes"))
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
                 ui_wrap_row(ui, 28.0, |ui| {
                     let is_auto = profile.java_path.trim().is_empty();
-                    if ui_pill_tab(ui, "java_auto_pill", "Auto", is_auto).clicked() {
+                    if ui_pill_tab(ui, "java_auto_pill", tr(self.settings.language, "inst.auto"), is_auto).clicked() {
                         profile.java_path.clear();
                         changed = true;
                     }
@@ -4153,11 +4375,16 @@ impl McLauncherApp {
                     }
                 });
                 ui.add_space(4.0);
+                let java_placeholder = if cfg!(windows) {
+                    r"Auto (or C:\path\to\javaw.exe)"
+                } else {
+                    "Auto (or /usr/bin/java)"
+                };
                 if ui_text_input(
                     ui,
                     "cfg_java_path",
                     &mut profile.java_path,
-                    "Auto (or custom path to java binary)",
+                    java_placeholder,
                     field_w,
                     false,
                 )
@@ -4167,7 +4394,11 @@ impl McLauncherApp {
                 }
 
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("JVM Arguments:").small().color(TEXT_SECONDARY));
+                ui.label(
+                    egui::RichText::new(tr(self.settings.language, "inst.jvm_args"))
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
                 if ui_text_input(
                     ui,
                     "cfg_jvm_args",
@@ -4207,7 +4438,7 @@ impl McLauncherApp {
                         && ui_button(
                             ui,
                             "jvm_preset_clear",
-                            "Clear",
+                            tr(self.settings.language, "btn.clear"),
                             ButtonVariant::Subtle,
                             true,
                             26.0,
@@ -4226,10 +4457,10 @@ impl McLauncherApp {
             card_frame(false, 0.0).show(ui, |ui| {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
-                section_header(ui, "WINDOW, QUICK PLAY & GPU");
+                section_header(ui, tr(self.settings.language, "inst.sec_window"));
                 ui.add_space(6.0);
 
-                ui.label(egui::RichText::new("Game Resolution:").small().color(TEXT_SECONDARY));
+                ui.label(egui::RichText::new(tr(self.settings.language, "inst.game_resolution")).small().color(TEXT_SECONDARY));
                 let cur_res = (profile.window_width, profile.window_height);
                 ui_wrap_row(ui, 28.0, |ui| {
                     for (lbl, dims) in [
@@ -4263,7 +4494,7 @@ impl McLauncherApp {
                     ui,
                     "cfg_fullscreen_chk",
                     &mut profile.fullscreen,
-                    "Launch in Fullscreen (--fullscreen)",
+                    tr(self.settings.language, "inst.fullscreen"),
                 ) {
                     changed = true;
                 }
@@ -4271,13 +4502,13 @@ impl McLauncherApp {
                     ui,
                     "cfg_discrete_gpu_chk",
                     &mut profile.prefer_discrete_gpu,
-                    "Prefer Discrete GPU (DRI_PRIME / NVIDIA Offload)",
+                    tr(self.settings.language, "inst.discrete_gpu"),
                 ) {
                     changed = true;
                 }
                 ui.add_space(6.0);
                 ui.label(
-                    egui::RichText::new("Quick Play Server (IP:Port):")
+                    egui::RichText::new(tr(self.settings.language, "inst.quick_play"))
                         .small()
                         .color(TEXT_SECONDARY),
                 );
@@ -4302,7 +4533,7 @@ impl McLauncherApp {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui_toolbar_row(ui, 22.0, |ui| {
-                    section_header(ui, "ABOUT");
+                    section_header(ui, tr(self.settings.language, "inst.sec_about"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         badge(ui, "MIT License", false);
                     });
@@ -4348,145 +4579,275 @@ impl McLauncherApp {
         }
     }
 
-    fn render_versions_tab(&mut self, ui: &mut egui::Ui) {
-        let avail_w = ui.available_width();
-        ui_wrap_row(ui, 30.0, |ui| {
-            ui_search_input(
-                ui,
-                "versions_search_input",
-                &mut self.version_search,
-                "Filter versions (1.21.4)...",
-                (avail_w * 0.45).clamp(115.0, 240.0),
-            );
-            ui_checkbox(
-                ui,
-                "versions_show_snapshots",
-                &mut self.show_snapshots,
-                "Snapshots",
-            );
-            if ui_button_icon(
-                ui,
-                "versions_refresh_btn",
-                Some(Icon::Refresh),
-                "Refresh",
-                ButtonVariant::Secondary,
-                !self.manifest_loading,
-                30.0,
-            )
-            .clicked()
-            {
-                self.refresh_manifest();
-            }
-            if self.manifest_loading {
-                mono_spinner(ui, 16.0);
-            }
-        });
-        ui.add_space(8.0);
+    fn render_settings_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let lang = self.settings.language;
+        ui.heading(
+            egui::RichText::new(tr(lang, "settings.title"))
+                .size(21.0)
+                .color(PURE_WHITE),
+        );
+        ui.label(
+            egui::RichText::new(tr(lang, "settings.subtitle"))
+                .small()
+                .color(TEXT_SECONDARY),
+        );
+        ui.add_space(10.0);
 
-        if let Some(err) = &self.manifest_error {
-            ui_alert_banner(
-                ui,
-                AlertKind::Error,
-                &format!("Failed to load manifest: {err}"),
-                ui.available_width(),
-            );
-            return;
-        }
-        let Some(manifest) = &self.manifest else {
-            ui.horizontal(|ui| {
-                mono_spinner(ui, 18.0);
-                ui.label("Loading Mojang version list...");
-            });
-            return;
-        };
+        bounded_scroll(ui, "launcher_settings_scroll", |ui| {
+            let card_w = (ui.available_width() - 36.0).max(160.0);
 
-        let latest_release = manifest.latest.release.clone();
-        let query = self.version_search.trim().to_lowercase();
-        let filtered: Vec<_> = manifest
-            .versions
-            .iter()
-            .filter(|v| self.show_snapshots || v.version_type == VersionType::Release)
-            .filter(|v| query.is_empty() || v.id.to_lowercase().contains(&query))
-            .take(150)
-            .collect();
-
-        let mut assign_version: Option<String> = None;
-        bounded_scroll(ui, "versions_list", |ui| {
-            let card_inner_w = (ui.available_width() - 32.0).max(140.0);
-            for v in filtered {
-                let installed = is_version_installed(&self.paths, &v.id);
-                let is_current = self
-                    .profiles
-                    .get(self.selected_idx)
-                    .is_some_and(|p| p.version_id == v.id);
-                let is_latest = v.id == latest_release;
-
-                let row_id = ui.make_persistent_id(("ver_row_card", &v.id));
-                animated_card(ui, row_id, is_current, |ui| {
-                    ui.set_min_width(card_inner_w);
-                    ui.set_max_width(card_inner_w);
-                    ui_toolbar_row(ui, 28.0, |ui| {
-                        ui.label(egui::RichText::new(&v.id).strong().size(14.0).color(PURE_WHITE));
-                        if card_inner_w >= 260.0 {
-                            badge(ui, v.version_type.label(), false);
+            // 1. Language
+            card_frame(false, 0.0).show(ui, |ui| {
+                ui.set_min_width(card_w);
+                ui.set_max_width(card_w);
+                section_header(ui, tr(lang, "settings.lang.title"));
+                ui.label(
+                    egui::RichText::new(tr(lang, "settings.lang.desc"))
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
+                ui.add_space(6.0);
+                ui_wrap_row(ui, 30.0, |ui| {
+                    for option in Language::ALL {
+                        let active = self.settings.language == option;
+                        if ui_pill_tab(
+                            ui,
+                            ("lang_pill", option.code()),
+                            option.label(),
+                            active,
+                        )
+                        .clicked()
+                        {
+                            self.settings.language = option;
+                            let _ = save_launcher_settings(&self.paths, &self.settings);
+                            self.sync_discord_presence();
                         }
-                        if is_latest && card_inner_w >= 330.0 {
-                            badge(ui, "Latest", true);
-                        }
-                        if installed && card_inner_w >= 400.0 {
-                            badge(ui, "Cached", true);
-                        }
-                        if card_inner_w >= 490.0 {
-                            let date_part = v.release_time.get(..10).unwrap_or("");
-                            if !date_part.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(date_part).small().color(TEXT_MUTED),
-                                );
-                            }
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if is_current {
-                                badge_sized(ui, "Selected", true, 28.0, None);
-                            } else if ui_button(
-                                ui,
-                                ("ver_pick_btn", &v.id),
-                                "Select",
-                                ButtonVariant::Secondary,
-                                true,
-                                28.0,
-                            )
-                            .clicked()
-                            {
-                                assign_version = Some(v.id.clone());
-                            }
-                        });
-                    });
+                    }
                 });
-                ui.add_space(4.0);
-            }
-        });
+            });
+            ui.add_space(10.0);
 
-        if let Some(vid) = assign_version {
-            if let Some(p) = self.profiles.get_mut(self.selected_idx) {
-                p.version_id = vid;
-                if let Some(ver_slot) = p.loader.loader_version_mut() {
-                    ver_slot.clear();
+            // 2. Color Palette
+            card_frame(false, 0.0).show(ui, |ui| {
+                ui.set_min_width(card_w);
+                ui.set_max_width(card_w);
+                section_header(ui, tr(lang, "settings.theme.title"));
+                ui.label(
+                    egui::RichText::new(tr(lang, "settings.theme.preset"))
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
+                ui.add_space(6.0);
+                ui_wrap_row(ui, 30.0, |ui| {
+                    for preset in ThemePreset::ALL {
+                        let active = self.settings.theme_preset == preset;
+                        if ui_pill_tab(
+                            ui,
+                            ("theme_preset_pill", preset.label()),
+                            preset.label(),
+                            active,
+                        )
+                        .clicked()
+                        {
+                            self.settings.theme_preset = preset;
+                            set_accent_rgb(self.settings.effective_accent_rgb());
+                            apply_modrinth_theme(ctx);
+                            let _ = save_launcher_settings(&self.paths, &self.settings);
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "settings.theme.custom"))
+                            .small()
+                            .color(TEXT_SECONDARY),
+                    );
+                    if ui
+                        .color_edit_button_srgb(&mut self.settings.custom_accent)
+                        .changed()
+                    {
+                        self.settings.theme_preset = ThemePreset::Custom;
+                        set_accent_rgb(self.settings.effective_accent_rgb());
+                        apply_modrinth_theme(ctx);
+                        let _ = save_launcher_settings(&self.paths, &self.settings);
+                    }
+                });
+            });
+            ui.add_space(10.0);
+
+            // 3. Discord Rich Presence
+            card_frame(false, 0.0).show(ui, |ui| {
+                ui.set_min_width(card_w);
+                ui.set_max_width(card_w);
+                section_header(ui, tr(lang, "settings.discord.title"));
+                if ui_checkbox(
+                    ui,
+                    "discord_rpc_toggle",
+                    &mut self.settings.discord_rpc_enabled,
+                    tr(lang, "settings.discord.enable"),
+                ) {
+                    let _ = save_launcher_settings(&self.paths, &self.settings);
+                    self.sync_discord_presence();
                 }
-                let _ = save_profiles(&self.paths, &self.profiles);
-                self.instance_tab = InstanceSubTab::Settings;
-            }
-            self.sync_discover_for_profile();
-        }
+                ui.add_space(4.0);
+                let kind = self.current_discord_kind();
+                let (details, state_text) = format_presence(self.settings.language, &kind);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "settings.discord.preview"))
+                            .small()
+                            .color(TEXT_MUTED),
+                    );
+                    badge(ui, &format!("{details} • {state_text}"), self.settings.discord_rpc_enabled);
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(tr(lang, "settings.discord.app_id"))
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
+                if ui_text_input(
+                    ui,
+                    "discord_client_id_in",
+                    &mut self.settings.discord_client_id,
+                    "1571137394923667579 (default)",
+                    (card_w - 28.0).clamp(180.0, 360.0),
+                    false,
+                )
+                .changed()
+                {
+                    let _ = save_launcher_settings(&self.paths, &self.settings);
+                    self.sync_discord_presence();
+                }
+                ui.label(
+                    egui::RichText::new(tr(lang, "settings.discord.app_id_hint"))
+                        .small()
+                        .color(TEXT_MUTED),
+                );
+            });
+            ui.add_space(10.0);
+
+            // 4. Java Runtimes Manager
+            card_frame(false, 0.0).show(ui, |ui| {
+                ui.set_min_width(card_w);
+                ui.set_max_width(card_w);
+                section_header(ui, tr(lang, "settings.java.title"));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} ({})",
+                        tr(lang, "settings.java.desc"),
+                        self.paths.root.join("java").display()
+                    ))
+                    .small()
+                    .color(TEXT_SECONDARY),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for major in [8u32, 16, 17, 21, 25] {
+                        let busy_this = self.java_downloading_major == Some(major);
+                        let label = if busy_this {
+                            format!("Java {major}...")
+                        } else {
+                            format!("Java {major}")
+                        };
+                        if ui_button_icon(
+                            ui,
+                            ("dl_java_btn", major),
+                            Some(Icon::Download),
+                            &label,
+                            ButtonVariant::Secondary,
+                            self.java_downloading_major.is_none(),
+                            28.0,
+                        )
+                        .on_hover_text(format!("{} Java {major}", tr(lang, "btn.download")))
+                        .clicked()
+                        {
+                            self.download_java_version(major);
+                        }
+                    }
+                    if ui_button_icon(
+                        ui,
+                        "settings_java_dir",
+                        Some(Icon::Folder),
+                        tr(lang, "btn.open_folder"),
+                        ButtonVariant::Secondary,
+                        true,
+                        28.0,
+                    )
+                    .clicked()
+                    {
+                        open_in_file_manager(&self.paths.root.join("java"));
+                    }
+                });
+                ui.add_space(8.0);
+
+                let mut to_remove: Option<std::path::PathBuf> = None;
+                for (idx, j) in self.java_installs.iter().enumerate() {
+                    let managed = is_managed_java_path(&self.paths, &j.path);
+                    ui.horizontal(|ui| {
+                        badge(ui, &format!("Java {}", j.major), managed);
+                        badge(
+                            ui,
+                            if managed {
+                                tr(lang, "settings.java.managed")
+                            } else {
+                                tr(lang, "settings.java.system")
+                            },
+                            false,
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(j.path.to_string_lossy().as_ref())
+                                    .small()
+                                    .color(TEXT_MUTED),
+                            )
+                            .truncate(),
+                        );
+                        if managed {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui_button(
+                                    ui,
+                                    ("rm_java_btn", idx),
+                                    tr(lang, "btn.remove"),
+                                    ButtonVariant::Danger,
+                                    true,
+                                    26.0,
+                                )
+                                .clicked()
+                                {
+                                    to_remove = Some(j.path.clone());
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(3.0);
+                }
+                if let Some(path) = to_remove {
+                    match remove_managed_java(&self.paths, &path) {
+                        Ok(()) => {
+                            self.show_toast(ctx, "Removed managed Java runtime");
+                            self.scan_java();
+                        }
+                        Err(e) => {
+                            self.show_toast(ctx, format!("Failed to remove Java: {e}"));
+                        }
+                    }
+                }
+            });
+        });
     }
 
     fn render_console_page(&mut self, ui: &mut egui::Ui) {
+        let lang = self.settings.language;
         let is_running = self.game_handle.is_some();
         ui_toolbar_row(ui, 32.0, |ui| {
-            ui.heading(egui::RichText::new("Console").size(21.0).color(PURE_WHITE));
+            ui.heading(egui::RichText::new(tr(lang, "nav.console")).size(21.0).color(PURE_WHITE));
             if is_running {
-                badge(ui, "Live", true);
+                badge(ui, tr(lang, "console.live"), true);
             } else {
-                badge(ui, &format!("{} lines", self.logs.len()), false);
+                badge(ui, &format!("{} {}", self.logs.len(), tr(lang, "console.lines")), false);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -4494,7 +4855,7 @@ impl McLauncherApp {
                     ui,
                     "console_clear_btn",
                     Some(Icon::Trash),
-                    "Clear",
+                    tr(lang, "btn.clear"),
                     ButtonVariant::Subtle,
                     !self.logs.is_empty(),
                     28.0,
@@ -4508,7 +4869,7 @@ impl McLauncherApp {
                     ui,
                     "console_copy_btn",
                     Some(Icon::Copy),
-                    "Copy All",
+                    tr(lang, "btn.copy_all"),
                     ButtonVariant::Secondary,
                     !self.logs.is_empty(),
                     28.0,
@@ -4540,13 +4901,13 @@ impl McLauncherApp {
                 ui,
                 "console_search",
                 &mut self.log_search,
-                "Filter logs...",
+                tr(lang, "console.filter"),
                 (avail_w * 0.42).clamp(130.0, 280.0),
             );
             if ui_pill_tab(
                 ui,
                 "log_all",
-                &format!("All ({total_logs})"),
+                &format!("{} ({total_logs})", tr(lang, "lib.all")),
                 !self.log_errors_only,
             )
             .clicked()
@@ -4556,7 +4917,7 @@ impl McLauncherApp {
             if ui_pill_tab(
                 ui,
                 "log_err",
-                &format!("Warn & Error ({warn_err_count})"),
+                &format!("{} ({warn_err_count})", tr(lang, "console.warn_err")),
                 self.log_errors_only,
             )
             .clicked()
@@ -4567,7 +4928,7 @@ impl McLauncherApp {
                 ui,
                 "console_autoscroll",
                 &mut self.log_auto_scroll,
-                "Auto-scroll",
+                tr(lang, "console.autoscroll"),
             );
         });
 
@@ -4596,7 +4957,7 @@ impl McLauncherApp {
                         draw_icon(ui.painter(), ic_r, Icon::Terminal, TEXT_MUTED);
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new("No logs yet. Launch an instance to stream stdout/stderr here.")
+                            egui::RichText::new(tr(lang, "console.empty"))
                                 .color(TEXT_MUTED),
                         );
                     });
@@ -4705,7 +5066,11 @@ impl McLauncherApp {
 
     fn render_accounts_page(&mut self, ui: &mut egui::Ui) {
         ui_toolbar_row(ui, 32.0, |ui| {
-            ui.heading(egui::RichText::new("Accounts").size(21.0).color(PURE_WHITE));
+            ui.heading(
+                egui::RichText::new(tr(self.settings.language, "nav.accounts"))
+                    .size(21.0)
+                    .color(PURE_WHITE),
+            );
             badge(ui, &format!("{}", self.account_store.accounts.len()), false);
         });
         ui.add_space(8.0);
@@ -4730,7 +5095,7 @@ impl McLauncherApp {
             for acc in &self.account_store.accounts {
                 let is_active = active_id.as_deref() == Some(acc.id.as_str());
                 let acc_col = match acc.kind {
-                    AccountKind::Microsoft { .. } => ACCENT,
+                    AccountKind::Microsoft { .. } => accent(),
                     AccountKind::ElyBy { .. } => INFO,
                     AccountKind::Offline => TEXT_SECONDARY,
                 };
@@ -4753,7 +5118,7 @@ impl McLauncherApp {
                             ui.strong(egui::RichText::new(&acc.username).size(14.5).color(PURE_WHITE));
                             badge(ui, acc.kind_label(), is_active);
                             if is_active {
-                                badge(ui, "Active", true);
+                                badge(ui, tr(self.settings.language, "acc.active"), true);
                             }
                             if let Some(u) = &uuid_short {
                                 if card_inner_w >= 480.0 {
@@ -4787,7 +5152,7 @@ impl McLauncherApp {
                                         && ui_button(
                                             ui,
                                             ("acc_sel", &acc.id),
-                                            "Select",
+                                            tr(self.settings.language, "btn.select"),
                                             ButtonVariant::Secondary,
                                             true,
                                             26.0,
@@ -4807,13 +5172,13 @@ impl McLauncherApp {
                             ui.strong(&acc.username);
                             badge(ui, acc.kind_label(), is_active);
                             if is_active {
-                                badge(ui, "Active", true);
+                                badge(ui, tr(self.settings.language, "acc.active"), true);
                             }
                             if !is_active
                                 && ui_button(
                                     ui,
                                     ("acc_sel", &acc.id),
-                                    "Select",
+                                    tr(self.settings.language, "btn.select"),
                                     ButtonVariant::Secondary,
                                     true,
                                     28.0,
@@ -4862,13 +5227,13 @@ impl McLauncherApp {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui_toolbar_row(ui, 24.0, |ui| {
-                    ui.strong(egui::RichText::new("Microsoft (Licensed)").color(PURE_WHITE));
+                    ui.strong(egui::RichText::new(tr(self.settings.language, "acc.ms_title")).color(PURE_WHITE));
                     badge(ui, "OAuth Device Code", false);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let toggle_lbl = if self.ms_show_custom_id {
-                            "Hide Client ID"
+                            tr(self.settings.language, "acc.hide")
                         } else {
-                            "Custom Client ID"
+                            tr(self.settings.language, "acc.custom_id")
                         };
                         if ui_button(
                             ui,
@@ -4885,13 +5250,13 @@ impl McLauncherApp {
                     });
                 });
                 ui.label(
-                    egui::RichText::new("Secure browser sign-in with a one-time device code.")
+                    egui::RichText::new(tr(self.settings.language, "acc.ms_desc"))
                         .small()
                         .color(TEXT_SECONDARY),
                 );
                 if self.ms_show_custom_id {
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new("Client ID:").small().color(TEXT_SECONDARY));
+                    ui.label(egui::RichText::new(tr(self.settings.language, "acc.client_id")).small().color(TEXT_SECONDARY));
                     ui_text_input(ui, "ms_cid_input", &mut self.ms_client_id, DEFAULT_MS_CLIENT_ID, inner_w, false);
                 }
                 ui.add_space(8.0);
@@ -4900,13 +5265,13 @@ impl McLauncherApp {
                     ui.label(&dc.message);
                     ui.add_space(6.0);
                     ui_wrap_row(ui, 30.0, |ui| {
-                        ui.label("Code:");
+                        ui.label(tr(self.settings.language, "acc.code"));
                         solid_accent_badge(ui, &dc.user_code);
                         if ui_button_icon(
                             ui,
                             "ms_copy_code_btn",
                             Some(Icon::Copy),
-                            "Copy",
+                            tr(self.settings.language, "btn.copy"),
                             ButtonVariant::Secondary,
                             true,
                             30.0,
@@ -4920,7 +5285,7 @@ impl McLauncherApp {
                             ui,
                             "ms_open_browser_btn",
                             Some(Icon::External),
-                            "Open Browser",
+                            tr(self.settings.language, "acc.open_browser"),
                             ButtonVariant::Primary,
                             true,
                             30.0,
@@ -4938,7 +5303,7 @@ impl McLauncherApp {
                             ui,
                             "ms_login_btn",
                             Some(Icon::User),
-                            "Sign in with Microsoft",
+                            tr(self.settings.language, "acc.ms_signin"),
                             ButtonVariant::Primary,
                             !self.ms_busy,
                             30.0,
@@ -4973,32 +5338,32 @@ impl McLauncherApp {
                 });
                 ui.label(
                     egui::RichText::new(
-                        "Skins and Ely.by server authentication are configured automatically on launch.",
+                        tr(self.settings.language, "acc.ely_desc"),
                     )
                     .small()
                     .color(TEXT_SECONDARY),
                 );
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("Username / Email:").small().color(TEXT_SECONDARY));
+                ui.label(egui::RichText::new(tr(self.settings.language, "acc.login_label")).small().color(TEXT_SECONDARY));
                 ui_toolbar_row(ui, 30.0, |ui| {
-                    ui_text_input(ui, "ely_login_in", &mut self.ely_login, "Username or email", inner_w, false);
+                    ui_text_input(ui, "ely_login_in", &mut self.ely_login, tr(self.settings.language, "acc.login_hint"), inner_w, false);
                 });
                 ui.add_space(5.0);
-                ui.label(egui::RichText::new("Password:").small().color(TEXT_SECONDARY));
+                ui.label(egui::RichText::new(tr(self.settings.language, "acc.password")).small().color(TEXT_SECONDARY));
                 ui_toolbar_row(ui, 30.0, |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui_text_input(
                         ui,
                         "ely_pass_in",
                         &mut self.ely_password,
-                        "Password",
+                        tr(self.settings.language, "acc.pass_hint"),
                         (inner_w - 64.0).max(80.0),
                         !self.ely_show_password,
                     );
                     if ui_button(
                         ui,
                         "ely_show_pw",
-                        if self.ely_show_password { "Hide" } else { "Show" },
+                        if self.ely_show_password { tr(self.settings.language, "acc.hide") } else { tr(self.settings.language, "acc.show") },
                         ButtonVariant::Subtle,
                         true,
                         30.0,
@@ -5009,8 +5374,8 @@ impl McLauncherApp {
                     }
                 });
                 ui.add_space(5.0);
-                ui.label(egui::RichText::new("2FA code (optional):").small().color(TEXT_SECONDARY));
-                ui_text_input(ui, "ely_totp_in", &mut self.ely_totp, "If 2FA is enabled", inner_w, false);
+                ui.label(egui::RichText::new(tr(self.settings.language, "acc.2fa_label")).small().color(TEXT_SECONDARY));
+                ui_text_input(ui, "ely_totp_in", &mut self.ely_totp, tr(self.settings.language, "acc.2fa_hint"), inner_w, false);
                 ui.add_space(8.0);
                 ui_toolbar_row(ui, 28.0, |ui| {
                     let ely_valid = !self.ely_busy
@@ -5020,7 +5385,7 @@ impl McLauncherApp {
                         ui,
                         "ely_login_btn",
                         Some(Icon::User),
-                        "Sign in with Ely.by",
+                        tr(self.settings.language, "acc.ely_signin"),
                         ButtonVariant::Secondary,
                         ely_valid,
                         28.0,
@@ -5051,10 +5416,10 @@ impl McLauncherApp {
             card_frame(false, 0.0).show(ui, |ui| {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
-                ui.strong(egui::RichText::new("Offline (Local)").color(PURE_WHITE));
+                ui.strong(egui::RichText::new(tr(self.settings.language, "acc.offline_title")).color(PURE_WHITE));
                 ui.add_space(6.0);
                 ui_wrap_row(ui, 30.0, |ui| {
-                    ui.label("Username:");
+                    ui.label(tr(self.settings.language, "acc.username"));
                     let edit_resp = ui_text_input(
                         ui,
                         "offline_user_in",
@@ -5070,7 +5435,7 @@ impl McLauncherApp {
                         ui,
                         "offline_add_btn",
                         Some(Icon::Plus),
-                        "Add",
+                        tr(self.settings.language, "btn.add"),
                         ButtonVariant::Primary,
                         valid,
                         30.0,
@@ -5104,7 +5469,7 @@ impl McLauncherApp {
                 if is_vanilla_mods {
                     format!("Vanilla {} (no mod loader)", p.version_id)
                 } else {
-                    format!("Only for {} • {}", p.version_id, p.loader.short_name())
+                    format!("{} {} • {}", tr(self.settings.language, "mr.only_for"), p.version_id, p.loader.short_name())
                 }
             })
             .unwrap_or_else(|| "No instance selected".to_string());
@@ -5120,7 +5485,7 @@ impl McLauncherApp {
                     ui,
                     "mr_inst_content_btn",
                     Some(Icon::Layers),
-                    "Instance Content",
+                    tr(self.settings.language, "btn.instance_content"),
                     ButtonVariant::Secondary,
                     true,
                     30.0,
@@ -5140,11 +5505,18 @@ impl McLauncherApp {
                 (ModrinthProjectType::Modpack, Icon::Grid),
                 (ModrinthProjectType::Resourcepack, Icon::Sparkle),
             ] {
+                let pt_lbl = match pt {
+                    ModrinthProjectType::Mod => tr(self.settings.language, "content.mods"),
+                    ModrinthProjectType::Modpack => tr(self.settings.language, "mr.modpacks"),
+                    ModrinthProjectType::Resourcepack => {
+                        tr(self.settings.language, "content.resourcepacks")
+                    }
+                };
                 if ui_pill_tab_icon(
                     ui,
                     ("mr_type_pill", pt.label()),
                     Some(ic),
-                    pt.label(),
+                    pt_lbl,
                     self.mr_type == pt,
                 )
                 .clicked()
@@ -5154,8 +5526,15 @@ impl McLauncherApp {
                     self.trigger_modrinth_search(false);
                 }
             }
+            let lang = self.settings.language;
+            let sort_label = |s: ModrinthSort| match s {
+                ModrinthSort::Relevance => tr(lang, "mr.sort_relevance"),
+                ModrinthSort::Downloads => tr(lang, "mr.sort_downloads"),
+                ModrinthSort::Newest => tr(lang, "mr.sort_newest"),
+                ModrinthSort::Updated => tr(lang, "mr.sort_updated"),
+            };
             egui::ComboBox::from_id_salt("mr_sort_combo")
-                .selected_text(self.mr_sort.label())
+                .selected_text(sort_label(self.mr_sort))
                 .width(136.0)
                 .show_ui(ui, |ui| {
                     for s in [
@@ -5164,7 +5543,7 @@ impl McLauncherApp {
                         ModrinthSort::Newest,
                         ModrinthSort::Updated,
                     ] {
-                        if ui.selectable_value(&mut self.mr_sort, s, s.label()).changed() {
+                        if ui.selectable_value(&mut self.mr_sort, s, sort_label(s)).changed() {
                             self.trigger_modrinth_search(false);
                         }
                     }
@@ -5180,14 +5559,14 @@ impl McLauncherApp {
                 ui,
                 "mr_search_input",
                 &mut self.mr_query,
-                "Search mods, modpacks, resourcepacks...",
+                tr(self.settings.language, "mr.search_placeholder"),
                 search_w,
             );
             if (ui_button_icon(
                 ui,
                 "mr_search_btn",
                 Some(Icon::Search),
-                "Search",
+                tr(self.settings.language, "btn.search"),
                 ButtonVariant::Primary,
                 !self.mr_searching,
                 30.0,
@@ -5202,7 +5581,7 @@ impl McLauncherApp {
                 mono_spinner(ui, 16.0);
             } else if !self.mr_results.is_empty() {
                 ui.label(
-                    egui::RichText::new(format!("{} compatible", self.mr_results.len()))
+                    egui::RichText::new(format!("{} {}", self.mr_results.len(), tr(self.settings.language, "mr.compatible")))
                         .small()
                         .color(TEXT_MUTED),
                 );
@@ -5234,7 +5613,12 @@ impl McLauncherApp {
                 } else {
                     self.mr_query.trim().eq_ignore_ascii_case(topic)
                 };
-                if ui_pill_tab(ui, ("mr_topic", self.mr_type.api_str(), topic), topic, active)
+                let topic_lbl = if topic == "All" {
+                    tr(self.settings.language, "lib.all")
+                } else {
+                    topic
+                };
+                if ui_pill_tab(ui, ("mr_topic", self.mr_type.api_str(), topic), topic_lbl, active)
                     .clicked()
                 {
                     if topic == "All" || active {
@@ -5296,7 +5680,7 @@ impl McLauncherApp {
                                 ui,
                                 "mr_open_inst_settings",
                                 Some(Icon::Sliders),
-                                "Instance Settings",
+                                tr(self.settings.language, "inst.settings_btn"),
                                 ButtonVariant::Primary,
                                 true,
                                 28.0,
@@ -5309,7 +5693,7 @@ impl McLauncherApp {
                     } else {
                         ui.label(
                             egui::RichText::new(
-                                "No compatible projects found for this instance. Try a different search query.",
+                                tr(self.settings.language, "mr.no_results"),
                             )
                             .color(TEXT_MUTED),
                         );
@@ -5332,11 +5716,11 @@ impl McLauncherApp {
                 let btn_lbl = if is_this_installing {
                     "Installing..."
                 } else if mr_type == ModrinthProjectType::Modpack {
-                    "Create Instance"
+                    tr(self.settings.language, "modal.create_instance")
                 } else if is_installed {
-                    "Update"
+                    tr(self.settings.language, "mr.update")
                 } else {
-                    "Install"
+                    tr(self.settings.language, "mr.install")
                 };
                 let btn_variant = if is_installed {
                     ButtonVariant::Secondary
@@ -5438,7 +5822,7 @@ impl McLauncherApp {
                                                 },
                                             );
                                             if is_installed {
-                                                badge(ui, "Installed", true);
+                                                badge(ui, tr(self.settings.language, "mr.installed"), true);
                                             }
                                         });
 
@@ -5633,7 +6017,7 @@ impl McLauncherApp {
                                             },
                                         );
                                         if is_installed {
-                                            badge(ui, "Installed", true);
+                                            badge(ui, tr(self.settings.language, "mr.installed"), true);
                                         }
                                     });
                                     ui.add(
@@ -5707,7 +6091,7 @@ impl McLauncherApp {
                         ui,
                         "mr_load_more_btn",
                         Some(Icon::Plus),
-                        "Load more",
+                        tr(self.settings.language, "btn.load_more"),
                         ButtonVariant::Secondary,
                         !self.mr_searching,
                         30.0,
@@ -5800,7 +6184,7 @@ impl McLauncherApp {
 
         let mut open = self.show_new_modal;
         let max_modal_w = (screen.width() - 32.0).clamp(260.0, 480.0);
-        let win_resp = egui::Window::new("Create New Instance")
+        let win_resp = egui::Window::new(tr(self.settings.language, "modal.create_title"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -5813,7 +6197,7 @@ impl McLauncherApp {
                     .num_columns(2)
                     .spacing([12.0, 10.0])
                     .show(ui, |ui| {
-                        ui.label("Name:");
+                        ui.label(tr(self.settings.language, "modal.name"));
                         let r = ui_text_input(
                             ui,
                             "modal_inst_name",
@@ -5827,7 +6211,7 @@ impl McLauncherApp {
                         }
                         ui.end_row();
 
-                        ui.label("Version:");
+                        ui.label(tr(self.settings.language, "modal.version"));
                         ui_wrap_row(ui, 30.0, |ui| {
                             egui::ComboBox::from_id_salt("new_ver_combo")
                                 .selected_text(&self.new_version)
@@ -5855,12 +6239,12 @@ impl McLauncherApp {
                                 ui,
                                 "modal_snapshots_chk",
                                 &mut self.new_show_snapshots,
-                                "Snapshots",
+                                tr(self.settings.language, "inst.snapshots"),
                             );
                         });
                         ui.end_row();
 
-                        ui.label("Loader:");
+                        ui.label(tr(self.settings.language, "modal.loader"));
                         ui_wrap_row(ui, 28.0, |ui| {
                             for kind in LoaderKind::ALL {
                                 if ui_loader_pill(
@@ -5877,7 +6261,7 @@ impl McLauncherApp {
                         });
                         ui.end_row();
 
-                        ui.label("Memory:");
+                        ui.label(tr(self.settings.language, "modal.memory"));
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 6.0;
                             ui_wrap_row(ui, 28.0, |ui| {
@@ -5912,7 +6296,7 @@ impl McLauncherApp {
                         ui,
                         "modal_create_btn",
                         Some(Icon::Plus),
-                        "Create Instance",
+                        tr(self.settings.language, "modal.create_instance"),
                         ButtonVariant::Primary,
                         name_valid,
                         30.0,
@@ -5939,7 +6323,7 @@ impl McLauncherApp {
                     if ui_button(
                         ui,
                         "modal_cancel_btn",
-                        "Cancel",
+                        tr(self.settings.language, "btn.cancel"),
                         ButtonVariant::Secondary,
                         true,
                         30.0,
@@ -5985,7 +6369,7 @@ impl McLauncherApp {
 
         let mut open = true;
         let max_w = (screen.width() - 32.0).clamp(240.0, 400.0);
-        egui::Window::new("Delete Instance")
+        egui::Window::new(tr(self.settings.language, "modal.delete_title"))
             .order(egui::Order::Foreground)
             .open(&mut open)
             .collapsible(false)
@@ -6015,7 +6399,7 @@ impl McLauncherApp {
                         ui,
                         "confirm_del_yes",
                         Some(Icon::Trash),
-                        "Delete",
+                        tr(self.settings.language, "btn.delete"),
                         ButtonVariant::Danger,
                         true,
                         30.0,
@@ -6040,7 +6424,7 @@ impl McLauncherApp {
                     if ui_button(
                         ui,
                         "confirm_del_cancel",
-                        "Cancel",
+                        tr(self.settings.language, "btn.cancel"),
                         ButtonVariant::Secondary,
                         true,
                         30.0,
@@ -6074,11 +6458,11 @@ impl McLauncherApp {
             let rem_frac = (1.0 - (age / 3.8)).clamp(0.0, 1.0) as f32;
             let is_err = text.to_lowercase().contains("error")
                 || text.to_lowercase().contains("failed");
-            let accent_col = if is_err { DANGER } else { ACCENT };
+            let accent_col = if is_err { DANGER } else { accent() };
             let bg_col = if is_err {
                 Color32::from_rgb(46, 24, 28)
             } else {
-                BG_CARD_ACTIVE
+                bg_card_active()
             };
             let max_w = (ctx.screen_rect().width() - 36.0).clamp(160.0, 420.0);
             ctx.request_repaint();
@@ -6174,7 +6558,7 @@ impl McLauncherApp {
                         box_rect,
                         Rounding::same(14.0),
                         BG_CARD,
-                        Stroke::new(2.0_f32, ACCENT),
+                        Stroke::new(2.0_f32, accent()),
                     );
                     let mut child = ui.new_child(
                         egui::UiBuilder::new()
@@ -6182,10 +6566,10 @@ impl McLauncherApp {
                             .layout(egui::Layout::top_down(egui::Align::Center)),
                     );
                     let (ic_r, _) = child.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
-                    draw_icon(child.painter(), ic_r, Icon::Download, ACCENT);
+                    draw_icon(child.painter(), ic_r, Icon::Download, accent());
                     child.add_space(6.0);
                     child.label(
-                        egui::RichText::new("Drop .jar, .zip, or .mrpack to import")
+                        egui::RichText::new(tr(self.settings.language, "content.drop_hint"))
                             .strong()
                             .size(15.0)
                             .color(PURE_WHITE),
@@ -6338,7 +6722,7 @@ impl McLauncherApp {
 
                 ui_toolbar_row(ui, 26.0, |ui| {
                     ui.label(
-                        egui::RichText::new("COMPATIBLE VERSIONS")
+                        egui::RichText::new(tr(self.settings.language, "mr.compat_versions"))
                             .strong()
                             .small()
                             .color(TEXT_SECONDARY),
@@ -6356,7 +6740,7 @@ impl McLauncherApp {
                             ui.horizontal(|ui| {
                                 mono_spinner(ui, 20.0);
                                 ui.label(
-                                    egui::RichText::new("Loading compatible versions...")
+                                    egui::RichText::new(tr(self.settings.language, "mr.loading_versions"))
                                         .color(TEXT_SECONDARY),
                                 );
                             });
@@ -6438,7 +6822,7 @@ impl McLauncherApp {
                                                         {
                                                             "Create"
                                                         } else {
-                                                            "Install"
+                                                            tr(self.settings.language, "mr.install")
                                                         },
                                                         if ch_accent {
                                                             ButtonVariant::Primary
@@ -6646,20 +7030,11 @@ impl McLauncherApp {
             PaletteItem {
                 category: PaletteCategory::Menus,
                 icon: Icon::Sliders,
-                title: "Instance — Settings (Java, RAM, Window, GPU)".to_string(),
-                subtitle: "Configure memory slider, JVM args, resolution, Quick Play".to_string(),
-                keywords: "settings ram java jvm gpu window server настройки опра память джава",
+                title: "Instance — Settings (Version, Loader, Java, RAM)".to_string(),
+                subtitle: "Configure MC version, loader, memory slider, JVM args, resolution, Quick Play".to_string(),
+                keywords: "settings version loader fabric forge quilt neoforge vanilla ram java jvm gpu window server настройки опра память джава версии лоадер",
                 shortcut: "",
                 action: PaletteAction::InstanceTab(InstanceSubTab::Settings),
-            },
-            PaletteItem {
-                category: PaletteCategory::Menus,
-                icon: Icon::Refresh,
-                title: "Instance — Minecraft Version & Loader".to_string(),
-                subtitle: "Switch MC version or Fabric / Quilt / Forge / NeoForge".to_string(),
-                keywords: "versions loader fabric forge quilt neoforge vanilla версии лоадер",
-                shortcut: "",
-                action: PaletteAction::InstanceTab(InstanceSubTab::Versions),
             },
             PaletteItem {
                 category: PaletteCategory::Menus,
@@ -6843,7 +7218,7 @@ impl McLauncherApp {
                 let mut refocus_input = self.cmd_palette_just_opened || key_tab || key_up || key_down;
                 egui::Frame::none()
                     .fill(BG_INPUT)
-                    .stroke(Stroke::new(1.2_f32, with_alpha(ACCENT, 185)))
+                    .stroke(Stroke::new(1.2_f32, with_alpha(accent(), 185)))
                     .rounding(Rounding::same(9.0))
                     .inner_margin(Margin::symmetric(10.0, 6.0))
                     .show(ui, |ui| {
@@ -6851,7 +7226,7 @@ impl McLauncherApp {
                         ui_toolbar_row(ui, 26.0, |ui| {
                             let (ic_r, _) =
                                 ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
-                            draw_icon(ui.painter(), ic_r, Icon::Search, ACCENT);
+                            draw_icon(ui.painter(), ic_r, Icon::Search, accent());
 
                             let right_reserve = if self.cmd_palette_query.is_empty() {
                                 46.0
@@ -6863,7 +7238,7 @@ impl McLauncherApp {
                                 egui::TextEdit::singleline(&mut self.cmd_palette_query)
                                     .id_salt("cmd_palette_search_edit")
                                     .frame(false)
-                                    .hint_text("Search menus, tabs, instances, actions...")
+                                    .hint_text(tr(self.settings.language, "palette.hint"))
                                     .desired_width(edit_w),
                             );
                             if edit_resp.changed() {
@@ -6944,13 +7319,13 @@ impl McLauncherApp {
                             ui.add_space(16.0);
                             ui.vertical_centered(|ui| {
                                 ui.label(
-                                    egui::RichText::new("No matching menus, instances, or actions.")
+                                    egui::RichText::new(tr(self.settings.language, "palette.empty"))
                                         .color(TEXT_SECONDARY),
                                 );
                                 ui.add_space(4.0);
                                 ui.label(
                                     egui::RichText::new(
-                                        "Try another keyword or press Tab to switch category.",
+                                        tr(self.settings.language, "palette.empty_sub"),
                                     )
                                     .small()
                                     .color(TEXT_MUTED),
@@ -6971,14 +7346,14 @@ impl McLauncherApp {
                                         ic_box,
                                         Rounding::same(7.0),
                                         if is_sel {
-                                            with_alpha(ACCENT, 34)
+                                            with_alpha(accent(), 34)
                                         } else {
                                             BG_INPUT
                                         },
                                         Stroke::new(
                                             1.0_f32,
                                             if is_sel {
-                                                with_alpha(ACCENT, 130)
+                                                with_alpha(accent(), 130)
                                             } else {
                                                 BORDER_SUBTLE
                                             },
@@ -6988,7 +7363,7 @@ impl McLauncherApp {
                                         ui.painter(),
                                         ic_box.shrink(6.0),
                                         it.icon,
-                                        if is_sel { ACCENT } else { TEXT_SECONDARY },
+                                        if is_sel { accent() } else { TEXT_SECONDARY },
                                     );
 
                                     let shortcut_reserve = if it.shortcut.is_empty() { 70.0 } else { 130.0 };
@@ -7364,6 +7739,7 @@ impl eframe::App for McLauncherApp {
                     NavPage::Instance => self.render_instance_page(ui),
                     NavPage::Console => self.render_console_page(ui),
                     NavPage::Accounts => self.render_accounts_page(ui),
+                    NavPage::Settings => self.render_settings_page(ui, ctx),
                 }
             });
 
@@ -7413,7 +7789,7 @@ fn render_loader_version_picker(
     let mut changed = false;
     ui_wrap_row(ui, 30.0, |ui| {
         let label = if loader_version.is_empty() {
-            "Auto (recommended)".to_string()
+            "Auto".to_string()
         } else {
             loader_version.clone()
         };
@@ -7422,7 +7798,7 @@ fn render_loader_version_picker(
             .width(width)
             .show_ui(ui, |ui| {
                 if ui
-                    .selectable_value(loader_version, String::new(), "Auto (recommended)")
+                    .selectable_value(loader_version, String::new(), "Auto")
                     .changed()
                 {
                     changed = true;

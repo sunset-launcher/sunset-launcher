@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod discord;
+mod i18n;
 mod icons;
 mod launcher;
 mod models;
@@ -11,7 +13,7 @@ mod theme;
 mod ui;
 
 use eframe::egui;
-use storage::{get_launcher_paths, load_accounts, load_profiles};
+use storage::{get_launcher_paths, load_accounts, load_launcher_settings, load_profiles};
 use ui::McLauncherApp;
 
 fn main() -> eframe::Result<()> {
@@ -20,6 +22,8 @@ fn main() -> eframe::Result<()> {
     let _ = storage::ensure_linux_desktop_entry(&paths);
     let profiles = load_profiles(&paths);
     let accounts = load_accounts(&paths);
+    let settings = load_launcher_settings(&paths);
+    theme::set_accent_rgb(settings.effective_accent_rgb());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -35,7 +39,9 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             theme::apply_modrinth_theme(&cc.egui_ctx);
-            Ok(Box::new(McLauncherApp::new(paths, profiles, accounts)))
+            Ok(Box::new(McLauncherApp::new(
+                paths, profiles, accounts, settings,
+            )))
         }),
     )
 }

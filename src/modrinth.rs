@@ -1002,6 +1002,130 @@ pub fn parse_mrpack_loader(deps: &HashMap<String, String>) -> Result<(String, Mo
     Ok((mc_version, loader))
 }
 
+/// Exports an instance's loader metadata, mods, resourcepacks, shaderpacks, and configs
+/// into a portable `.mrpack` archive under `paths.root/exports/`.
+pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Result<PathBuf, String> {
+    let inst = instance_dir(paths, profile);
+    let exports_dir = paths.root.join("exports");
+    fs::create_dir_all(&exports_dir)
+        .map_err(|e| format!("Failed to create exports directory: {e}"))?;
+
+    let safe_name: String = profile
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let file_stem = if safe_name.trim_matches('_').is_empty() {
+        "modpack"
+    } else {
+        safe_name.trim_matches('_')
+    };
+    let out_path = exports_dir.join(format!("{file_stem}.mrpack"));
+
+    let mut deps = HashMap::new();
+    deps.insert("minecraft".to_string(), profile.version_id.clone());
+    match &profile.loader {
+        ModLoader::Vanilla => {}
+        ModLoader::Fabric { loader_version } if !loader_version.is_empty() => {
+            deps.insert("fabric-loader".to_string(), loader_version.clone());
+        }
+        ModLoader::Quilt { loader_version } if !loader_version.is_empty() => {
+            deps.insert("quilt-loader".to_string(), loader_version.clone());
+        }
+        ModLoader::Forge { loader_version } if !loader_version.is_empty() => {
+            deps.insert("forge".to_string(), loader_version.clone());
+        }
+        ModLoader::NeoForge { loader_version } if !loader_version.is_empty() => {
+            deps.insert("neoforge".to_string(), loader_version.clone());
+        }
+        _ => {}
+    }
+
+    let index = serde_json::json!({
+        "formatVersion": 1,
+        "game": "minecraft",
+        "versionId": "1.0.0",
+        "name": profile.name,
+        "summary": format!("Exported from Svarka Launcher ({})", profile.version_id),
+        "files": [],
+        "dependencies": deps,
+    });
+
+    let file = File::create(&out_path)
+        .map_err(|e| format!("Failed to create {}: {e}", out_path.display()))?;
+    let mut zip_writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    zip_writer
+        .start_file("modrinth.index.json", options)
+        .map_err(|e| format!("Failed to write modrinth.index.json: {e}"))?;
+    let index_bytes = serde_json::to_vec_pretty(&index)
+        .map_err(|e| format!("Failed to serialize modrinth.index.json: {e}"))?;
+    io::Write::write_all(&mut zip_writer, &index_bytes)
+        .map_err(|e| format!("Failed to write index bytes: {e}"))?;
+
+    fn add_dir_to_overrides(
+        writer: &mut zip::ZipWriter<File>,
+        options: zip::write::SimpleFileOptions,
+        base_inst: &Path,
+        dir: &Path,
+    ) -> Result<(), String> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Ok(());
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                add_dir_to_overrides(writer, options, base_inst, &p)?;
+            } else if p.is_file() {
+                if let Ok(rel) = p.strip_prefix(base_inst) {
+                    let zip_name = format!(
+                        "overrides/{}",
+                        rel.to_string_lossy().replace('\\', "/")
+                    );
+                    writer
+                        .start_file(&zip_name, options)
+                        .map_err(|e| format!("Failed to add {zip_name}: {e}"))?;
+                    let mut src = File::open(&p)
+                        .map_err(|e| format!("Failed to open {}: {e}", p.display()))?;
+                    io::copy(&mut src, writer)
+                        .map_err(|e| format!("Failed to copy {}: {e}", p.display()))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    for sub in ["mods", "resourcepacks", "shaderpacks", "config"] {
+        let dir = inst.join(sub);
+        if dir.is_dir() {
+            add_dir_to_overrides(&mut zip_writer, options, &inst, &dir)?;
+        }
+    }
+    let options_txt = inst.join("options.txt");
+    if options_txt.is_file() {
+        zip_writer
+            .start_file("overrides/options.txt", options)
+            .map_err(|e| format!("Failed to add overrides/options.txt: {e}"))?;
+        let mut src =
+            File::open(&options_txt).map_err(|e| format!("Failed to open options.txt: {e}"))?;
+        io::copy(&mut src, &mut zip_writer)
+            .map_err(|e| format!("Failed to copy options.txt: {e}"))?;
+    }
+
+    zip_writer
+        .finish()
+        .map_err(|e| format!("Failed to finalize .mrpack: {e}"))?;
+    Ok(out_path)
+}
+
 fn install_mrpack(
     paths: &LauncherPaths,
     mrpack_path: &Path,

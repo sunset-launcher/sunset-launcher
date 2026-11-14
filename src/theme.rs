@@ -12,7 +12,6 @@ pub const BG_SIDEBAR: Color32 = Color32::from_rgb(24, 26, 32);      // #181A20 s
 pub const BG_ELEVATED: Color32 = Color32::from_rgb(30, 33, 40);     // #1E2128 modals / popovers
 pub const BG_CARD: Color32 = Color32::from_rgb(36, 40, 48);         // #242830 cards
 pub const BG_CARD_HOVER: Color32 = Color32::from_rgb(44, 49, 59);   // #2C313B card hover
-pub const BG_CARD_ACTIVE: Color32 = Color32::from_rgb(28, 50, 39);  // #1C3227 selected card tint
 pub const BG_INPUT: Color32 = Color32::from_rgb(15, 17, 21);        // #0F1115 inputs / tracks
 
 pub const BORDER_SUBTLE: Color32 = Color32::from_rgb(46, 51, 61);   // #2E333D
@@ -22,11 +21,41 @@ pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(238, 242, 247);   // #EEF2F7
 pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(155, 163, 180); // #9BA3B4
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(103, 112, 130);     // #677082
 
-// Signature Modrinth accents & semantic colors
-pub const ACCENT: Color32 = Color32::from_rgb(27, 217, 106);        // #1BD96A
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(48, 232, 126);  // #30E87E
-pub const ACCENT_DARK: Color32 = Color32::from_rgb(7, 26, 16);      // high-contrast dark text on emerald
-pub const ACCENT_DIM: Color32 = Color32::from_rgb(25, 69, 45);      // selection / badge bg
+static ACTIVE_ACCENT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new((27 << 16) | (217 << 8) | 106);
+
+/// Updates the active theme accent() color at runtime.
+pub fn set_accent_rgb(rgb: [u8; 3]) {
+    let packed = ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | (rgb[2] as u32);
+    ACTIVE_ACCENT.store(packed, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn accent() -> Color32 {
+    let packed = ACTIVE_ACCENT.load(std::sync::atomic::Ordering::Relaxed);
+    Color32::from_rgb((packed >> 16) as u8, (packed >> 8) as u8, packed as u8)
+}
+
+pub fn accent_hover() -> Color32 {
+    lerp_color(accent(), PURE_WHITE, 0.16)
+}
+
+pub fn accent_dark() -> Color32 {
+    let c = accent();
+    let lum = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
+    if lum > 140.0 {
+        Color32::from_rgb(7, 20, 14)
+    } else {
+        PURE_WHITE
+    }
+}
+
+pub fn accent_dim() -> Color32 {
+    lerp_color(BG_VOID, accent(), 0.22)
+}
+
+pub fn bg_card_active() -> Color32 {
+    lerp_color(BG_CARD, accent(), 0.11)
+}
 
 pub const DANGER: Color32 = Color32::from_rgb(229, 72, 77);         // #E5484D
 pub const DANGER_HOVER: Color32 = Color32::from_rgb(242, 94, 99);
@@ -110,7 +139,7 @@ pub fn apply_modrinth_theme(ctx: &egui::Context) {
     v.faint_bg_color = Color32::from_rgb(24, 27, 33);
     v.code_bg_color = BG_CARD;
 
-    v.selection.bg_fill = ACCENT_DIM;
+    v.selection.bg_fill = accent_dim();
     v.selection.stroke = Stroke::new(1.0_f32, PURE_WHITE);
 
     v.widgets.noninteractive.bg_fill = BG_CARD;
@@ -127,19 +156,19 @@ pub fn apply_modrinth_theme(ctx: &egui::Context) {
 
     v.widgets.hovered.bg_fill = Color32::from_rgb(42, 48, 59);
     v.widgets.hovered.weak_bg_fill = BG_CARD_HOVER;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, accent());
     v.widgets.hovered.fg_stroke = Stroke::new(1.2_f32, PURE_WHITE);
     v.widgets.hovered.rounding = Rounding::same(8.0);
 
-    v.widgets.active.bg_fill = ACCENT_DIM;
-    v.widgets.active.weak_bg_fill = ACCENT_DIM;
-    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+    v.widgets.active.bg_fill = accent_dim();
+    v.widgets.active.weak_bg_fill = accent_dim();
+    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, accent());
     v.widgets.active.fg_stroke = Stroke::new(1.5_f32, PURE_WHITE);
     v.widgets.active.rounding = Rounding::same(8.0);
 
     v.widgets.open.bg_fill = BG_CARD_HOVER;
     v.widgets.open.weak_bg_fill = BG_CARD_HOVER;
-    v.widgets.open.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+    v.widgets.open.bg_stroke = Stroke::new(1.0_f32, accent());
     v.widgets.open.fg_stroke = Stroke::new(1.0_f32, PURE_WHITE);
     v.widgets.open.rounding = Rounding::same(8.0);
 
@@ -152,12 +181,12 @@ pub fn apply_modrinth_theme(ctx: &egui::Context) {
 /// Draws a card frame with optional animated hover and emerald selection border.
 pub fn card_frame(selected: bool, hover_t: f32) -> egui::Frame {
     let bg = if selected {
-        lerp_color(BG_CARD_ACTIVE, Color32::from_rgb(33, 60, 47), hover_t)
+        lerp_color(bg_card_active(), Color32::from_rgb(33, 60, 47), hover_t)
     } else {
         lerp_color(BG_CARD, BG_CARD_HOVER, hover_t)
     };
     let border = if selected {
-        ACCENT
+        accent()
     } else {
         lerp_color(BORDER_SUBTLE, BORDER_STRONG, hover_t)
     };
@@ -275,13 +304,13 @@ fn render_button_impl(
             } else {
                 match variant {
                     ButtonVariant::Primary => (
-                        ACCENT,
-                        ACCENT_HOVER,
-                        ACCENT,
-                        ACCENT_HOVER,
-                        ACCENT_DARK,
-                        ACCENT_DARK,
-                        ACCENT,
+                        accent(),
+                        accent_hover(),
+                        accent(),
+                        accent_hover(),
+                        accent_dark(),
+                        accent_dark(),
+                        accent(),
                     ),
                     ButtonVariant::Secondary => (
                         BG_CARD,
@@ -475,10 +504,10 @@ pub fn ui_pill_tab_icon(
     if ui.is_rect_visible(rect) {
         let draw_rect = rect.shrink(press_t * 0.9);
         let idle_bg = lerp_color(Color32::from_rgb(26, 29, 35), BG_CARD_HOVER, hover_t);
-        let bg = lerp_color(idle_bg, ACCENT_DIM, active_t);
+        let bg = lerp_color(idle_bg, accent_dim(), active_t);
         let border = lerp_color(
             lerp_color(BORDER_SUBTLE, BORDER_STRONG, hover_t),
-            ACCENT,
+            accent(),
             active_t,
         );
         let fg = lerp_color(
@@ -496,7 +525,7 @@ pub fn ui_pill_tab_icon(
                 Pos2::new(draw_rect.center().x, draw_rect.bottom() - 2.0),
                 Vec2::new(bar_w, 2.0),
             );
-            painter.rect_filled(bar_rect, Rounding::same(1.0), ACCENT);
+            painter.rect_filled(bar_rect, Rounding::same(1.0), accent());
         }
 
         let mut cur_x = draw_rect.center().x - content_w * 0.5;
@@ -525,7 +554,7 @@ pub fn ui_pill_tab(
     ui_pill_tab_icon(ui, id, None, text, active)
 }
 
-/// Renders a loader selector pill tinted with each loader's signature accent colors.
+/// Renders a loader selector pill tinted with each loader's signature accent() colors.
 pub fn ui_loader_pill(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash,
@@ -643,12 +672,12 @@ pub fn ui_checkbox(
         );
         let fill = lerp_color(
             lerp_color(BG_INPUT, BG_CARD_HOVER, hover_t * 0.6),
-            ACCENT,
+            accent(),
             check_t,
         );
         let border = lerp_color(
             lerp_color(BORDER_STRONG, PURE_WHITE, hover_t * 0.4),
-            ACCENT_HOVER,
+            accent_hover(),
             check_t,
         );
         painter.rect_filled(box_rect, Rounding::same(4.5), fill);
@@ -659,7 +688,7 @@ pub fn ui_checkbox(
                 painter,
                 box_rect.shrink(3.0),
                 Icon::Check,
-                with_alpha(ACCENT_DARK, (check_t * 255.0) as u8),
+                with_alpha(accent_dark(), (check_t * 255.0) as u8),
             );
         }
 
@@ -700,7 +729,7 @@ pub fn ui_text_input(
         ui.ctx().request_repaint();
     }
 
-    let border_col = lerp_color(BORDER_SUBTLE, ACCENT, focus_t);
+    let border_col = lerp_color(BORDER_SUBTLE, accent(), focus_t);
     let total_w = width.max(80.0);
     let row_h = ui.spacing().interact_size.y.max(28.0);
     let mut now_focused = false;
@@ -718,7 +747,7 @@ pub fn ui_text_input(
                     ui.painter().rect_stroke(
                         box_rect.expand(1.4 * focus_t),
                         Rounding::same(9.0),
-                        Stroke::new(1.0_f32, with_alpha(ACCENT, (focus_t * 50.0) as u8)),
+                        Stroke::new(1.0_f32, with_alpha(accent(), (focus_t * 50.0) as u8)),
                     );
                 }
                 ui.painter().rect(
@@ -777,8 +806,8 @@ pub fn ui_search_input(
         ui.ctx().request_repaint();
     }
 
-    let border_col = lerp_color(BORDER_SUBTLE, ACCENT, focus_t);
-    let icon_col = lerp_color(TEXT_MUTED, ACCENT, focus_t);
+    let border_col = lerp_color(BORDER_SUBTLE, accent(), focus_t);
+    let icon_col = lerp_color(TEXT_MUTED, accent(), focus_t);
     let mut now_focused = false;
 
     ui.allocate_ui_with_layout(
@@ -793,7 +822,7 @@ pub fn ui_search_input(
                     ui.painter().rect_stroke(
                         box_rect.expand(1.5 * focus_t),
                         Rounding::same(9.0),
-                        Stroke::new(1.0_f32, with_alpha(ACCENT, (focus_t * 58.0) as u8)),
+                        Stroke::new(1.0_f32, with_alpha(accent(), (focus_t * 58.0) as u8)),
                     );
                 }
                 ui.painter().rect(
@@ -863,8 +892,8 @@ pub fn ui_alert_banner(ui: &mut egui::Ui, kind: AlertKind, text: &str, width: f3
             Icon::Sparkle,
         ),
         AlertKind::Success => (
-            BG_CARD_ACTIVE,
-            ACCENT,
+            bg_card_active(),
+            accent(),
             Color32::from_rgb(162, 248, 198),
             Icon::Check,
         ),
@@ -910,7 +939,7 @@ pub fn section_header(ui: &mut egui::Ui, title: &str) {
 }
 
 /// Renders a card with persistent smooth hover + selection animation,
-/// top specular rim, and an animated left accent indicator bar.
+/// top specular rim, and an animated left accent() indicator bar.
 pub fn animated_card<R>(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -946,7 +975,7 @@ pub fn animated_card<R>(
         if bar_strength > 0.04 && rect.height() >= 28.0 {
             let max_bar_h = (rect.height() - 14.0).clamp(10.0, 38.0);
             let bar_h = max_bar_h * bar_strength;
-            let bar_col = lerp_color(BORDER_STRONG, ACCENT, select_t.max(hover_t * 0.7));
+            let bar_col = lerp_color(BORDER_STRONG, accent(), select_t.max(hover_t * 0.7));
             let bar_rect = Rect::from_center_size(
                 Pos2::new(rect.left() + 2.2, rect.center().y),
                 Vec2::new(3.0, bar_h),
@@ -970,8 +999,8 @@ pub fn hero_spotlight_card<R>(
         ui.ctx().request_repaint();
     }
 
-    let bg = lerp_color(BG_CARD_ACTIVE, Color32::from_rgb(31, 58, 45), hover_t);
-    let border = lerp_color(with_alpha(ACCENT, 185), ACCENT_HOVER, hover_t);
+    let bg = lerp_color(bg_card_active(), Color32::from_rgb(31, 58, 45), hover_t);
+    let border = lerp_color(with_alpha(accent(), 185), accent_hover(), hover_t);
 
     let resp = egui::Frame::none()
         .fill(bg)
@@ -1015,7 +1044,7 @@ pub fn hero_spotlight_card<R>(
 /// Draws a pill badge (`Vanilla`, `Fabric`, `Microsoft`, `Installed`).
 pub fn badge(ui: &mut egui::Ui, text: &str, highlighted: bool) {
     let (fill, border, fg) = if highlighted {
-        (ACCENT_DIM, ACCENT, Color32::from_rgb(148, 248, 190))
+        (accent_dim(), accent(), Color32::from_rgb(148, 248, 190))
     } else {
         (Color32::from_rgb(30, 33, 40), BORDER_STRONG, TEXT_SECONDARY)
     };
@@ -1038,7 +1067,7 @@ pub fn badge_sized(
     max_width: Option<f32>,
 ) -> egui::Response {
     let (fill, border, fg) = if highlighted {
-        (ACCENT_DIM, ACCENT, Color32::from_rgb(148, 248, 190))
+        (accent_dim(), accent(), Color32::from_rgb(148, 248, 190))
     } else {
         (Color32::from_rgb(30, 33, 40), BORDER_STRONG, TEXT_SECONDARY)
     };
@@ -1153,7 +1182,7 @@ pub fn loader_badge(ui: &mut egui::Ui, kind: crate::models::LoaderKind, text: &s
         });
 }
 
-/// Draws a stylized instance emblem with loader-tinted accent and running indicator.
+/// Draws a stylized instance emblem with loader-tinted accent() and running indicator.
 pub fn draw_instance_avatar(
     painter: &egui::Painter,
     rect: Rect,
@@ -1164,12 +1193,12 @@ pub fn draw_instance_avatar(
 ) {
     let (loader_bg, loader_border, loader_fg) = loader_colors(kind);
     let bg = if selected {
-        lerp_color(loader_bg, ACCENT_DIM, 0.48)
+        lerp_color(loader_bg, accent_dim(), 0.48)
     } else {
         loader_bg
     };
     let border = if is_running || selected {
-        ACCENT
+        accent()
     } else {
         loader_border
     };
@@ -1204,7 +1233,7 @@ pub fn draw_instance_avatar(
         painter.circle_filled(
             dot_center,
             3.1,
-            if is_running { ACCENT } else { loader_border },
+            if is_running { accent() } else { loader_border },
         );
     }
 }
@@ -1260,8 +1289,8 @@ pub fn draw_icon_placeholder(
 /// Draws an emerald solid pill badge (used for device codes or primary tags) with dark readable text.
 pub fn solid_accent_badge(ui: &mut egui::Ui, text: &str) {
     egui::Frame::none()
-        .fill(ACCENT)
-        .stroke(Stroke::new(1.0_f32, ACCENT))
+        .fill(accent())
+        .stroke(Stroke::new(1.0_f32, accent()))
         .rounding(Rounding::same(6.0))
         .inner_margin(Margin::symmetric(10.0, 4.0))
         .show(ui, |ui| {
@@ -1270,14 +1299,14 @@ pub fn solid_accent_badge(ui: &mut egui::Ui, text: &str) {
                     .monospace()
                     .size(14.0)
                     .strong()
-                    .color(ACCENT_DARK),
+                    .color(accent_dark()),
             );
         });
 }
 
 /// Draws an animated Modrinth-green 4-square orbital loader.
 pub fn mono_spinner(ui: &mut egui::Ui, size: f32) {
-    mono_spinner_colored(ui, size, ACCENT);
+    mono_spinner_colored(ui, size, accent());
 }
 
 /// Draws an orbital 4-square spinner with a custom color.
@@ -1335,7 +1364,7 @@ pub fn animated_progress_bar(
     if fill_w > 0.5 {
         let fill_rect =
             Rect::from_min_size(rect.min, Vec2::new(fill_w.min(rect.width()), rect.height()));
-        painter.rect_filled(fill_rect, Rounding::same(6.5), ACCENT);
+        painter.rect_filled(fill_rect, Rounding::same(6.5), accent());
 
         if active {
             let t = (ui.input(|i| i.time) as f32 * 1.4).fract();
@@ -1355,7 +1384,7 @@ pub fn animated_progress_bar(
     }
 
     let pct_text = format!("{}%", (smooth * 100.0).round() as u32);
-    let text_color = if smooth > 0.48 { ACCENT_DARK } else { TEXT_PRIMARY };
+    let text_color = if smooth > 0.48 { accent_dark() } else { TEXT_PRIMARY };
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -1365,7 +1394,7 @@ pub fn animated_progress_bar(
     );
     if rect.width() >= 180.0 {
         let pct_color = if smooth > 0.92 {
-            ACCENT_DARK
+            accent_dark()
         } else {
             TEXT_SECONDARY
         };
@@ -1406,7 +1435,7 @@ pub fn draw_mini_gauge(
     let fill_w = (rect.width() * smooth).clamp(0.0, rect.width());
     if fill_w > 1.0 {
         let fill_rect = Rect::from_min_size(rect.min, Vec2::new(fill_w, rect.height()));
-        painter.rect_filled(fill_rect, r, ACCENT);
+        painter.rect_filled(fill_rect, r, accent());
     }
 }
 
@@ -1453,14 +1482,14 @@ pub fn draw_ram_allocation_bar(
 
     let max_w = (rect.width() * smooth_max).clamp(0.0, rect.width());
     if max_w > 2.0 {
-        let max_col = if max_mb >= 12288 { WARNING } else { ACCENT_DIM };
+        let max_col = if max_mb >= 12288 { WARNING } else { accent_dim() };
         let max_rect = Rect::from_min_size(rect.min, Vec2::new(max_w, rect.height()));
         painter.rect_filled(max_rect, r, with_alpha(max_col, 220));
     }
     let min_w = (rect.width() * smooth_min).clamp(0.0, rect.width());
     if min_w > 2.0 {
         let min_rect = Rect::from_min_size(rect.min, Vec2::new(min_w, rect.height()));
-        painter.rect_filled(min_rect, r, ACCENT);
+        painter.rect_filled(min_rect, r, accent());
     }
 }
 
@@ -1477,11 +1506,11 @@ pub fn ui_ram_slider(
         let visuals = ui.visuals_mut();
         visuals.slider_trailing_fill = true;
         visuals.widgets.inactive.bg_fill = Color32::from_rgb(64, 71, 86);
-        visuals.widgets.inactive.fg_stroke = Stroke::new(1.5_f32, ACCENT);
+        visuals.widgets.inactive.fg_stroke = Stroke::new(1.5_f32, accent());
         visuals.widgets.inactive.rounding = Rounding::same(4.0);
         visuals.widgets.hovered.bg_fill = Color32::from_rgb(82, 91, 108);
         visuals.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, PURE_WHITE);
-        visuals.widgets.active.bg_fill = ACCENT;
+        visuals.widgets.active.bg_fill = accent();
         visuals.selection.bg_fill = Color32::from_rgb(27, 165, 86);
         ui.add(
             egui::Slider::new(value, range)
@@ -1583,13 +1612,13 @@ pub fn primary_action_button(
         let time = ui.input(|i| i.time) as f32;
 
         let (bg, border, fg, halo_color) = if !enabled {
-            (BG_CARD, BORDER_SUBTLE, TEXT_MUTED, ACCENT)
+            (BG_CARD, BORDER_SUBTLE, TEXT_MUTED, accent())
         } else if is_stop_style {
             let bg = lerp_color(DANGER, DANGER_HOVER, hover_t);
             (bg, DANGER_HOVER, PURE_WHITE, DANGER)
         } else {
-            let bg = lerp_color(ACCENT, ACCENT_HOVER, hover_t);
-            (bg, ACCENT_HOVER, ACCENT_DARK, ACCENT)
+            let bg = lerp_color(accent(), accent_hover(), hover_t);
+            (bg, accent_hover(), accent_dark(), accent())
         };
 
         if pulsing {
@@ -1675,16 +1704,16 @@ pub fn mod_toggle_switch(ui: &mut egui::Ui, id_salt: &str, on: bool) -> egui::Re
         let painter = ui.painter();
         let bg = lerp_color(
             lerp_color(BG_INPUT, BG_CARD_HOVER, hover_t * 0.5),
-            lerp_color(ACCENT, ACCENT_HOVER, hover_t),
+            lerp_color(accent(), accent_hover(), hover_t),
             anim_t,
         );
-        let border = lerp_color(BORDER_STRONG, ACCENT_HOVER, anim_t.max(hover_t * 0.4));
+        let border = lerp_color(BORDER_STRONG, accent_hover(), anim_t.max(hover_t * 0.4));
         let rounding = Rounding::same(rect.height() * 0.5);
         if anim_t > 0.05 && hover_t > 0.05 {
             painter.rect_stroke(
                 rect.expand(1.2 * hover_t),
                 Rounding::same(rect.height() * 0.5 + 1.2),
-                Stroke::new(1.0_f32, with_alpha(ACCENT, (hover_t * 65.0) as u8)),
+                Stroke::new(1.0_f32, with_alpha(accent(), (hover_t * 65.0) as u8)),
             );
         }
         painter.rect_filled(rect, rounding, bg);
@@ -1696,7 +1725,7 @@ pub fn mod_toggle_switch(ui: &mut egui::Ui, id_salt: &str, on: bool) -> egui::Re
         let knob_x = left_x + (right_x - left_x) * anim_t;
         let knob_col = lerp_color(
             lerp_color(TEXT_SECONDARY, PURE_WHITE, hover_t),
-            ACCENT_DARK,
+            accent_dark(),
             anim_t,
         );
         painter.circle_filled(Pos2::new(knob_x, rect.center().y), r, knob_col);
