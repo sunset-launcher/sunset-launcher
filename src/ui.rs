@@ -1366,7 +1366,7 @@ impl McLauncherApp {
             let brand_click = brand_resp
                 .response
                 .interact(Sense::click())
-                .on_hover_text("Svarka Launcher v0.1.0 • by svarka (@svarkawm) — Go to Library");
+                .on_hover_text("Svarka Launcher v0.1.1 • by svarka (@svarkawm) — Go to Library");
             if brand_click.hovered() || brand_hov_now {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
@@ -4540,7 +4540,7 @@ impl McLauncherApp {
                 });
                 ui.add_space(4.0);
                 ui_wrap_row(ui, 22.0, |ui| {
-                    ui.strong(egui::RichText::new("Svarka Launcher v0.1.0").color(PURE_WHITE));
+                    ui.strong(egui::RichText::new("Svarka Launcher v0.1.1").color(PURE_WHITE));
                     ui.label(
                         egui::RichText::new("• Author: svarka (@svarkawm) • Co-Author: Antigravity (Gemini)")
                             .small()
