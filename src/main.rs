@@ -17,13 +17,22 @@ use storage::{get_launcher_paths, load_accounts, load_launcher_settings, load_pr
 use ui::McLauncherApp;
 
 fn main() -> eframe::Result<()> {
+    auth::cleanup_stale_update_files();
     let paths = get_launcher_paths().expect("Failed to initialize launcher directories");
+    let wait_for_relaunch = std::env::args().any(|a| a == "--relaunch-wait");
+    let Some(_instance_guard) = storage::acquire_single_instance_lock(&paths, wait_for_relaunch)
+    else {
+        eprintln!("Svarka Launcher is already running.");
+        return Ok(());
+    };
     #[cfg(target_os = "linux")]
     let _ = storage::ensure_linux_desktop_entry(&paths);
+    #[cfg(target_os = "windows")]
+    let _ = storage::ensure_windows_shortcut(&paths);
     let profiles = load_profiles(&paths);
     let accounts = load_accounts(&paths);
     let settings = load_launcher_settings(&paths);
-    theme::set_accent_rgb(settings.effective_accent_rgb());
+    theme::set_theme_palette(&settings.effective_palette());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -39,6 +48,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             theme::apply_modrinth_theme(&cc.egui_ctx);
+            theme::apply_ui_font(&cc.egui_ctx, &settings.ui_font_path);
             Ok(Box::new(McLauncherApp::new(
                 paths, profiles, accounts, settings,
             )))

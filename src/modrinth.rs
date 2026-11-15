@@ -404,7 +404,7 @@ fn fetch_best_version(
                 loader.short_name()
             ))
         }
-        ModrinthProjectType::Resourcepack => {
+        ModrinthProjectType::Resourcepack | ModrinthProjectType::Shader => {
             if let Some(v) = get_versions(client, project_id, Some(game_version), None)?
                 .into_iter()
                 .next()
@@ -496,7 +496,9 @@ pub fn install_project(
     });
 
     match project_type {
-        ModrinthProjectType::Mod | ModrinthProjectType::Resourcepack => {
+        ModrinthProjectType::Mod
+        | ModrinthProjectType::Resourcepack
+        | ModrinthProjectType::Shader => {
             if project_type == ModrinthProjectType::Mod && !profile.loader.is_modded() {
                 return Err("Mods require a modded loader (Fabric, Quilt, Forge, or NeoForge). Switch loader in Instance settings.".to_string());
             }
@@ -620,6 +622,7 @@ fn install_modpack_version(
 fn folder_for(project_type: ModrinthProjectType) -> &'static str {
     match project_type {
         ModrinthProjectType::Resourcepack => "resourcepacks",
+        ModrinthProjectType::Shader => "shaderpacks",
         _ => "mods",
     }
 }
@@ -735,7 +738,7 @@ pub fn fetch_project_versions_for_profile(
             }
             Ok(list)
         }
-        ModrinthProjectType::Resourcepack => {
+        ModrinthProjectType::Resourcepack | ModrinthProjectType::Shader => {
             let list = get_versions(&client, project_id, Some(game_version), None)?;
             if !list.is_empty() {
                 return Ok(list);
@@ -778,7 +781,9 @@ pub fn install_specific_version(
         fraction: 0.15,
     });
     match project_type {
-        ModrinthProjectType::Mod | ModrinthProjectType::Resourcepack => {
+        ModrinthProjectType::Mod
+        | ModrinthProjectType::Resourcepack
+        | ModrinthProjectType::Shader => {
             if project_type == ModrinthProjectType::Mod && !profile.loader.is_modded() {
                 return Err("Mods require a modded loader (Fabric, Quilt, Forge, or NeoForge). Switch loader in Instance settings.".to_string());
             }
@@ -1002,6 +1007,41 @@ pub fn parse_mrpack_loader(deps: &HashMap<String, String>) -> Result<(String, Mo
     Ok((mc_version, loader))
 }
 
+fn add_dir_to_zip(
+    writer: &mut zip::ZipWriter<File>,
+    options: zip::write::SimpleFileOptions,
+    base_dir: &Path,
+    dir: &Path,
+    archive_prefix: &str,
+) -> Result<(), String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            add_dir_to_zip(writer, options, base_dir, &p, archive_prefix)?;
+        } else if p.is_file() {
+            if let Ok(rel) = p.strip_prefix(base_dir) {
+                let rel_posix = rel.to_string_lossy().replace('\\', "/");
+                let zip_name = if archive_prefix.is_empty() {
+                    rel_posix
+                } else {
+                    format!("{archive_prefix}{rel_posix}")
+                };
+                writer
+                    .start_file(&zip_name, options)
+                    .map_err(|e| format!("Failed to add {zip_name}: {e}"))?;
+                let mut src = File::open(&p)
+                    .map_err(|e| format!("Failed to open {}: {e}", p.display()))?;
+                io::copy(&mut src, writer)
+                    .map_err(|e| format!("Failed to copy {}: {e}", p.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Exports an instance's loader metadata, mods, resourcepacks, shaderpacks, and configs
 /// into a portable `.mrpack` archive under `paths.root/exports/`.
 pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Result<PathBuf, String> {
@@ -1071,42 +1111,10 @@ pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Resul
     io::Write::write_all(&mut zip_writer, &index_bytes)
         .map_err(|e| format!("Failed to write index bytes: {e}"))?;
 
-    fn add_dir_to_overrides(
-        writer: &mut zip::ZipWriter<File>,
-        options: zip::write::SimpleFileOptions,
-        base_inst: &Path,
-        dir: &Path,
-    ) -> Result<(), String> {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return Ok(());
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                add_dir_to_overrides(writer, options, base_inst, &p)?;
-            } else if p.is_file() {
-                if let Ok(rel) = p.strip_prefix(base_inst) {
-                    let zip_name = format!(
-                        "overrides/{}",
-                        rel.to_string_lossy().replace('\\', "/")
-                    );
-                    writer
-                        .start_file(&zip_name, options)
-                        .map_err(|e| format!("Failed to add {zip_name}: {e}"))?;
-                    let mut src = File::open(&p)
-                        .map_err(|e| format!("Failed to open {}: {e}", p.display()))?;
-                    io::copy(&mut src, writer)
-                        .map_err(|e| format!("Failed to copy {}: {e}", p.display()))?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     for sub in ["mods", "resourcepacks", "shaderpacks", "config"] {
         let dir = inst.join(sub);
         if dir.is_dir() {
-            add_dir_to_overrides(&mut zip_writer, options, &inst, &dir)?;
+            add_dir_to_zip(&mut zip_writer, options, &inst, &dir, "overrides/")?;
         }
     }
     let options_txt = inst.join("options.txt");
@@ -1126,7 +1134,8 @@ pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Resul
     Ok(out_path)
 }
 
-fn install_mrpack(
+/// Installs a local or downloaded `.mrpack` modpack into a new instance profile.
+pub fn install_mrpack(
     paths: &LauncherPaths,
     mrpack_path: &Path,
     username: String,
@@ -1446,6 +1455,12 @@ pub struct WorldEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct WorldBackupEntry {
+    pub file_name: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ScreenshotEntry {
     pub filename: String,
     pub path: PathBuf,
@@ -1498,6 +1513,253 @@ pub fn list_worlds(inst_dir: &Path) -> Vec<WorldEntry> {
         .collect();
     worlds.sort_by(|a, b| a.folder_name.to_lowercase().cmp(&b.folder_name.to_lowercase()));
     worlds
+}
+
+/// Creates a `.zip` backup of `inst_dir/saves/<folder_name>` inside `inst_dir/backups/`.
+pub fn backup_world(inst_dir: &Path, folder_name: &str) -> Result<PathBuf, String> {
+    if !is_single_safe_filename(folder_name) {
+        return Err("Refusing unsafe world path".to_string());
+    }
+    let world_dir = inst_dir.join("saves").join(folder_name);
+    if !world_dir.is_dir() {
+        return Err(format!("World folder not found: {folder_name}"));
+    }
+    let backups_dir = inst_dir.join("backups");
+    fs::create_dir_all(&backups_dir)
+        .map_err(|e| format!("Failed to create backups directory: {e}"))?;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let safe_base: String = folder_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let out_path = backups_dir.join(format!("{safe_base}_{stamp}.zip"));
+    let out_file = File::create(&out_path)
+        .map_err(|e| format!("Failed to create world backup archive: {e}"))?;
+    let mut writer = zip::ZipWriter::new(out_file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let prefix = format!("{folder_name}/");
+    add_dir_to_zip(&mut writer, options, &world_dir, &world_dir, &prefix)?;
+    writer
+        .finish()
+        .map_err(|e| format!("Failed to finalize world backup: {e}"))?;
+    Ok(out_path)
+}
+
+/// Deletes `inst_dir/saves/<folder_name>` safely after verifying single-component path safety.
+pub fn delete_world(inst_dir: &Path, folder_name: &str) -> Result<(), String> {
+    if !is_single_safe_filename(folder_name) {
+        return Err("Refusing unsafe world path".to_string());
+    }
+    let world_dir = inst_dir.join("saves").join(folder_name);
+    if !world_dir.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(&world_dir)
+        .map_err(|e| format!("Failed to delete world '{folder_name}': {e}"))
+}
+
+/// Lists saved world backup `.zip` archives inside `inst_dir/backups/`, newest first.
+pub fn list_world_backups(inst_dir: &Path) -> Vec<WorldBackupEntry> {
+    let backups_dir = inst_dir.join("backups");
+    let Ok(entries) = fs::read_dir(&backups_dir) else {
+        return Vec::new();
+    };
+    let mut backups: Vec<WorldBackupEntry> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.is_file() {
+                return None;
+            }
+            let file_name = path.file_name()?.to_string_lossy().to_string();
+            if file_name.starts_with('.') || !file_name.to_lowercase().ends_with(".zip") {
+                return None;
+            }
+            let size_bytes = e.metadata().map(|m| m.len()).unwrap_or(0);
+            Some(WorldBackupEntry {
+                file_name,
+                size_bytes,
+            })
+        })
+        .collect();
+    backups.sort_by(|a, b| b.file_name.to_lowercase().cmp(&a.file_name.to_lowercase()));
+    backups
+}
+
+fn infer_world_name_from_backup_filename(file_name: &str) -> String {
+    let stem = file_name
+        .strip_suffix(".zip")
+        .or_else(|| file_name.strip_suffix(".ZIP"))
+        .unwrap_or(file_name);
+    // Strip `_YYYYMMDD-HHMMSS` suffix produced by `backup_world` when present.
+    if stem.len() > 16 {
+        let split_idx = stem.len() - 16;
+        let suffix = &stem[split_idx..];
+        if suffix.starts_with('_')
+            && suffix.chars().nth(9) == Some('-')
+            && suffix[1..9].chars().all(|c| c.is_ascii_digit())
+            && suffix[10..16].chars().all(|c| c.is_ascii_digit())
+        {
+            return stem[..split_idx].to_string();
+        }
+    }
+    stem.to_string()
+}
+
+/// Restores a saved world `.zip` backup from `inst_dir/backups/` back into `inst_dir/saves/`.
+pub fn restore_world_backup(inst_dir: &Path, backup_file_name: &str) -> Result<String, String> {
+    if !is_single_safe_filename(backup_file_name) {
+        return Err("Refusing unsafe backup path".to_string());
+    }
+    let zip_path = inst_dir.join("backups").join(backup_file_name);
+    let file =
+        File::open(&zip_path).map_err(|e| format!("Failed to open backup archive: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Invalid backup archive: {e}"))?;
+
+    let mut top_dirs: HashSet<String> = HashSet::new();
+    let mut has_root_level_dat = false;
+    let mut nested_level_dat_root: Option<String> = None;
+
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to inspect backup entry: {e}"))?;
+        let Some(rel) = safe_rel_path(entry.name()) else {
+            return Err(format!("Unsafe path in backup archive: {}", entry.name()));
+        };
+        let comps: Vec<String> = rel
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(s) => Some(s.to_string_lossy().to_string()),
+                _ => None,
+            })
+            .collect();
+        if comps.is_empty() {
+            continue;
+        }
+        if comps.len() == 1 && !entry.is_dir() && comps[0] == "level.dat" {
+            has_root_level_dat = true;
+        }
+        if comps.len() == 2 && !entry.is_dir() && comps[1] == "level.dat" {
+            nested_level_dat_root = Some(comps[0].clone());
+        }
+        top_dirs.insert(comps[0].clone());
+    }
+
+    let (world_name, strip_root) = if !has_root_level_dat && top_dirs.len() == 1 {
+        let root = top_dirs.into_iter().next().unwrap_or_default();
+        if nested_level_dat_root.as_deref() != Some(root.as_str())
+            || !is_single_safe_filename(&root)
+        {
+            return Err("Backup archive does not contain a valid world folder".to_string());
+        }
+        (root, true)
+    } else if has_root_level_dat {
+        let inferred = infer_world_name_from_backup_filename(backup_file_name);
+        if !is_single_safe_filename(&inferred) {
+            return Err("Could not determine safe world name from backup".to_string());
+        }
+        (inferred, false)
+    } else {
+        return Err("Backup archive is missing level.dat".to_string());
+    };
+
+    let saves_dir = inst_dir.join("saves");
+    fs::create_dir_all(&saves_dir)
+        .map_err(|e| format!("Failed to create saves directory: {e}"))?;
+    let staging_dir = saves_dir.join(format!(".restore_{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&staging_dir)
+        .map_err(|e| format!("Failed to create staging directory: {e}"))?;
+
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staging_dir);
+                return Err(format!("Failed to read backup entry: {e}"));
+            }
+        };
+        let Some(rel) = safe_rel_path(entry.name()) else {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(format!("Unsafe path in backup archive: {}", entry.name()));
+        };
+        let out_rel = if strip_root {
+            let mut comps = rel.components();
+            comps.next();
+            let rest: PathBuf = comps.collect();
+            if rest.as_os_str().is_empty() {
+                continue;
+            }
+            rest
+        } else {
+            rel
+        };
+        let out_path = staging_dir.join(out_rel);
+        if entry.is_dir() {
+            if let Err(e) = fs::create_dir_all(&out_path) {
+                let _ = fs::remove_dir_all(&staging_dir);
+                return Err(format!("Failed to create restored directory: {e}"));
+            }
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                let _ = fs::remove_dir_all(&staging_dir);
+                return Err(format!("Failed to create restored directory: {e}"));
+            }
+        }
+        let mut out_file = match File::create(&out_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staging_dir);
+                return Err(format!("Failed to extract restored file: {e}"));
+            }
+        };
+        if let Err(e) = io::copy(&mut entry, &mut out_file) {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(format!("Failed to write restored file: {e}"));
+        }
+    }
+
+    let target_world = saves_dir.join(&world_name);
+    let prev_tmp = if target_world.exists() {
+        let backup_existing = saves_dir.join(format!(".prev_{}", uuid::Uuid::new_v4()));
+        if let Err(e) = fs::rename(&target_world, &backup_existing) {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(format!("Failed to replace existing world '{world_name}': {e}"));
+        }
+        Some(backup_existing)
+    } else {
+        None
+    };
+
+    if let Err(e) = fs::rename(&staging_dir, &target_world) {
+        if let Some(prev) = prev_tmp {
+            let _ = fs::rename(&prev, &target_world);
+        }
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(format!("Failed to install restored world '{world_name}': {e}"));
+    }
+    if let Some(prev) = prev_tmp {
+        let _ = fs::remove_dir_all(&prev);
+    }
+
+    Ok(world_name)
+}
+
+/// Deletes a world backup `.zip` file inside `inst_dir/backups/` safely.
+pub fn delete_world_backup(inst_dir: &Path, backup_file_name: &str) -> Result<(), String> {
+    if !is_single_safe_filename(backup_file_name) {
+        return Err("Refusing unsafe backup path".to_string());
+    }
+    let path = inst_dir.join("backups").join(backup_file_name);
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path)
+        .map_err(|e| format!("Failed to delete backup '{backup_file_name}': {e}"))
 }
 
 /// Lists screenshots inside `inst_dir/screenshots`, newest/reverse-alphabetical first.
@@ -1697,12 +1959,24 @@ mod tests {
 
         let vanilla_packs = super::SearchParams {
             project_type: ModrinthProjectType::Resourcepack,
-            ..vanilla_mods
+            ..vanilla_mods.clone()
         };
         assert_eq!(
             super::build_search_facets(&vanilla_packs),
             Some(vec![
                 vec!["project_type:resourcepack".to_string()],
+                vec!["versions:1.21.4".to_string()],
+            ])
+        );
+
+        let vanilla_shaders = super::SearchParams {
+            project_type: ModrinthProjectType::Shader,
+            ..vanilla_mods
+        };
+        assert_eq!(
+            super::build_search_facets(&vanilla_shaders),
+            Some(vec![
+                vec!["project_type:shader".to_string()],
                 vec!["versions:1.21.4".to_string()],
             ])
         );
@@ -1780,6 +2054,50 @@ mod tests {
         assert_eq!(disabled_on_vanilla, 2);
         assert!(mods_dir.join("jei-forge.jar.disabled").is_file());
         assert!(mods_dir.join("architectury-multi.jar.disabled").is_file());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn world_backup_and_delete_rejects_traversal() {
+        let root = std::env::temp_dir().join(format!(
+            "mc_launcher_world_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let world_dir = root.join("saves").join("SurvivalOne");
+        fs::create_dir_all(&world_dir).unwrap();
+        fs::write(world_dir.join("level.dat"), b"test-level-data").unwrap();
+
+        assert!(super::backup_world(&root, "../escape").is_err());
+        assert!(super::delete_world(&root, "../escape").is_err());
+
+        let zip_path = super::backup_world(&root, "SurvivalOne").unwrap();
+        assert!(zip_path.is_file());
+        let file = fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        assert!(archive.by_name("SurvivalOne/level.dat").is_ok());
+
+        super::delete_world(&root, "SurvivalOne").unwrap();
+        assert!(!world_dir.exists());
+
+        let backups = super::list_world_backups(&root);
+        assert_eq!(backups.len(), 1);
+        let backup_name = backups[0].file_name.clone();
+        assert!(super::restore_world_backup(&root, "../escape.zip").is_err());
+        assert!(super::delete_world_backup(&root, "../escape.zip").is_err());
+
+        let restored = super::restore_world_backup(&root, &backup_name).unwrap();
+        assert_eq!(restored, "SurvivalOne");
+        assert_eq!(
+            fs::read(world_dir.join("level.dat")).unwrap(),
+            b"test-level-data"
+        );
+
+        super::delete_world_backup(&root, &backup_name).unwrap();
+        assert!(super::list_world_backups(&root).is_empty());
 
         let _ = fs::remove_dir_all(&root);
     }

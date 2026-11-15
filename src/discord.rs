@@ -5,7 +5,7 @@ use crate::i18n::{tr, Language};
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_DISCORD_CLIENT_ID: &str = "1571137394923667579";
 
@@ -58,7 +58,7 @@ pub fn format_presence(lang: Language, kind: &DiscordActivityKind) -> (String, S
     match kind {
         DiscordActivityKind::InLauncher => (
             tr(lang, "rpc.in_launcher").to_string(),
-            "Svarka Launcher".to_string(),
+            String::new(),
         ),
         DiscordActivityKind::BrowsingModrinth => (
             tr(lang, "rpc.browsing_mods").to_string(),
@@ -70,11 +70,11 @@ pub fn format_presence(lang: Language, kind: &DiscordActivityKind) -> (String, S
         ),
         DiscordActivityKind::Console => (
             tr(lang, "rpc.console").to_string(),
-            "Svarka Launcher".to_string(),
+            String::new(),
         ),
         DiscordActivityKind::Accounts => (
             tr(lang, "rpc.accounts").to_string(),
-            "Svarka Launcher".to_string(),
+            String::new(),
         ),
         DiscordActivityKind::Playing {
             instance,
@@ -91,23 +91,70 @@ pub struct DiscordRpc {
     tx: Sender<PresenceState>,
 }
 
+const DEBOUNCE_WINDOW: Duration = Duration::from_millis(320);
+const MIN_SEND_SPACING: Duration = Duration::from_millis(1500);
+const RETRY_DELAY: Duration = Duration::from_millis(3000);
+
+fn next_send_deadline(last_send_at: Option<Instant>) -> Instant {
+    let debounced = Instant::now() + DEBOUNCE_WINDOW;
+    match last_send_at {
+        Some(prev) => debounced.max(prev + MIN_SEND_SPACING),
+        None => debounced,
+    }
+}
+
 impl DiscordRpc {
     pub fn spawn() -> Self {
         let (tx, rx) = mpsc::channel::<PresenceState>();
         thread::spawn(move || {
             let mut conn: Option<IpcConn> = None;
-            let mut last_state: Option<PresenceState> = None;
+            let mut last_acked: Option<PresenceState> = None;
+            let mut desired: Option<PresenceState> = None;
             let mut last_client_id = String::new();
+            let mut last_send_at: Option<Instant> = None;
+            let mut next_flush_at: Option<Instant> = None;
 
-            while let Ok(mut state) = rx.recv() {
-                // Coalesce bursty updates so we only send the latest state.
-                while let Ok(newer) = rx.try_recv() {
-                    state = newer;
-                }
-                if last_state.as_ref() == Some(&state) {
+            loop {
+                let maybe_msg = match next_flush_at {
+                    None => match rx.recv() {
+                        Ok(s) => Some(s),
+                        Err(_) => break,
+                    },
+                    Some(deadline) => {
+                        let wait = deadline.saturating_duration_since(Instant::now());
+                        match rx.recv_timeout(wait) {
+                            Ok(s) => Some(s),
+                            Err(mpsc::RecvTimeoutError::Timeout) => None,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                };
+
+                if let Some(mut state) = maybe_msg {
+                    while let Ok(newer) = rx.try_recv() {
+                        state = newer;
+                    }
+                    desired = Some(state);
+                    if desired.as_ref() == last_acked.as_ref() {
+                        next_flush_at = None;
+                    } else {
+                        next_flush_at = Some(next_send_deadline(last_send_at));
+                    }
                     continue;
                 }
-                last_state = Some(state.clone());
+
+                // Coalesce any last-moment updates arriving right as the debounce deadline fires.
+                while let Ok(newer) = rx.try_recv() {
+                    desired = Some(newer);
+                }
+                next_flush_at = None;
+
+                let Some(state) = desired.clone() else {
+                    continue;
+                };
+                if last_acked.as_ref() == Some(&state) {
+                    continue;
+                }
 
                 let effective_cid = if state.client_id.trim().is_empty() {
                     DEFAULT_DISCORD_CLIENT_ID.to_string()
@@ -116,6 +163,7 @@ impl DiscordRpc {
                 };
                 if last_client_id != effective_cid {
                     conn = None;
+                    last_acked = None;
                     last_client_id = effective_cid.clone();
                 }
 
@@ -125,21 +173,36 @@ impl DiscordRpc {
                             conn = None;
                         }
                     }
+                    last_acked = Some(state);
                     continue;
                 }
 
+                last_send_at = Some(Instant::now());
                 if conn.is_none() {
                     conn = connect_and_handshake(&effective_cid).ok();
                 }
+                let mut sent_ok = false;
                 if let Some(c) = conn.as_mut() {
-                    if send_set_activity(c, &state).is_err() {
-                        conn = None;
-                        if let Ok(mut fresh) = connect_and_handshake(&effective_cid) {
-                            if send_set_activity(&mut fresh, &state).is_ok() {
-                                conn = Some(fresh);
+                    match send_set_activity(c, &state) {
+                        Ok(()) => sent_ok = true,
+                        Err(IpcError::Protocol) => {}
+                        Err(IpcError::Io) => {
+                            conn = None;
+                            if let Ok(mut fresh) = connect_and_handshake(&effective_cid) {
+                                if send_set_activity(&mut fresh, &state).is_ok() {
+                                    conn = Some(fresh);
+                                    sent_ok = true;
+                                }
                             }
                         }
                     }
+                }
+
+                if sent_ok {
+                    last_acked = Some(state);
+                } else {
+                    // Leave `last_acked` unchanged so we retry the latest state after cooldown.
+                    next_flush_at = Some(Instant::now() + RETRY_DELAY);
                 }
             }
         });
@@ -190,8 +253,8 @@ fn open_ipc_socket() -> Result<IpcConn, String> {
             let path = dir.join(format!("discord-ipc-{i}"));
             if path.exists() {
                 if let Ok(stream) = std::os::unix::net::UnixStream::connect(&path) {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(900)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
                     return Ok(stream);
                 }
             }
@@ -239,47 +302,101 @@ fn read_frame_with_op<R: Read>(stream: &mut R) -> Result<(u32, String), String> 
     Ok((op, String::from_utf8_lossy(&buf).to_string()))
 }
 
-fn read_frame<R: Read>(stream: &mut R) -> Result<String, String> {
-    read_frame_with_op(stream).map(|(_, body)| body)
+#[derive(Debug, PartialEq, Eq)]
+enum IpcError {
+    Io,
+    Protocol,
 }
 
-fn send_set_activity(conn: &mut IpcConn, state: &PresenceState) -> Result<(), String> {
+#[derive(Debug, PartialEq, Eq)]
+enum AckVerdict {
+    MatchedOk,
+    Error,
+    IgnoreAndReadNext,
+}
+
+fn parse_ipc_ack_response(op: u32, body: &str, expected_nonce: &str) -> AckVerdict {
+    if op == 2 {
+        return AckVerdict::Error;
+    }
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(body) else {
+        return AckVerdict::IgnoreAndReadNext;
+    };
+    let nonce = val.get("nonce").and_then(|v| v.as_str());
+    let is_error = val.get("evt").and_then(|v| v.as_str()) == Some("ERROR");
+    if is_error {
+        return match nonce {
+            Some(n) if n == expected_nonce => AckVerdict::Error,
+            None => AckVerdict::Error,
+            _ => AckVerdict::IgnoreAndReadNext,
+        };
+    }
+    if nonce == Some(expected_nonce) {
+        AckVerdict::MatchedOk
+    } else {
+        AckVerdict::IgnoreAndReadNext
+    }
+}
+
+fn send_command_and_wait_ack(
+    conn: &mut IpcConn,
+    payload: &serde_json::Value,
+    nonce: &str,
+) -> Result<(), IpcError> {
+    write_frame(conn, 1, &payload.to_string()).map_err(|_| IpcError::Io)?;
+    for _ in 0..4 {
+        let (op, body) = read_frame_with_op(conn).map_err(|_| IpcError::Io)?;
+        match parse_ipc_ack_response(op, &body, nonce) {
+            AckVerdict::MatchedOk => return Ok(()),
+            AckVerdict::Error => return Err(IpcError::Protocol),
+            AckVerdict::IgnoreAndReadNext => continue,
+        }
+    }
+    Err(IpcError::Io)
+}
+
+fn build_activity_json(state: &PresenceState) -> serde_json::Value {
     let (details, sub_state) = format_presence(state.language, &state.kind);
+    let mut activity = serde_json::json!({
+        "details": details,
+        "timestamps": {
+            "start": state.started_at
+        },
+        "assets": {
+            "large_image": "minecraft"
+        }
+    });
+    // Discord IPC rejects empty strings in `state`; omit it when there is no secondary line.
+    if !sub_state.trim().is_empty() {
+        activity["state"] = serde_json::Value::String(sub_state);
+    }
+    activity
+}
+
+fn send_set_activity(conn: &mut IpcConn, state: &PresenceState) -> Result<(), IpcError> {
+    let nonce = uuid::Uuid::new_v4().to_string();
     let payload = serde_json::json!({
         "cmd": "SET_ACTIVITY",
         "args": {
             "pid": std::process::id(),
-            "activity": {
-                "details": details,
-                "state": sub_state,
-                "timestamps": {
-                    "start": state.started_at
-                },
-                "assets": {
-                    "large_image": "minecraft",
-                    "large_text": "Svarka Launcher"
-                }
-            }
+            "activity": build_activity_json(state)
         },
-        "nonce": uuid::Uuid::new_v4().to_string()
+        "nonce": nonce
     });
-    write_frame(conn, 1, &payload.to_string())?;
-    let _ = read_frame(conn);
-    Ok(())
+    send_command_and_wait_ack(conn, &payload, &nonce)
 }
 
-fn send_clear_activity(conn: &mut IpcConn) -> Result<(), String> {
+fn send_clear_activity(conn: &mut IpcConn) -> Result<(), IpcError> {
+    let nonce = uuid::Uuid::new_v4().to_string();
     let payload = serde_json::json!({
         "cmd": "SET_ACTIVITY",
         "args": {
             "pid": std::process::id(),
             "activity": serde_json::Value::Null
         },
-        "nonce": uuid::Uuid::new_v4().to_string()
+        "nonce": nonce
     });
-    write_frame(conn, 1, &payload.to_string())?;
-    let _ = read_frame(conn);
-    Ok(())
+    send_command_and_wait_ack(conn, &payload, &nonce)
 }
 
 #[cfg(test)]
@@ -304,6 +421,67 @@ mod tests {
         let (d_uk, s_uk) = format_presence(Language::Uk, &playing);
         assert_eq!(d_uk, "Грає в 1.21.4 (Fabric)");
         assert_eq!(s_uk, "Збірка: Survival");
+
+        for kind in [
+            DiscordActivityKind::InLauncher,
+            DiscordActivityKind::Console,
+            DiscordActivityKind::Accounts,
+        ] {
+            let (_d, s) = format_presence(Language::Ru, &kind);
+            assert!(s.is_empty());
+            let activity = build_activity_json(&PresenceState {
+                kind,
+                language: Language::Ru,
+                ..PresenceState::default()
+            });
+            assert!(activity.get("state").is_none());
+            assert!(activity["assets"].get("large_text").is_none());
+        }
+
+        let playing_activity = build_activity_json(&PresenceState {
+            kind: playing,
+            language: Language::En,
+            ..PresenceState::default()
+        });
+        assert_eq!(playing_activity["state"], "Instance: Survival");
+        assert!(playing_activity["assets"].get("large_text").is_none());
+    }
+
+    #[test]
+    fn test_ipc_ack_parsing_and_send_pacing() {
+        assert_eq!(
+            parse_ipc_ack_response(
+                1,
+                r#"{"cmd":"SET_ACTIVITY","evt":null,"nonce":"n-1"}"#,
+                "n-1"
+            ),
+            AckVerdict::MatchedOk
+        );
+        assert_eq!(
+            parse_ipc_ack_response(
+                1,
+                r#"{"cmd":"SET_ACTIVITY","evt":"ERROR","nonce":"n-1","data":{"code":4009}}"#,
+                "n-1"
+            ),
+            AckVerdict::Error
+        );
+        assert_eq!(
+            parse_ipc_ack_response(
+                1,
+                r#"{"cmd":"SET_ACTIVITY","evt":null,"nonce":"stale-0"}"#,
+                "n-1"
+            ),
+            AckVerdict::IgnoreAndReadNext
+        );
+        assert_eq!(parse_ipc_ack_response(2, "{}", "n-1"), AckVerdict::Error);
+
+        let now = Instant::now();
+        let d_recent = next_send_deadline(Some(now));
+        assert!(d_recent >= now + MIN_SEND_SPACING - Duration::from_millis(20));
+
+        let d_idle = next_send_deadline(Some(now - Duration::from_secs(10)));
+        assert!(d_idle >= Instant::now());
+        assert!(d_idle < Instant::now() + DEBOUNCE_WINDOW + Duration::from_millis(50));
     }
 }
 

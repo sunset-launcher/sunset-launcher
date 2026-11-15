@@ -202,6 +202,170 @@ pub fn save_launcher_settings(
     fs::write(&path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn encode_logo_ico_bytes() -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(include_bytes!("../logo.png"))
+        .map_err(|e| format!("Failed to decode embedded logo: {e}"))?;
+    let resized = img.resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
+    let mut buf = std::io::Cursor::new(Vec::new());
+    resized
+        .write_to(&mut buf, image::ImageFormat::Ico)
+        .map_err(|e| format!("Failed to encode ICO: {e}"))?;
+    Ok(buf.into_inner())
+}
+
+/// Ensures a 256x256 `.ico` file generated from the embedded logo exists in the launcher root directory.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn ensure_windows_icon(paths: &LauncherPaths) -> Result<PathBuf, String> {
+    let ico_path = paths.root.join("svarka-launcher.ico");
+    let ico_bytes = encode_logo_ico_bytes()?;
+    let needs_write = match fs::read(&ico_path) {
+        Ok(existing) => existing != ico_bytes,
+        Err(_) => true,
+    };
+    if needs_write {
+        fs::write(&ico_path, ico_bytes)
+            .map_err(|e| format!("Failed to write {}: {e}", ico_path.display()))?;
+    }
+    Ok(ico_path)
+}
+
+/// Ensures a Start Menu shortcut (`Svarka Launcher.lnk`) with a crisp `.ico` exists on Windows.
+#[cfg(target_os = "windows")]
+pub fn ensure_windows_shortcut(paths: &LauncherPaths) -> Result<PathBuf, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Failed to locate executable: {e}"))?;
+    let exe_str = exe_path.to_string_lossy().to_string();
+    let work_dir = exe_path
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| paths.root.to_string_lossy().to_string());
+
+    let ico_path = ensure_windows_icon(paths)?;
+    let data_dir = dirs::data_dir()
+        .or_else(dirs::data_local_dir)
+        .ok_or_else(|| "Could not resolve AppData directory".to_string())?;
+    let programs_dir = data_dir
+        .join("Microsoft")
+        .join("Windows")
+        .join("Start Menu")
+        .join("Programs");
+    fs::create_dir_all(&programs_dir)
+        .map_err(|e| format!("Failed to create {}: {e}", programs_dir.display()))?;
+    let lnk_path = programs_dir.join("Svarka Launcher.lnk");
+
+    let stamp_path = paths.root.join(".windows-shortcut-target");
+    let prev_target = fs::read_to_string(&stamp_path).unwrap_or_default();
+    let expected_stamp = format!("{exe_str}\n{}", ico_path.display());
+    if lnk_path.exists() && prev_target == expected_stamp {
+        return Ok(lnk_path);
+    }
+
+    let script = "$ws=New-Object -ComObject WScript.Shell;$s=$ws.CreateShortcut($env:SVARKA_LNK);$s.TargetPath=$env:SVARKA_EXE;$s.WorkingDirectory=$env:SVARKA_DIR;$s.IconLocation=$env:SVARKA_ICO;$s.Description='Svarka Launcher';$s.Save()";
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", script])
+        .env("SVARKA_LNK", &lnk_path)
+        .env("SVARKA_EXE", &exe_str)
+        .env("SVARKA_DIR", &work_dir)
+        .env("SVARKA_ICO", &ico_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| format!("Failed to invoke powershell for Start Menu shortcut: {e}"))?;
+    if !status.success() {
+        return Err(format!("PowerShell shortcut creation exited with {status}"));
+    }
+
+    let _ = fs::write(&stamp_path, expected_stamp);
+    Ok(lnk_path)
+}
+
+/// Process-lifetime guard ensuring only one launcher instance uses the data directory at once.
+#[cfg(unix)]
+pub struct SingleInstanceGuard {
+    _listener: std::os::unix::net::UnixListener,
+    sock_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.sock_path);
+    }
+}
+
+#[cfg(windows)]
+pub struct SingleInstanceGuard {
+    _file: fs::File,
+}
+
+fn try_acquire_single_instance_lock(paths: &LauncherPaths) -> Option<SingleInstanceGuard> {
+    let _ = fs::create_dir_all(&paths.root);
+    #[cfg(unix)]
+    {
+        let sock_path = paths.root.join("instance.sock");
+        match std::os::unix::net::UnixListener::bind(&sock_path) {
+            Ok(listener) => Some(SingleInstanceGuard {
+                _listener: listener,
+                sock_path,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                if std::os::unix::net::UnixStream::connect(&sock_path).is_ok() {
+                    None
+                } else {
+                    let _ = fs::remove_file(&sock_path);
+                    std::os::unix::net::UnixListener::bind(&sock_path)
+                        .ok()
+                        .map(|listener| SingleInstanceGuard {
+                            _listener: listener,
+                            sock_path,
+                        })
+                }
+            }
+            Err(_) => None,
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        use std::os::windows::fs::OpenOptionsExt;
+        let lock_path = paths.root.join("instance.lock");
+        match fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .share_mode(0)
+            .open(&lock_path)
+        {
+            Ok(mut file) => {
+                let _ = write!(file, "{}", std::process::id());
+                Some(SingleInstanceGuard { _file: file })
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+/// Acquires the single-instance lock, optionally waiting briefly for an exiting previous process during update relaunch.
+pub fn acquire_single_instance_lock(
+    paths: &LauncherPaths,
+    wait_for_relaunch: bool,
+) -> Option<SingleInstanceGuard> {
+    if let Some(guard) = try_acquire_single_instance_lock(paths) {
+        return Some(guard);
+    }
+    if wait_for_relaunch {
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Some(guard) = try_acquire_single_instance_lock(paths) {
+                return Some(guard);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +410,44 @@ mod tests {
 
         save_selected_profile_id(&paths, None).unwrap();
         assert_eq!(load_selected_profile_id(&paths), None);
+
+        let _ = fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn windows_icon_generation_produces_valid_256_ico() {
+        let paths = test_paths("win_ico");
+        let ico_path = ensure_windows_icon(&paths).unwrap();
+        assert!(ico_path.exists());
+
+        let bytes = fs::read(&ico_path).unwrap();
+        assert!(bytes.len() > 22);
+        assert_eq!(&bytes[0..6], &[0, 0, 1, 0, 1, 0]);
+
+        let decoded =
+            image::load_from_memory_with_format(&bytes, image::ImageFormat::Ico).unwrap();
+        assert_eq!(decoded.width(), 256);
+        assert_eq!(decoded.height(), 256);
+
+        // Second call should remain valid and idempotent.
+        let ico_path_again = ensure_windows_icon(&paths).unwrap();
+        assert_eq!(ico_path_again, ico_path);
+        assert_eq!(fs::read(&ico_path_again).unwrap(), bytes);
+
+        let _ = fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn single_instance_lock_prevents_duplicates_and_releases_on_drop() {
+        let paths = test_paths("single_lock");
+        let guard = acquire_single_instance_lock(&paths, false)
+            .expect("first lock acquisition should succeed");
+        assert!(acquire_single_instance_lock(&paths, false).is_none());
+
+        drop(guard);
+        let guard2 = acquire_single_instance_lock(&paths, false)
+            .expect("lock should be re-acquirable after drop");
+        drop(guard2);
 
         let _ = fs::remove_dir_all(&paths.root);
     }

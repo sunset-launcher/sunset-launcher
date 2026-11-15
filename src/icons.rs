@@ -428,6 +428,9 @@ pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
         Color32::from_rgb(13, 24, 20),
         Stroke::new(1.25_f32, Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 195)),
     );
+    let acc = crate::theme::accent();
+    let acc_light = crate::theme::lerp_color(acc, Color32::WHITE, 0.35);
+    let acc_dark = crate::theme::lerp_color(acc, Color32::BLACK, 0.44);
     // Subtle inner top specular rim
     let pad = (s * 0.22).max(5.0);
     painter.line_segment(
@@ -435,7 +438,7 @@ pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
             Pos2::new(rect.left() + pad, rect.top() + 1.6),
             Pos2::new(rect.right() - pad, rect.top() + 1.6),
         ],
-        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(160, 255, 200, 110)),
+        Stroke::new(1.0_f32, crate::theme::with_alpha(acc_light, 110)),
     );
 
     // 3-face shaded isometric voxel cube
@@ -452,17 +455,17 @@ pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
 
     painter.add(egui::Shape::convex_polygon(
         vec![top, tr, c, tl],
-        Color32::from_rgb(66, 245, 138),
+        acc_light,
         Stroke::NONE,
     ));
     painter.add(egui::Shape::convex_polygon(
         vec![tl, c, bot, bl],
-        Color32::from_rgb(27, 217, 106),
+        acc,
         Stroke::NONE,
     ));
     painter.add(egui::Shape::convex_polygon(
         vec![c, tr, br, bot],
-        Color32::from_rgb(14, 128, 62),
+        acc_dark,
         Stroke::NONE,
     ));
 
@@ -483,7 +486,7 @@ pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
     ];
     let halo_stroke = Stroke::new(
         (s * 0.11).clamp(2.2, 4.2),
-        Color32::from_rgba_unmultiplied(140, 255, 205, 125),
+        crate::theme::with_alpha(acc_light, 125),
     );
     let core_stroke = Stroke::new((s * 0.055).clamp(1.4, 2.3), Color32::from_rgb(255, 252, 235));
     for pair in bolt.windows(2) {

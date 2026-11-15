@@ -165,6 +165,8 @@ pub struct Profile {
     pub server_address: String,
     #[serde(default)]
     pub prefer_discrete_gpu: bool,
+    #[serde(default)]
+    pub icon_path: String,
 }
 
 impl Profile {
@@ -188,6 +190,7 @@ impl Profile {
             fullscreen: false,
             server_address: String::new(),
             prefer_discrete_gpu: false,
+            icon_path: String::new(),
         }
     }
 }
@@ -388,7 +391,27 @@ pub enum WorkerEvent {
         url: String,
         image: Result<IconImage, String>,
     },
+    SkinLoaded {
+        key: String,
+        head: Result<IconImage, String>,
+        body: Result<IconImage, String>,
+    },
+    WorldBackupFinished(Result<PathBuf, String>),
+    WorldRestoreFinished(Result<String, String>),
+    LauncherUpdateChecked(Result<Option<LauncherUpdateInfo>, String>),
+    LauncherUpdateInstalled(Result<PathBuf, String>),
     JavaDetected(Vec<JavaInstall>),
+}
+
+/// Information about a newer release on GitHub.
+#[derive(Debug, Clone)]
+pub struct LauncherUpdateInfo {
+    pub version: String,
+    pub html_url: String,
+    pub notes: String,
+    pub download_url: Option<String>,
+    pub asset_name: Option<String>,
+    pub asset_size: Option<u64>,
 }
 
 /// A Java runtime found on the system.
@@ -440,6 +463,7 @@ impl ModrinthSort {
 pub enum ModrinthProjectType {
     Mod,
     Resourcepack,
+    Shader,
     Modpack,
 }
 
@@ -448,6 +472,7 @@ impl ModrinthProjectType {
         match self {
             ModrinthProjectType::Mod => "mod",
             ModrinthProjectType::Resourcepack => "resourcepack",
+            ModrinthProjectType::Shader => "shader",
             ModrinthProjectType::Modpack => "modpack",
         }
     }
@@ -456,6 +481,7 @@ impl ModrinthProjectType {
         match self {
             ModrinthProjectType::Mod => "Mods",
             ModrinthProjectType::Resourcepack => "Resourcepacks",
+            ModrinthProjectType::Shader => "Shaders",
             ModrinthProjectType::Modpack => "Modpacks",
         }
     }
@@ -639,17 +665,57 @@ pub enum ThemePreset {
     Nord,
     Amber,
     Amethyst,
+    Midnight,
+    Light,
     Custom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomPalette {
+    pub bg_void: [u8; 3],
+    pub bg_sidebar: [u8; 3],
+    pub bg_elevated: [u8; 3],
+    pub bg_card: [u8; 3],
+    pub bg_card_hover: [u8; 3],
+    pub bg_input: [u8; 3],
+    pub border_subtle: [u8; 3],
+    pub border_strong: [u8; 3],
+    pub text_primary: [u8; 3],
+    pub text_secondary: [u8; 3],
+    pub text_muted: [u8; 3],
+    pub accent: [u8; 3],
+}
+
+impl Default for CustomPalette {
+    fn default() -> Self {
+        Self {
+            bg_void: [18, 20, 24],
+            bg_sidebar: [24, 26, 32],
+            bg_elevated: [30, 33, 40],
+            bg_card: [36, 40, 48],
+            bg_card_hover: [44, 49, 59],
+            bg_input: [15, 17, 21],
+            border_subtle: [46, 51, 61],
+            border_strong: [69, 76, 90],
+            text_primary: [238, 242, 247],
+            text_secondary: [155, 163, 180],
+            text_muted: [103, 112, 130],
+            accent: [27, 217, 106],
+        }
+    }
+}
+
 impl ThemePreset {
-    pub const ALL: [ThemePreset; 7] = [
+    pub const ALL: [ThemePreset; 9] = [
         ThemePreset::Emerald,
         ThemePreset::Cyan,
         ThemePreset::Crimson,
         ThemePreset::Nord,
         ThemePreset::Amber,
         ThemePreset::Amethyst,
+        ThemePreset::Midnight,
+        ThemePreset::Light,
         ThemePreset::Custom,
     ];
 
@@ -661,19 +727,105 @@ impl ThemePreset {
             ThemePreset::Nord => "Nord Blue",
             ThemePreset::Amber => "Amber Gold",
             ThemePreset::Amethyst => "Amethyst",
+            ThemePreset::Midnight => "Midnight",
+            ThemePreset::Light => "Light",
             ThemePreset::Custom => "Custom",
         }
     }
 
-    pub fn rgb(self) -> [u8; 3] {
+    pub fn palette(self) -> CustomPalette {
         match self {
-            ThemePreset::Emerald => [27, 217, 106],
-            ThemePreset::Cyan => [34, 211, 238],
-            ThemePreset::Crimson => [239, 68, 68],
-            ThemePreset::Nord => [96, 165, 250],
-            ThemePreset::Amber => [245, 158, 11],
-            ThemePreset::Amethyst => [168, 85, 247],
-            ThemePreset::Custom => [27, 217, 106],
+            ThemePreset::Emerald | ThemePreset::Custom => CustomPalette::default(),
+            ThemePreset::Cyan => CustomPalette {
+                bg_void: [15, 19, 24],
+                bg_sidebar: [20, 25, 32],
+                bg_elevated: [26, 32, 41],
+                bg_card: [31, 39, 49],
+                bg_card_hover: [39, 49, 61],
+                bg_input: [12, 15, 20],
+                border_subtle: [42, 53, 66],
+                border_strong: [62, 78, 96],
+                accent: [34, 211, 238],
+                ..CustomPalette::default()
+            },
+            ThemePreset::Crimson => CustomPalette {
+                bg_void: [22, 17, 19],
+                bg_sidebar: [29, 22, 25],
+                bg_elevated: [36, 28, 31],
+                bg_card: [43, 33, 37],
+                bg_card_hover: [54, 41, 46],
+                bg_input: [17, 13, 15],
+                border_subtle: [58, 44, 49],
+                border_strong: [84, 62, 70],
+                accent: [239, 68, 68],
+                ..CustomPalette::default()
+            },
+            ThemePreset::Nord => CustomPalette {
+                bg_void: [46, 52, 64],
+                bg_sidebar: [36, 41, 51],
+                bg_elevated: [59, 66, 82],
+                bg_card: [67, 76, 94],
+                bg_card_hover: [76, 86, 106],
+                bg_input: [30, 34, 42],
+                border_subtle: [76, 86, 106],
+                border_strong: [94, 129, 172],
+                text_primary: [236, 239, 244],
+                text_secondary: [216, 222, 233],
+                text_muted: [143, 155, 179],
+                accent: [136, 192, 208],
+            },
+            ThemePreset::Amber => CustomPalette {
+                bg_void: [22, 19, 16],
+                bg_sidebar: [29, 25, 21],
+                bg_elevated: [37, 32, 27],
+                bg_card: [45, 39, 32],
+                bg_card_hover: [56, 48, 40],
+                bg_input: [17, 15, 12],
+                border_subtle: [60, 52, 42],
+                border_strong: [88, 75, 60],
+                accent: [245, 158, 11],
+                ..CustomPalette::default()
+            },
+            ThemePreset::Amethyst => CustomPalette {
+                bg_void: [19, 16, 28],
+                bg_sidebar: [25, 21, 37],
+                bg_elevated: [32, 27, 47],
+                bg_card: [39, 33, 57],
+                bg_card_hover: [49, 41, 71],
+                bg_input: [15, 12, 22],
+                border_subtle: [52, 44, 76],
+                border_strong: [78, 66, 112],
+                accent: [168, 85, 247],
+                ..CustomPalette::default()
+            },
+            ThemePreset::Midnight => CustomPalette {
+                bg_void: [11, 16, 30],
+                bg_sidebar: [15, 22, 40],
+                bg_elevated: [20, 29, 52],
+                bg_card: [25, 36, 64],
+                bg_card_hover: [33, 47, 82],
+                bg_input: [8, 12, 22],
+                border_subtle: [39, 54, 92],
+                border_strong: [58, 80, 132],
+                text_primary: [235, 241, 255],
+                text_secondary: [154, 171, 206],
+                text_muted: [102, 118, 156],
+                accent: [56, 189, 248],
+            },
+            ThemePreset::Light => CustomPalette {
+                bg_void: [241, 244, 249],
+                bg_sidebar: [255, 255, 255],
+                bg_elevated: [255, 255, 255],
+                bg_card: [255, 255, 255],
+                bg_card_hover: [232, 237, 245],
+                bg_input: [229, 234, 242],
+                border_subtle: [208, 215, 226],
+                border_strong: [170, 180, 196],
+                text_primary: [22, 27, 38],
+                text_secondary: [78, 89, 108],
+                text_muted: [120, 132, 152],
+                accent: [37, 99, 235],
+            },
         }
     }
 }
@@ -693,10 +845,22 @@ pub struct LauncherSettings {
     pub theme_preset: ThemePreset,
     #[serde(default = "default_custom_accent")]
     pub custom_accent: [u8; 3],
+    #[serde(default)]
+    pub custom_palette: CustomPalette,
     #[serde(default = "default_true")]
     pub discord_rpc_enabled: bool,
     #[serde(default)]
     pub discord_client_id: String,
+    #[serde(default)]
+    pub ui_font_path: String,
+    #[serde(default)]
+    pub hide_on_launch: bool,
+    #[serde(default = "default_true")]
+    pub open_console_on_crash: bool,
+    #[serde(default = "default_true")]
+    pub check_updates_on_startup: bool,
+    #[serde(default)]
+    pub auto_update: bool,
 }
 
 impl Default for LauncherSettings {
@@ -705,18 +869,24 @@ impl Default for LauncherSettings {
             language: crate::i18n::Language::En,
             theme_preset: ThemePreset::Emerald,
             custom_accent: default_custom_accent(),
+            custom_palette: CustomPalette::default(),
             discord_rpc_enabled: true,
             discord_client_id: String::new(),
+            ui_font_path: String::new(),
+            hide_on_launch: false,
+            open_console_on_crash: true,
+            check_updates_on_startup: true,
+            auto_update: false,
         }
     }
 }
 
 impl LauncherSettings {
-    pub fn effective_accent_rgb(&self) -> [u8; 3] {
+    pub fn effective_palette(&self) -> CustomPalette {
         if self.theme_preset == ThemePreset::Custom {
-            self.custom_accent
+            self.custom_palette
         } else {
-            self.theme_preset.rgb()
+            self.theme_preset.palette()
         }
     }
 }

@@ -625,6 +625,7 @@ pub fn launch_game(
     account: &Account,
     prepared: &PreparedLaunch,
     authlib_injector: Option<&Path>,
+    quick_world: Option<&str>,
     tx: Sender<WorkerEvent>,
 ) -> Result<GameHandle, String> {
     let required_java = prepared
@@ -776,7 +777,7 @@ pub fn launch_game(
         collect_arg_values(game_entries, &vars, &mut cmd_args);
     }
 
-    append_profile_launch_args(profile, &mut cmd_args);
+    append_profile_launch_args_with_world(profile, quick_world, &mut cmd_args);
 
     let _ = tx.send(WorkerEvent::Log(format!(
         "[Launcher] Starting {} ({}) with {} in {}",
@@ -845,7 +846,18 @@ pub fn launch_game(
 }
 
 /// Appends instance window resolution, fullscreen, and quick-play server flags to `cmd_args`.
+#[cfg(test)]
 pub fn append_profile_launch_args(profile: &Profile, cmd_args: &mut Vec<String>) {
+    append_profile_launch_args_with_world(profile, None, cmd_args);
+}
+
+/// Appends instance launch flags, preferring `quick_world` (`--quickPlaySingleplayer`) over
+/// `profile.server_address` when launching directly into a saved world.
+pub fn append_profile_launch_args_with_world(
+    profile: &Profile,
+    quick_world: Option<&str>,
+    cmd_args: &mut Vec<String>,
+) {
     if profile.fullscreen {
         cmd_args.push("--fullscreen".to_string());
     }
@@ -858,10 +870,15 @@ pub fn append_profile_launch_args(profile: &Profile, cmd_args: &mut Vec<String>)
         cmd_args.push("--height".to_string());
         cmd_args.push(h.to_string());
     }
-    let addr = profile.server_address.trim();
-    if !addr.is_empty() {
-        cmd_args.push("--quickPlayMultiplayer".to_string());
-        cmd_args.push(addr.to_string());
+    if let Some(world) = quick_world.map(str::trim).filter(|w| !w.is_empty()) {
+        cmd_args.push("--quickPlaySingleplayer".to_string());
+        cmd_args.push(world.to_string());
+    } else {
+        let addr = profile.server_address.trim();
+        if !addr.is_empty() {
+            cmd_args.push("--quickPlayMultiplayer".to_string());
+            cmd_args.push(addr.to_string());
+        }
     }
 }
 
@@ -977,5 +994,14 @@ mod tests {
         assert_eq!(found, fake_java);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_append_world_quickplay_overrides_server() {
+        let mut p = Profile::new("W".into(), "1.21.4".into(), ModLoader::Vanilla, "P".into());
+        p.server_address = "play.example.com".to_string();
+        let mut args = Vec::new();
+        append_profile_launch_args_with_world(&p, Some("MyWorld"), &mut args);
+        assert_eq!(args, vec!["--quickPlaySingleplayer", "MyWorld"]);
     }
 }

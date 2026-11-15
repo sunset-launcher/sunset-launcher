@@ -6,37 +6,74 @@ use eframe::egui::{
     Vec2,
 };
 
-// Surface hierarchy (deep obsidian -> elevated cards)
-pub const BG_VOID: Color32 = Color32::from_rgb(18, 20, 24);         // #121418 main canvas
-pub const BG_SIDEBAR: Color32 = Color32::from_rgb(24, 26, 32);      // #181A20 sidebar / chrome bars
-pub const BG_ELEVATED: Color32 = Color32::from_rgb(30, 33, 40);     // #1E2128 modals / popovers
-pub const BG_CARD: Color32 = Color32::from_rgb(36, 40, 48);         // #242830 cards
-pub const BG_CARD_HOVER: Color32 = Color32::from_rgb(44, 49, 59);   // #2C313B card hover
-pub const BG_INPUT: Color32 = Color32::from_rgb(15, 17, 21);        // #0F1115 inputs / tracks
+// Dynamic theme palette slots (updated via `set_theme_palette`)
+use std::sync::atomic::{AtomicU32, Ordering};
 
-pub const BORDER_SUBTLE: Color32 = Color32::from_rgb(46, 51, 61);   // #2E333D
-pub const BORDER_STRONG: Color32 = Color32::from_rgb(69, 76, 90);   // #454C5A
-
-pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(238, 242, 247);   // #EEF2F7
-pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(155, 163, 180); // #9BA3B4
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(103, 112, 130);     // #677082
-
-static ACTIVE_ACCENT: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new((27 << 16) | (217 << 8) | 106);
-
-/// Updates the active theme accent() color at runtime.
-pub fn set_accent_rgb(rgb: [u8; 3]) {
-    let packed = ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | (rgb[2] as u32);
-    ACTIVE_ACCENT.store(packed, std::sync::atomic::Ordering::Relaxed);
+const fn pack_rgb(r: u8, g: u8, b: u8) -> u32 {
+    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
-pub fn accent() -> Color32 {
-    let packed = ACTIVE_ACCENT.load(std::sync::atomic::Ordering::Relaxed);
+fn unpack_rgb(packed: u32) -> Color32 {
     Color32::from_rgb((packed >> 16) as u8, (packed >> 8) as u8, packed as u8)
 }
 
+fn store_rgb(slot: &AtomicU32, rgb: [u8; 3]) {
+    slot.store(pack_rgb(rgb[0], rgb[1], rgb[2]), Ordering::Relaxed);
+}
+
+static PAL_BG_VOID: AtomicU32 = AtomicU32::new(pack_rgb(18, 20, 24));
+static PAL_BG_SIDEBAR: AtomicU32 = AtomicU32::new(pack_rgb(24, 26, 32));
+static PAL_BG_ELEVATED: AtomicU32 = AtomicU32::new(pack_rgb(30, 33, 40));
+static PAL_BG_CARD: AtomicU32 = AtomicU32::new(pack_rgb(36, 40, 48));
+static PAL_BG_CARD_HOVER: AtomicU32 = AtomicU32::new(pack_rgb(44, 49, 59));
+static PAL_BG_INPUT: AtomicU32 = AtomicU32::new(pack_rgb(15, 17, 21));
+static PAL_BORDER_SUBTLE: AtomicU32 = AtomicU32::new(pack_rgb(46, 51, 61));
+static PAL_BORDER_STRONG: AtomicU32 = AtomicU32::new(pack_rgb(69, 76, 90));
+static PAL_TEXT_PRIMARY: AtomicU32 = AtomicU32::new(pack_rgb(238, 242, 247));
+static PAL_TEXT_SECONDARY: AtomicU32 = AtomicU32::new(pack_rgb(155, 163, 180));
+static PAL_TEXT_MUTED: AtomicU32 = AtomicU32::new(pack_rgb(103, 112, 130));
+static ACTIVE_ACCENT: AtomicU32 = AtomicU32::new(pack_rgb(27, 217, 106));
+
+pub fn bg_void() -> Color32 { unpack_rgb(PAL_BG_VOID.load(Ordering::Relaxed)) }
+pub fn bg_sidebar() -> Color32 { unpack_rgb(PAL_BG_SIDEBAR.load(Ordering::Relaxed)) }
+pub fn bg_elevated() -> Color32 { unpack_rgb(PAL_BG_ELEVATED.load(Ordering::Relaxed)) }
+pub fn bg_card() -> Color32 { unpack_rgb(PAL_BG_CARD.load(Ordering::Relaxed)) }
+pub fn bg_card_hover() -> Color32 { unpack_rgb(PAL_BG_CARD_HOVER.load(Ordering::Relaxed)) }
+pub fn bg_input() -> Color32 { unpack_rgb(PAL_BG_INPUT.load(Ordering::Relaxed)) }
+pub fn border_subtle() -> Color32 { unpack_rgb(PAL_BORDER_SUBTLE.load(Ordering::Relaxed)) }
+pub fn border_strong() -> Color32 { unpack_rgb(PAL_BORDER_STRONG.load(Ordering::Relaxed)) }
+pub fn text_primary() -> Color32 { unpack_rgb(PAL_TEXT_PRIMARY.load(Ordering::Relaxed)) }
+pub fn text_secondary() -> Color32 { unpack_rgb(PAL_TEXT_SECONDARY.load(Ordering::Relaxed)) }
+pub fn text_muted() -> Color32 { unpack_rgb(PAL_TEXT_MUTED.load(Ordering::Relaxed)) }
+
+/// Updates all 12 theme palette colors at runtime.
+pub fn set_theme_palette(p: &crate::models::CustomPalette) {
+    store_rgb(&PAL_BG_VOID, p.bg_void);
+    store_rgb(&PAL_BG_SIDEBAR, p.bg_sidebar);
+    store_rgb(&PAL_BG_ELEVATED, p.bg_elevated);
+    store_rgb(&PAL_BG_CARD, p.bg_card);
+    store_rgb(&PAL_BG_CARD_HOVER, p.bg_card_hover);
+    store_rgb(&PAL_BG_INPUT, p.bg_input);
+    store_rgb(&PAL_BORDER_SUBTLE, p.border_subtle);
+    store_rgb(&PAL_BORDER_STRONG, p.border_strong);
+    store_rgb(&PAL_TEXT_PRIMARY, p.text_primary);
+    store_rgb(&PAL_TEXT_SECONDARY, p.text_secondary);
+    store_rgb(&PAL_TEXT_MUTED, p.text_muted);
+    store_rgb(&ACTIVE_ACCENT, p.accent);
+}
+
+pub fn is_light_theme() -> bool {
+    let c = bg_void();
+    0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32 > 128.0
+}
+
+pub fn accent() -> Color32 {
+    unpack_rgb(ACTIVE_ACCENT.load(Ordering::Relaxed))
+}
+
 pub fn accent_hover() -> Color32 {
-    lerp_color(accent(), PURE_WHITE, 0.16)
+    let target = if is_light_theme() { Color32::BLACK } else { PURE_WHITE };
+    lerp_color(accent(), target, 0.16)
 }
 
 pub fn accent_dark() -> Color32 {
@@ -50,11 +87,19 @@ pub fn accent_dark() -> Color32 {
 }
 
 pub fn accent_dim() -> Color32 {
-    lerp_color(BG_VOID, accent(), 0.22)
+    lerp_color(bg_void(), accent(), 0.22)
 }
 
 pub fn bg_card_active() -> Color32 {
-    lerp_color(BG_CARD, accent(), 0.11)
+    lerp_color(bg_card(), accent(), 0.11)
+}
+
+pub fn accent_text() -> Color32 {
+    if is_light_theme() {
+        lerp_color(accent(), Color32::BLACK, 0.45)
+    } else {
+        lerp_color(accent(), PURE_WHITE, 0.58)
+    }
 }
 
 pub const DANGER: Color32 = Color32::from_rgb(229, 72, 77);         // #E5484D
@@ -115,61 +160,63 @@ pub fn apply_modrinth_theme(ctx: &egui::Context) {
         FontId::new(12.0, FontFamily::Monospace),
     );
 
-    let mut v = egui::Visuals::dark();
-    v.dark_mode = true;
+    let light = is_light_theme();
+    let mut v = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
+    v.dark_mode = !light;
     v.override_text_color = None;
 
-    v.panel_fill = BG_VOID;
-    v.window_fill = BG_ELEVATED;
+    v.panel_fill = bg_void();
+    v.window_fill = bg_elevated();
     v.window_rounding = Rounding::same(12.0);
-    v.window_stroke = Stroke::new(1.0_f32, BORDER_STRONG);
+    v.window_stroke = Stroke::new(1.0_f32, border_strong());
+    let shadow_alpha = if light { 35 } else { 165 };
     v.window_shadow = egui::epaint::Shadow {
         offset: Vec2::new(0.0, 10.0),
         blur: 24.0,
         spread: 1.0,
-        color: Color32::from_rgba_unmultiplied(0, 0, 0, 165),
+        color: Color32::from_rgba_unmultiplied(0, 0, 0, shadow_alpha),
     };
     v.popup_shadow = egui::epaint::Shadow {
         offset: Vec2::new(0.0, 6.0),
         blur: 16.0,
         spread: 0.0,
-        color: Color32::from_rgba_unmultiplied(0, 0, 0, 140),
+        color: Color32::from_rgba_unmultiplied(0, 0, 0, shadow_alpha.saturating_sub(25)),
     };
-    v.extreme_bg_color = BG_INPUT;
-    v.faint_bg_color = Color32::from_rgb(24, 27, 33);
-    v.code_bg_color = BG_CARD;
+    v.extreme_bg_color = bg_input();
+    v.faint_bg_color = lerp_color(bg_void(), bg_card(), 0.35);
+    v.code_bg_color = bg_card();
 
     v.selection.bg_fill = accent_dim();
-    v.selection.stroke = Stroke::new(1.0_f32, PURE_WHITE);
+    v.selection.stroke = Stroke::new(1.0_f32, text_primary());
 
-    v.widgets.noninteractive.bg_fill = BG_CARD;
-    v.widgets.noninteractive.weak_bg_fill = BG_CARD;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER_SUBTLE);
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
+    v.widgets.noninteractive.bg_fill = bg_card();
+    v.widgets.noninteractive.weak_bg_fill = bg_card();
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, border_subtle());
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, text_primary());
     v.widgets.noninteractive.rounding = Rounding::same(8.0);
 
-    v.widgets.inactive.bg_fill = Color32::from_rgb(28, 32, 40);
-    v.widgets.inactive.weak_bg_fill = Color32::from_rgb(32, 36, 45);
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(56, 63, 76));
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
+    v.widgets.inactive.bg_fill = lerp_color(bg_card(), bg_input(), 0.35);
+    v.widgets.inactive.weak_bg_fill = bg_card();
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, border_subtle());
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, text_primary());
     v.widgets.inactive.rounding = Rounding::same(8.0);
 
-    v.widgets.hovered.bg_fill = Color32::from_rgb(42, 48, 59);
-    v.widgets.hovered.weak_bg_fill = BG_CARD_HOVER;
+    v.widgets.hovered.bg_fill = bg_card_hover();
+    v.widgets.hovered.weak_bg_fill = bg_card_hover();
     v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, accent());
-    v.widgets.hovered.fg_stroke = Stroke::new(1.2_f32, PURE_WHITE);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.2_f32, text_primary());
     v.widgets.hovered.rounding = Rounding::same(8.0);
 
     v.widgets.active.bg_fill = accent_dim();
     v.widgets.active.weak_bg_fill = accent_dim();
     v.widgets.active.bg_stroke = Stroke::new(1.0_f32, accent());
-    v.widgets.active.fg_stroke = Stroke::new(1.5_f32, PURE_WHITE);
+    v.widgets.active.fg_stroke = Stroke::new(1.5_f32, text_primary());
     v.widgets.active.rounding = Rounding::same(8.0);
 
-    v.widgets.open.bg_fill = BG_CARD_HOVER;
-    v.widgets.open.weak_bg_fill = BG_CARD_HOVER;
+    v.widgets.open.bg_fill = bg_card_hover();
+    v.widgets.open.weak_bg_fill = bg_card_hover();
     v.widgets.open.bg_stroke = Stroke::new(1.0_f32, accent());
-    v.widgets.open.fg_stroke = Stroke::new(1.0_f32, PURE_WHITE);
+    v.widgets.open.fg_stroke = Stroke::new(1.0_f32, text_primary());
     v.widgets.open.rounding = Rounding::same(8.0);
 
     v.slider_trailing_fill = true;
@@ -178,17 +225,17 @@ pub fn apply_modrinth_theme(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
-/// Draws a card frame with optional animated hover and emerald selection border.
+/// Draws a card frame with optional animated hover and accent selection border.
 pub fn card_frame(selected: bool, hover_t: f32) -> egui::Frame {
     let bg = if selected {
-        lerp_color(bg_card_active(), Color32::from_rgb(33, 60, 47), hover_t)
+        lerp_color(bg_card_active(), lerp_color(bg_card(), accent(), 0.18), hover_t)
     } else {
-        lerp_color(BG_CARD, BG_CARD_HOVER, hover_t)
+        lerp_color(bg_card(), bg_card_hover(), hover_t)
     };
     let border = if selected {
         accent()
     } else {
-        lerp_color(BORDER_SUBTLE, BORDER_STRONG, hover_t)
+        lerp_color(border_subtle(), border_strong(), hover_t)
     };
     egui::Frame::none()
         .fill(bg)
@@ -248,7 +295,7 @@ fn render_button_impl(
     } else {
         Some(
             ui.painter()
-                .layout_no_wrap(text.to_string(), font, TEXT_PRIMARY),
+                .layout_no_wrap(text.to_string(), font, text_primary()),
         )
     };
     let icon_sz = (height * 0.48).clamp(11.0, 15.0);
@@ -292,13 +339,14 @@ fn render_button_impl(
     if ui.is_rect_visible(rect) {
         let (base_bg, hover_bg, base_border, hover_border, base_fg, hover_fg, glow_col) =
             if !enabled {
+                let dis_bg = lerp_color(bg_void(), bg_card(), 0.45);
                 (
-                    Color32::from_rgb(28, 30, 36),
-                    Color32::from_rgb(28, 30, 36),
-                    BORDER_SUBTLE,
-                    BORDER_SUBTLE,
-                    TEXT_MUTED,
-                    TEXT_MUTED,
+                    dis_bg,
+                    dis_bg,
+                    border_subtle(),
+                    border_subtle(),
+                    text_muted(),
+                    text_muted(),
                     Color32::TRANSPARENT,
                 )
             } else {
@@ -313,32 +361,46 @@ fn render_button_impl(
                         accent(),
                     ),
                     ButtonVariant::Secondary => (
-                        BG_CARD,
-                        BG_CARD_HOVER,
-                        BORDER_SUBTLE,
-                        BORDER_STRONG,
-                        TEXT_PRIMARY,
-                        PURE_WHITE,
-                        BORDER_STRONG,
+                        bg_card(),
+                        bg_card_hover(),
+                        border_subtle(),
+                        border_strong(),
+                        text_primary(),
+                        text_primary(),
+                        border_strong(),
                     ),
                     ButtonVariant::Subtle => (
-                        Color32::from_rgb(24, 27, 33),
-                        BG_CARD_HOVER,
-                        BORDER_SUBTLE,
-                        BORDER_STRONG,
-                        TEXT_SECONDARY,
-                        PURE_WHITE,
-                        BORDER_SUBTLE,
+                        bg_elevated(),
+                        bg_card_hover(),
+                        border_subtle(),
+                        border_strong(),
+                        text_secondary(),
+                        text_primary(),
+                        border_subtle(),
                     ),
-                    ButtonVariant::Danger => (
-                        Color32::from_rgb(46, 28, 32),
-                        DANGER,
-                        Color32::from_rgb(96, 46, 52),
-                        DANGER_HOVER,
-                        Color32::from_rgb(248, 136, 140),
-                        PURE_WHITE,
-                        DANGER,
-                    ),
+                    ButtonVariant::Danger => {
+                        if is_light_theme() {
+                            (
+                                lerp_color(bg_card(), DANGER, 0.12),
+                                DANGER,
+                                lerp_color(border_subtle(), DANGER, 0.55),
+                                DANGER_HOVER,
+                                Color32::from_rgb(178, 30, 38),
+                                PURE_WHITE,
+                                DANGER,
+                            )
+                        } else {
+                            (
+                                Color32::from_rgb(46, 28, 32),
+                                DANGER,
+                                Color32::from_rgb(96, 46, 52),
+                                DANGER_HOVER,
+                                Color32::from_rgb(248, 136, 140),
+                                PURE_WHITE,
+                                DANGER,
+                            )
+                        }
+                    }
                 }
             };
 
@@ -473,7 +535,7 @@ pub fn ui_pill_tab_icon(
     let font = FontId::new(12.5, FontFamily::Proportional);
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_string(), font, TEXT_PRIMARY);
+        .layout_no_wrap(text.to_string(), font, text_primary());
     let icon_sz = 12.5;
     let gap = if icon.is_some() { 5.5 } else { 0.0 };
     let content_w = (if icon.is_some() { icon_sz } else { 0.0 }) + gap + galley.size().x;
@@ -503,16 +565,16 @@ pub fn ui_pill_tab_icon(
 
     if ui.is_rect_visible(rect) {
         let draw_rect = rect.shrink(press_t * 0.9);
-        let idle_bg = lerp_color(Color32::from_rgb(26, 29, 35), BG_CARD_HOVER, hover_t);
+        let idle_bg = lerp_color(bg_elevated(), bg_card_hover(), hover_t);
         let bg = lerp_color(idle_bg, accent_dim(), active_t);
         let border = lerp_color(
-            lerp_color(BORDER_SUBTLE, BORDER_STRONG, hover_t),
+            lerp_color(border_subtle(), border_strong(), hover_t),
             accent(),
             active_t,
         );
         let fg = lerp_color(
-            lerp_color(TEXT_SECONDARY, PURE_WHITE, hover_t),
-            Color32::from_rgb(174, 252, 206),
+            lerp_color(text_secondary(), text_primary(), hover_t),
+            accent_text(),
             active_t,
         );
         let painter = ui.painter();
@@ -565,7 +627,7 @@ pub fn ui_loader_pill(
     let font = FontId::new(12.5, FontFamily::Proportional);
     let galley = ui
         .painter()
-        .layout_no_wrap(kind.label().to_string(), font, TEXT_PRIMARY);
+        .layout_no_wrap(kind.label().to_string(), font, text_primary());
     let dot_sz = 7.0;
     let gap = 6.0;
     let content_w = dot_sz + gap + galley.size().x;
@@ -586,15 +648,15 @@ pub fn ui_loader_pill(
     }
 
     if ui.is_rect_visible(rect) {
-        let idle_bg = lerp_color(Color32::from_rgb(26, 29, 35), BG_CARD_HOVER, hover_t);
+        let idle_bg = lerp_color(bg_elevated(), bg_card_hover(), hover_t);
         let bg = lerp_color(idle_bg, loader_bg, active_t);
         let border = lerp_color(
-            lerp_color(BORDER_SUBTLE, BORDER_STRONG, hover_t),
+            lerp_color(border_subtle(), border_strong(), hover_t),
             loader_border,
             active_t,
         );
         let fg = lerp_color(
-            lerp_color(TEXT_SECONDARY, PURE_WHITE, hover_t),
+            lerp_color(text_secondary(), text_primary(), hover_t),
             loader_fg,
             active_t,
         );
@@ -638,7 +700,7 @@ pub fn ui_checkbox(
     let font = FontId::new(12.5, FontFamily::Proportional);
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_string(), font, TEXT_PRIMARY);
+        .layout_no_wrap(label.to_string(), font, text_primary());
     let box_sz = 17.0;
     let gap = 7.0;
     let row_h = ui.spacing().interact_size.y.max(26.0);
@@ -671,12 +733,12 @@ pub fn ui_checkbox(
             Vec2::splat(box_sz),
         );
         let fill = lerp_color(
-            lerp_color(BG_INPUT, BG_CARD_HOVER, hover_t * 0.6),
+            lerp_color(bg_input(), bg_card_hover(), hover_t * 0.6),
             accent(),
             check_t,
         );
         let border = lerp_color(
-            lerp_color(BORDER_STRONG, PURE_WHITE, hover_t * 0.4),
+            lerp_color(border_strong(), text_primary(), hover_t * 0.4),
             accent_hover(),
             check_t,
         );
@@ -692,7 +754,7 @@ pub fn ui_checkbox(
             );
         }
 
-        let text_col = lerp_color(TEXT_SECONDARY, PURE_WHITE, check_t.max(hover_t * 0.8));
+        let text_col = lerp_color(text_secondary(), text_primary(), check_t.max(hover_t * 0.8));
         painter.galley(
             Pos2::new(box_rect.right() + gap, rect.center().y - galley.size().y * 0.5),
             galley,
@@ -729,7 +791,7 @@ pub fn ui_text_input(
         ui.ctx().request_repaint();
     }
 
-    let border_col = lerp_color(BORDER_SUBTLE, accent(), focus_t);
+    let border_col = lerp_color(border_subtle(), accent(), focus_t);
     let total_w = width.max(80.0);
     let row_h = ui.spacing().interact_size.y.max(28.0);
     let mut now_focused = false;
@@ -753,7 +815,7 @@ pub fn ui_text_input(
                 ui.painter().rect(
                     box_rect,
                     Rounding::same(7.5),
-                    BG_INPUT,
+                    bg_input(),
                     Stroke::new(1.0_f32 + focus_t * 0.25, border_col),
                 );
             }
@@ -806,8 +868,8 @@ pub fn ui_search_input(
         ui.ctx().request_repaint();
     }
 
-    let border_col = lerp_color(BORDER_SUBTLE, accent(), focus_t);
-    let icon_col = lerp_color(TEXT_MUTED, accent(), focus_t);
+    let border_col = lerp_color(border_subtle(), accent(), focus_t);
+    let icon_col = lerp_color(text_muted(), accent(), focus_t);
     let mut now_focused = false;
 
     ui.allocate_ui_with_layout(
@@ -828,7 +890,7 @@ pub fn ui_search_input(
                 ui.painter().rect(
                     box_rect,
                     Rounding::same(7.5),
-                    BG_INPUT,
+                    bg_input(),
                     Stroke::new(1.0_f32 + focus_t * 0.3, border_col),
                 );
             }
@@ -854,7 +916,7 @@ pub fn ui_search_input(
                 let clr_col = if clr_resp.hovered() {
                     PURE_WHITE
                 } else {
-                    TEXT_SECONDARY
+                    text_secondary()
                 };
                 draw_icon(ui.painter(), clr_r.shrink(2.5), Icon::Close, clr_col);
                 if clr_resp.hovered() {
@@ -884,29 +946,30 @@ pub enum AlertKind {
 
 /// Renders an inline semantic alert banner with a leading vector icon.
 pub fn ui_alert_banner(ui: &mut egui::Ui, kind: AlertKind, text: &str, width: f32) {
+    let light = is_light_theme();
     let (bg, border, fg, icon) = match kind {
         AlertKind::Info => (
-            Color32::from_rgb(24, 34, 48),
+            if light { lerp_color(bg_card(), INFO, 0.14) } else { Color32::from_rgb(24, 34, 48) },
             INFO,
-            Color32::from_rgb(172, 212, 255),
+            if light { lerp_color(INFO, Color32::BLACK, 0.42) } else { Color32::from_rgb(172, 212, 255) },
             Icon::Sparkle,
         ),
         AlertKind::Success => (
             bg_card_active(),
             accent(),
-            Color32::from_rgb(162, 248, 198),
+            accent_text(),
             Icon::Check,
         ),
         AlertKind::Warning => (
-            Color32::from_rgb(48, 38, 22),
+            if light { lerp_color(bg_card(), WARNING, 0.14) } else { Color32::from_rgb(48, 38, 22) },
             WARNING,
-            Color32::from_rgb(252, 212, 134),
+            if light { lerp_color(WARNING, Color32::BLACK, 0.45) } else { Color32::from_rgb(252, 212, 134) },
             Icon::Alert,
         ),
         AlertKind::Error => (
-            Color32::from_rgb(50, 26, 30),
+            if light { lerp_color(bg_card(), DANGER, 0.13) } else { Color32::from_rgb(50, 26, 30) },
             DANGER,
-            Color32::from_rgb(255, 168, 172),
+            if light { lerp_color(DANGER, Color32::BLACK, 0.35) } else { Color32::from_rgb(255, 168, 172) },
             Icon::Alert,
         ),
     };
@@ -934,7 +997,7 @@ pub fn section_header(ui: &mut egui::Ui, title: &str) {
         egui::RichText::new(title)
             .size(10.5)
             .strong()
-            .color(TEXT_MUTED),
+            .color(text_muted()),
     );
 }
 
@@ -975,7 +1038,7 @@ pub fn animated_card<R>(
         if bar_strength > 0.04 && rect.height() >= 28.0 {
             let max_bar_h = (rect.height() - 14.0).clamp(10.0, 38.0);
             let bar_h = max_bar_h * bar_strength;
-            let bar_col = lerp_color(BORDER_STRONG, accent(), select_t.max(hover_t * 0.7));
+            let bar_col = lerp_color(border_strong(), accent(), select_t.max(hover_t * 0.7));
             let bar_rect = Rect::from_center_size(
                 Pos2::new(rect.left() + 2.2, rect.center().y),
                 Vec2::new(3.0, bar_h),
@@ -999,7 +1062,7 @@ pub fn hero_spotlight_card<R>(
         ui.ctx().request_repaint();
     }
 
-    let bg = lerp_color(bg_card_active(), Color32::from_rgb(31, 58, 45), hover_t);
+    let bg = lerp_color(bg_card_active(), lerp_color(bg_card(), accent(), 0.18), hover_t);
     let border = lerp_color(with_alpha(accent(), 185), accent_hover(), hover_t);
 
     let resp = egui::Frame::none()
@@ -1044,9 +1107,9 @@ pub fn hero_spotlight_card<R>(
 /// Draws a pill badge (`Vanilla`, `Fabric`, `Microsoft`, `Installed`).
 pub fn badge(ui: &mut egui::Ui, text: &str, highlighted: bool) {
     let (fill, border, fg) = if highlighted {
-        (accent_dim(), accent(), Color32::from_rgb(148, 248, 190))
+        (accent_dim(), accent(), accent_text())
     } else {
-        (Color32::from_rgb(30, 33, 40), BORDER_STRONG, TEXT_SECONDARY)
+        (bg_elevated(), border_strong(), text_secondary())
     };
     egui::Frame::none()
         .fill(fill)
@@ -1067,9 +1130,9 @@ pub fn badge_sized(
     max_width: Option<f32>,
 ) -> egui::Response {
     let (fill, border, fg) = if highlighted {
-        (accent_dim(), accent(), Color32::from_rgb(148, 248, 190))
+        (accent_dim(), accent(), accent_text())
     } else {
-        (Color32::from_rgb(30, 33, 40), BORDER_STRONG, TEXT_SECONDARY)
+        (bg_elevated(), border_strong(), text_secondary())
     };
     draw_sized_pill_badge(ui, text, fill, border, fg, height, max_width)
 }
@@ -1140,28 +1203,40 @@ fn draw_sized_pill_badge(
 /// Returns signature `(bg_fill, border_color, text_color)` for each mod loader kind.
 pub fn loader_colors(kind: crate::models::LoaderKind) -> (Color32, Color32, Color32) {
     use crate::models::LoaderKind;
+    let light = is_light_theme();
+    let adapt = |dark_bg: Color32, border: Color32, dark_fg: Color32| {
+        if light {
+            (
+                lerp_color(bg_card(), border, 0.14),
+                border,
+                lerp_color(border, Color32::BLACK, 0.42),
+            )
+        } else {
+            (dark_bg, border, dark_fg)
+        }
+    };
     match kind {
-        LoaderKind::Vanilla => (
+        LoaderKind::Vanilla => adapt(
             Color32::from_rgb(24, 40, 58),
             Color32::from_rgb(76, 142, 219),
             Color32::from_rgb(162, 210, 255),
         ),
-        LoaderKind::Fabric => (
+        LoaderKind::Fabric => adapt(
             Color32::from_rgb(54, 45, 30),
             Color32::from_rgb(214, 174, 108),
             Color32::from_rgb(248, 218, 166),
         ),
-        LoaderKind::Quilt => (
+        LoaderKind::Quilt => adapt(
             Color32::from_rgb(47, 30, 62),
             Color32::from_rgb(176, 118, 224),
             Color32::from_rgb(222, 186, 252),
         ),
-        LoaderKind::Forge => (
+        LoaderKind::Forge => adapt(
             Color32::from_rgb(58, 36, 24),
             Color32::from_rgb(228, 132, 64),
             Color32::from_rgb(252, 188, 138),
         ),
-        LoaderKind::NeoForge => (
+        LoaderKind::NeoForge => adapt(
             Color32::from_rgb(60, 31, 27),
             Color32::from_rgb(242, 104, 78),
             Color32::from_rgb(255, 176, 158),
@@ -1224,12 +1299,12 @@ pub fn draw_instance_avatar(
         egui::Align2::CENTER_CENTER,
         initial,
         FontId::new((rect.height() * 0.44).clamp(12.0, 24.0), FontFamily::Proportional),
-        if selected { PURE_WHITE } else { loader_fg },
+        if selected { accent_text() } else { loader_fg },
     );
 
     if rect.width() >= 28.0 {
         let dot_center = Pos2::new(rect.right() - 5.5, rect.bottom() - 5.5);
-        painter.circle_filled(dot_center, 4.6, BG_CARD);
+        painter.circle_filled(dot_center, 4.6, bg_card());
         painter.circle_filled(
             dot_center,
             3.1,
@@ -1247,7 +1322,7 @@ pub fn draw_icon_placeholder(
     loading: bool,
 ) {
     let painter = ui.painter();
-    painter.rect_filled(rect, Rounding::same(rounding), BG_INPUT);
+    painter.rect_filled(rect, Rounding::same(rounding), bg_input());
     if loading {
         let t = (ui.input(|i| i.time) as f32 * 1.35).fract();
         let band_w = (rect.width() * 0.55).max(10.0);
@@ -1268,7 +1343,7 @@ pub fn draw_icon_placeholder(
     painter.rect_stroke(
         rect,
         Rounding::same(rounding),
-        Stroke::new(1.0_f32, BORDER_SUBTLE),
+        Stroke::new(1.0_f32, border_subtle()),
     );
     let initial = title
         .chars()
@@ -1282,7 +1357,7 @@ pub fn draw_icon_placeholder(
         egui::Align2::CENTER_CENTER,
         initial,
         FontId::new((rect.height() * 0.42).clamp(12.0, 18.0), FontFamily::Proportional),
-        TEXT_SECONDARY,
+        text_secondary(),
     );
 }
 
@@ -1357,8 +1432,8 @@ pub fn animated_progress_bar(
     }
     let painter = ui.painter();
 
-    painter.rect_filled(rect, Rounding::same(6.5), BG_INPUT);
-    painter.rect_stroke(rect, Rounding::same(6.5), Stroke::new(1.0_f32, BORDER_SUBTLE));
+    painter.rect_filled(rect, Rounding::same(6.5), bg_input());
+    painter.rect_stroke(rect, Rounding::same(6.5), Stroke::new(1.0_f32, border_subtle()));
 
     let fill_w = (rect.width() * smooth).max(if active { 20.0 } else { 0.0 });
     if fill_w > 0.5 {
@@ -1384,7 +1459,7 @@ pub fn animated_progress_bar(
     }
 
     let pct_text = format!("{}%", (smooth * 100.0).round() as u32);
-    let text_color = if smooth > 0.48 { accent_dark() } else { TEXT_PRIMARY };
+    let text_color = if smooth > 0.48 { accent_dark() } else { text_primary() };
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -1396,7 +1471,7 @@ pub fn animated_progress_bar(
         let pct_color = if smooth > 0.92 {
             accent_dark()
         } else {
-            TEXT_SECONDARY
+            text_secondary()
         };
         painter.text(
             Pos2::new(rect.right() - 10.0, rect.center().y),
@@ -1430,8 +1505,8 @@ pub fn draw_mini_gauge(
     }
     let r = Rounding::same(height * 0.5);
     let painter = ui.painter();
-    painter.rect_filled(rect, r, BG_INPUT);
-    painter.rect_stroke(rect, r, Stroke::new(1.0_f32, BORDER_SUBTLE));
+    painter.rect_filled(rect, r, bg_input());
+    painter.rect_stroke(rect, r, Stroke::new(1.0_f32, border_subtle()));
     let fill_w = (rect.width() * smooth).clamp(0.0, rect.width());
     if fill_w > 1.0 {
         let fill_rect = Rect::from_min_size(rect.min, Vec2::new(fill_w, rect.height()));
@@ -1470,13 +1545,13 @@ pub fn draw_ram_allocation_bar(
     let painter = ui.painter();
     let r = Rounding::same(5.0);
     painter.rect_filled(rect, r, Color32::from_rgb(24, 28, 35));
-    painter.rect_stroke(rect, r, Stroke::new(1.0_f32, BORDER_STRONG));
+    painter.rect_stroke(rect, r, Stroke::new(1.0_f32, border_strong()));
 
     for gb in [4.0_f32, 8.0, 12.0] {
         let x = rect.left() + rect.width() * (gb / 16.0);
         painter.line_segment(
             [Pos2::new(x, rect.top() + 1.5), Pos2::new(x, rect.bottom() - 1.5)],
-            Stroke::new(1.0_f32, BORDER_STRONG),
+            Stroke::new(1.0_f32, border_strong()),
         );
     }
 
@@ -1505,13 +1580,13 @@ pub fn ui_ram_slider(
         ui.style_mut().spacing.slider_rail_height = 8.0;
         let visuals = ui.visuals_mut();
         visuals.slider_trailing_fill = true;
-        visuals.widgets.inactive.bg_fill = Color32::from_rgb(64, 71, 86);
+        visuals.widgets.inactive.bg_fill = border_subtle();
         visuals.widgets.inactive.fg_stroke = Stroke::new(1.5_f32, accent());
         visuals.widgets.inactive.rounding = Rounding::same(4.0);
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(82, 91, 108);
-        visuals.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, PURE_WHITE);
+        visuals.widgets.hovered.bg_fill = border_strong();
+        visuals.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, text_primary());
         visuals.widgets.active.bg_fill = accent();
-        visuals.selection.bg_fill = Color32::from_rgb(27, 165, 86);
+        visuals.selection.bg_fill = accent();
         ui.add(
             egui::Slider::new(value, range)
                 .step_by(256.0)
@@ -1534,8 +1609,8 @@ pub fn draw_skeleton_card(ui: &mut egui::Ui, inner_w: f32) {
         let t = (ui.input(|i| i.time) as f32 * 1.25).fract();
         let pulse = (ui.input(|i| i.time) as f32 * 3.2).sin() * 0.5 + 0.5;
         let base_block = lerp_color(
-            Color32::from_rgb(26, 29, 35),
-            Color32::from_rgb(34, 38, 46),
+            bg_elevated(),
+            bg_card_hover(),
             pulse,
         );
 
@@ -1612,7 +1687,7 @@ pub fn primary_action_button(
         let time = ui.input(|i| i.time) as f32;
 
         let (bg, border, fg, halo_color) = if !enabled {
-            (BG_CARD, BORDER_SUBTLE, TEXT_MUTED, accent())
+            (bg_card(), border_subtle(), text_muted(), accent())
         } else if is_stop_style {
             let bg = lerp_color(DANGER, DANGER_HOVER, hover_t);
             (bg, DANGER_HOVER, PURE_WHITE, DANGER)
@@ -1703,11 +1778,11 @@ pub fn mod_toggle_switch(ui: &mut egui::Ui, id_salt: &str, on: bool) -> egui::Re
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let bg = lerp_color(
-            lerp_color(BG_INPUT, BG_CARD_HOVER, hover_t * 0.5),
+            lerp_color(bg_input(), bg_card_hover(), hover_t * 0.5),
             lerp_color(accent(), accent_hover(), hover_t),
             anim_t,
         );
-        let border = lerp_color(BORDER_STRONG, accent_hover(), anim_t.max(hover_t * 0.4));
+        let border = lerp_color(border_strong(), accent_hover(), anim_t.max(hover_t * 0.4));
         let rounding = Rounding::same(rect.height() * 0.5);
         if anim_t > 0.05 && hover_t > 0.05 {
             painter.rect_stroke(
@@ -1724,7 +1799,7 @@ pub fn mod_toggle_switch(ui: &mut egui::Ui, id_salt: &str, on: bool) -> egui::Re
         let right_x = rect.right() - r - 3.0;
         let knob_x = left_x + (right_x - left_x) * anim_t;
         let knob_col = lerp_color(
-            lerp_color(TEXT_SECONDARY, PURE_WHITE, hover_t),
+            lerp_color(text_secondary(), text_primary(), hover_t),
             accent_dark(),
             anim_t,
         );
@@ -1735,4 +1810,152 @@ pub fn mod_toggle_switch(ui: &mut egui::Ui, id_salt: &str, on: bool) -> egui::Re
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
+}
+
+/// Draws a custom image avatar for an instance with rounded corners, border, and running indicator.
+pub fn draw_instance_image_avatar(
+    painter: &egui::Painter,
+    rect: Rect,
+    tex_id: egui::TextureId,
+    selected: bool,
+    is_running: bool,
+) {
+    let rounding = Rounding::same((rect.width() * 0.22).clamp(6.0, 12.0));
+    painter.image(
+        tex_id,
+        rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    let border = if is_running || selected {
+        accent()
+    } else {
+        border_subtle()
+    };
+    painter.rect_stroke(rect, rounding, Stroke::new(1.2_f32, border));
+
+    if rect.width() >= 28.0 {
+        let dot_center = Pos2::new(rect.right() - 5.5, rect.bottom() - 5.5);
+        let dot_col = if is_running {
+            accent()
+        } else if selected {
+            accent_hover()
+        } else {
+            border_strong()
+        };
+        painter.circle_filled(dot_center, 3.8, bg_void());
+        painter.circle_filled(dot_center, 2.5, dot_col);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemFont {
+    pub name: String,
+    pub path: String,
+}
+
+/// Scans standard OS font directories for `.ttf` and `.otf` UI fonts.
+pub fn discover_system_fonts() -> Vec<SystemFont> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        dirs.push(std::path::PathBuf::from("/usr/share/fonts"));
+        dirs.push(std::path::PathBuf::from("/usr/local/share/fonts"));
+        if let Some(home) = dirs::home_dir() {
+            dirs.push(home.join(".local/share/fonts"));
+            dirs.push(home.join(".fonts"));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        dirs.push(std::path::PathBuf::from(r"C:\Windows\Fonts"));
+        if let Some(local) = dirs::data_local_dir() {
+            dirs.push(local.join("Microsoft/Windows/Fonts"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(std::path::PathBuf::from("/System/Library/Fonts"));
+        dirs.push(std::path::PathBuf::from("/Library/Fonts"));
+        if let Some(home) = dirs::home_dir() {
+            dirs.push(home.join("Library/Fonts"));
+        }
+    }
+
+    let mut found: Vec<SystemFont> = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    fn walk(
+        dir: &std::path::Path,
+        depth: usize,
+        out: &mut Vec<SystemFont>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        if depth > 3 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, depth + 1, out, seen);
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+            if !matches!(ext.as_deref(), Some("ttf" | "otf")) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let low = stem.to_ascii_lowercase();
+            if [
+                "emoji", "math", "symbol", "dingbat", "wingding", "webding", "marlett",
+                "powerline",
+            ]
+            .iter()
+            .any(|bad| low.contains(bad))
+            {
+                continue;
+            }
+            let clean_name = stem.replace('_', " ");
+            let key = clean_name.to_ascii_lowercase();
+            if seen.insert(key) {
+                out.push(SystemFont {
+                    name: clean_name,
+                    path: path.to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
+
+    for d in dirs {
+        walk(&d, 0, &mut found, &mut seen_names);
+    }
+    found.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    found
+}
+
+/// Applies the selected `.ttf`/`.otf` font (or resets to egui's built-in default when empty).
+pub fn apply_ui_font(ctx: &egui::Context, font_path: &str) {
+    let mut fonts = egui::FontDefinitions::default();
+    let trimmed = font_path.trim();
+    if !trimmed.is_empty() {
+        if let Ok(bytes) = std::fs::read(trimmed) {
+            fonts
+                .font_data
+                .insert("custom_ui_font".to_owned(), egui::FontData::from_owned(bytes));
+            fonts
+                .families
+                .entry(FontFamily::Proportional)
+                .or_default()
+                .insert(0, "custom_ui_font".to_owned());
+        }
+    }
+    ctx.set_fonts(fonts);
 }

@@ -25,12 +25,14 @@
 ## Features
 - **Instances & Profiles**: create, duplicate, edit, and delete instances with isolated `instances/<profile_id>` game directories.
 - **Mod Loaders**: supports **Vanilla**, **Fabric**, **Quilt**, **Forge**, and **NeoForge** via official Mojang, Fabric/Quilt Meta, and Forge/NeoForge Maven APIs (including Forge/NeoForge installer processors).
-- **Modrinth Integration**: search and install mods, modpacks (`.mrpack`), resource packs, and shaders with file enable/disable toggling inside each instance's Content manager.
+- **Modrinth Integration & `.mrpack`**: search and install mods, modpacks (`.mrpack`), resource packs, and shaders; import/export `.mrpack` archives and toggle enabled content files.
+- **Worlds, Quick-Play & Backups**: browse instance worlds, launch directly into a world (`--quickPlaySingleplayer`), and create, restore, or delete `.zip` world backups.
 - **High-Speed Parallel Downloads**: pooled async downloads (up to 64 concurrent transfers) with streaming SHA-1 verification and automatic extraction of native libraries (`natives`).
-- **Accounts**: supports **Microsoft** (OAuth Device Code), **Ely.by** (`authlib-injector`), and **Offline** local accounts.
-- **JVM & Runtime Management**: RAM allocation (`-Xms` / `-Xmx`), custom JVM arguments & presets (`G1GC`, `ZGC`, `Aikar's`), and automatic Java runtime discovery.
-- **Command Palette (`Ctrl+K`)**: quick keyboard navigation across instances, pages, and launcher actions.
-- **Live Console**: real-time filtered `stdout` / `stderr` game log viewer with auto-scroll and copy/clear actions.
+- **Accounts & Skins**: supports **Microsoft** (OAuth Device Code), **Ely.by** (`authlib-injector`), and **Offline** local accounts with cached skin head/body previews.
+- **JVM & Runtime Management**: RAM allocation (`-Xms` / `-Xmx`), custom JVM arguments & presets (`G1GC`, `ZGC`, `Aikar's`), automatic Java runtime discovery, and minimize-on-launch behavior.
+- **Live Console & Crash Diagnostics**: real-time filtered `stdout` / `stderr` game log viewer, crash detection banner, and one-click crash report copying.
+- **Auto-Updates & Desktop Integration**: built-in GitHub Releases update checker/installer, single-instance lock, Linux `.desktop` entry, and Windows Start Menu shortcut with `.ico`.
+- **Localization, Themes & Discord RPC**: 9 UI languages, customizable themes/fonts, Command Palette (`Ctrl+K`), and language-aware Discord Rich Presence.
 
 ## Screenshots
 
@@ -55,7 +57,7 @@ Download the prebuilt binary for your OS from [GitHub Releases](https://github.c
   ~/Downloads/svarka-launcher-linux-x64
   ```
   On first run, the launcher automatically installs its icon and application menu entry (`~/.local/share/applications/svarka-launcher.desktop`).
-- **Windows (`svarka-launcher-windows-x64.exe`)**: run the `.exe` directly.
+- **Windows (`svarka-launcher-windows-x64.exe`)**: run the `.exe` directly (automatically creates a Start Menu shortcut and icon on first launch).
 
 ## Build & Run
 
