@@ -8925,6 +8925,20 @@ fn is_image_file(path: &std::path::Path) -> bool {
     )
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn build_win32_file_filter_utf16(filter_label: &str, exts: &[&str]) -> Vec<u16> {
+    let patterns: Vec<String> = exts.iter().map(|e| format!("*.{e}")).collect();
+    let joined = if patterns.is_empty() {
+        "*.*".to_string()
+    } else {
+        patterns.join(";")
+    };
+    let clean_label = filter_label.replace('\0', "");
+    format!("{clean_label} ({joined})\0{joined}\0\0")
+        .encode_utf16()
+        .collect()
+}
+
 fn pick_file(title: &str, filter_label: &str, exts: &[&str]) -> Option<std::path::PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -8957,32 +8971,93 @@ fn pick_file(title: &str, filter_label: &str, exts: &[&str]) -> Option<std::path
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let patterns: Vec<String> = exts.iter().map(|e| format!("*.{e}")).collect();
-        let joined = patterns.join(";");
-        let esc_title = title.replace('\'', "''");
-        let esc_label = filter_label.replace('\'', "''");
-        let ps = format!(
-            "Add-Type -AssemblyName System.Windows.Forms;[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;$f=New-Object System.Windows.Forms.Form -Property @{{TopMost=$true}};$d=New-Object System.Windows.Forms.OpenFileDialog;$d.Title='{esc_title}';$d.Filter='{esc_label}|{joined}';if($d.ShowDialog($f)-eq [System.Windows.Forms.DialogResult]::OK){{$d.FileName}};$f.Dispose()"
-        );
-        if let Ok(out) = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-STA",
-                "-WindowStyle",
-                "Hidden",
-                "-Command",
-                &ps,
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !s.is_empty() {
-                    return Some(std::path::PathBuf::from(s));
-                }
+        use std::ffi::c_void;
+        use std::ptr;
+
+        #[repr(C)]
+        struct OpenFileNameW {
+            l_struct_size: u32,
+            hwnd_owner: *mut c_void,
+            h_instance: *mut c_void,
+            lpstr_filter: *const u16,
+            lpstr_custom_filter: *mut u16,
+            n_max_cust_filter: u32,
+            n_filter_index: u32,
+            lpstr_file: *mut u16,
+            n_max_file: u32,
+            lpstr_file_title: *mut u16,
+            n_max_file_title: u32,
+            lpstr_initial_dir: *const u16,
+            lpstr_title: *const u16,
+            flags: u32,
+            n_file_offset: u16,
+            n_file_extension: u16,
+            lpstr_def_ext: *const u16,
+            l_cust_data: usize,
+            lpfn_hook: *const c_void,
+            lp_template_name: *const u16,
+            pv_reserved: *mut c_void,
+            dw_reserved: u32,
+            flags_ex: u32,
+        }
+
+        #[link(name = "comdlg32")]
+        extern "system" {
+            fn GetOpenFileNameW(lpofn: *mut OpenFileNameW) -> i32;
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetActiveWindow() -> *mut c_void;
+        }
+
+        const OFN_NOCHANGEDIR: u32 = 0x0000_0008;
+        const OFN_PATHMUSTEXIST: u32 = 0x0000_0800;
+        const OFN_FILEMUSTEXIST: u32 = 0x0000_1000;
+        const OFN_EXPLORER: u32 = 0x0008_0000;
+
+        let filter_w = build_win32_file_filter_utf16(filter_label, exts);
+        let title_w: Vec<u16> = title
+            .replace('\0', "")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut file_buf = vec![0u16; 32768];
+
+        let mut ofn = OpenFileNameW {
+            l_struct_size: std::mem::size_of::<OpenFileNameW>() as u32,
+            hwnd_owner: unsafe { GetActiveWindow() },
+            h_instance: ptr::null_mut(),
+            lpstr_filter: filter_w.as_ptr(),
+            lpstr_custom_filter: ptr::null_mut(),
+            n_max_cust_filter: 0,
+            n_filter_index: 1,
+            lpstr_file: file_buf.as_mut_ptr(),
+            n_max_file: file_buf.len() as u32,
+            lpstr_file_title: ptr::null_mut(),
+            n_max_file_title: 0,
+            lpstr_initial_dir: ptr::null(),
+            lpstr_title: title_w.as_ptr(),
+            flags: OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_EXPLORER,
+            n_file_offset: 0,
+            n_file_extension: 0,
+            lpstr_def_ext: ptr::null(),
+            l_cust_data: 0,
+            lpfn_hook: ptr::null(),
+            lp_template_name: ptr::null(),
+            pv_reserved: ptr::null_mut(),
+            dw_reserved: 0,
+            flags_ex: 0,
+        };
+
+        let ok = unsafe { GetOpenFileNameW(&mut ofn) };
+        if ok != 0 {
+            let end = file_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(file_buf.len());
+            let s = String::from_utf16_lossy(&file_buf[..end]).trim().to_string();
+            if !s.is_empty() {
+                return Some(std::path::PathBuf::from(s));
             }
         }
     }
@@ -9445,5 +9520,13 @@ mod tests {
             "шейдеры",
         )
         .is_none());
+    }
+
+    #[test]
+    fn test_win32_file_filter_double_nul_utf16() {
+        let utf16 = build_win32_file_filter_utf16("Modpacks", &["mrpack", "zip"]);
+        assert!(utf16.ends_with(&[0, 0]));
+        let decoded = String::from_utf16(&utf16).unwrap();
+        assert_eq!(decoded, "Modpacks (*.mrpack;*.zip)\0*.mrpack;*.zip\0\0");
     }
 }

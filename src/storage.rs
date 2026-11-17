@@ -202,23 +202,11 @@ pub fn save_launcher_settings(
     fs::write(&path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn encode_logo_ico_bytes() -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(include_bytes!("../logo.png"))
-        .map_err(|e| format!("Failed to decode embedded logo: {e}"))?;
-    let resized = img.resize_exact(256, 256, image::imageops::FilterType::Lanczos3);
-    let mut buf = std::io::Cursor::new(Vec::new());
-    resized
-        .write_to(&mut buf, image::ImageFormat::Ico)
-        .map_err(|e| format!("Failed to encode ICO: {e}"))?;
-    Ok(buf.into_inner())
-}
-
-/// Ensures a 256x256 `.ico` file generated from the embedded logo exists in the launcher root directory.
+/// Ensures the multi-size Windows `.ico` icon file exists in the launcher root directory.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn ensure_windows_icon(paths: &LauncherPaths) -> Result<PathBuf, String> {
     let ico_path = paths.root.join("svarka-launcher.ico");
-    let ico_bytes = encode_logo_ico_bytes()?;
+    let ico_bytes: &[u8] = include_bytes!("../logo.ico");
     let needs_write = match fs::read(&ico_path) {
         Ok(existing) => existing != ico_bytes,
         Err(_) => true,
@@ -266,7 +254,7 @@ pub fn ensure_windows_shortcut(paths: &LauncherPaths) -> Result<PathBuf, String>
 
     let script = "$ws=New-Object -ComObject WScript.Shell;$s=$ws.CreateShortcut($env:SVARKA_LNK);$s.TargetPath=$env:SVARKA_EXE;$s.WorkingDirectory=$env:SVARKA_DIR;$s.IconLocation=$env:SVARKA_ICO;$s.Description='Svarka Launcher';$s.Save()";
     let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", script])
+        .args(["-NoProfile", "-Command", script])
         .env("SVARKA_LNK", &lnk_path)
         .env("SVARKA_EXE", &exe_str)
         .env("SVARKA_DIR", &work_dir)
@@ -422,7 +410,7 @@ mod tests {
 
         let bytes = fs::read(&ico_path).unwrap();
         assert!(bytes.len() > 22);
-        assert_eq!(&bytes[0..6], &[0, 0, 1, 0, 1, 0]);
+        assert_eq!(&bytes[0..6], &[0, 0, 1, 0, 5, 0]);
 
         let decoded =
             image::load_from_memory_with_format(&bytes, image::ImageFormat::Ico).unwrap();
