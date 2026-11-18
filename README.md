@@ -58,7 +58,7 @@ Download the prebuilt binary for your OS from [GitHub Releases](https://github.c
   ```
   On first run, the launcher automatically installs its icon and application menu entry (`~/.local/share/applications/svarka-launcher.desktop`).
 - **Windows (`svarka-launcher-windows-x64.exe`)**: run the `.exe` directly (automatically creates a Start Menu shortcut and icon on first launch).
-  > **Code Signing & SmartScreen**: Signed releases use free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/). If an unsigned build triggers Windows SmartScreen (*"Unknown publisher"*), verify the `.sha256` checksum or build from source.
+  > **Note on Windows SmartScreen**: Release binaries are currently unsigned open-source builds, so Windows may show an *"Unknown publisher"* SmartScreen prompt on first launch (`More info` → `Run anyway`). You can verify binary integrity with the published `.sha256` checksum or build directly from source.
 
 ## Build & Run
 
@@ -87,11 +87,7 @@ Inside this folder:
 - `instances/` — isolated game directories per instance
 - `java/` — optional launcher-local Java runtimes
 
-## Code Signing Policy & Privacy
-- **Code Signing**: Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
-- **Team Roles**:
-  - **Authors / Maintainers**: `svarka` ([@svarkawm](https://github.com/svarkawm))
-  - **Reviewers / Approvers**: `svarka` ([@svarkawm](https://github.com/svarkawm))
+## Privacy
 - **Privacy Policy**: Svarka Launcher does **not** collect telemetry, analytics, or crash tracking, and does not send any personal data to developer-controlled servers. All credentials (Microsoft / Ely.by tokens, accounts, and profiles) are stored locally in the launcher data directory. Network requests occur only to third-party services explicitly required by user features (Mojang/Minecraft, Fabric/Quilt/Forge/NeoForge, Modrinth, Adoptium Java, Microsoft OAuth / Ely.by authentication, GitHub Releases for update checks, and local Discord RPC IPC when enabled).
 
 ## Credits & License
