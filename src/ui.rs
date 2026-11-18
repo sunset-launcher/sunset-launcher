@@ -363,6 +363,7 @@ pub struct McLauncherApp {
 
     settings: LauncherSettings,
     system_fonts: Vec<SystemFont>,
+    brand_logo_tex: Option<Option<egui::TextureHandle>>,
     profile_icons: HashMap<String, Option<egui::TextureHandle>>,
     skin_heads: HashMap<String, Option<egui::TextureHandle>>,
     skin_bodies: HashMap<String, Option<egui::TextureHandle>>,
@@ -496,6 +497,7 @@ impl McLauncherApp {
             toast: None,
             settings,
             system_fonts: discover_system_fonts(),
+            brand_logo_tex: None,
             profile_icons: HashMap::new(),
             skin_heads: HashMap::new(),
             skin_bodies: HashMap::new(),
@@ -1643,6 +1645,19 @@ impl McLauncherApp {
             } else {
                 Stroke::NONE
             };
+            if self.brand_logo_tex.is_none() {
+                let loaded = decode_icon_bytes(include_bytes!("../logo.png")).ok().map(|img| {
+                    ui.ctx().load_texture(
+                        "brand_logo_sunset",
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [img.width, img.height],
+                            &img.rgba,
+                        ),
+                        egui::TextureOptions::LINEAR,
+                    )
+                });
+                self.brand_logo_tex = Some(loaded);
+            }
             let brand_resp = egui::Frame::none()
                 .fill(brand_fill)
                 .stroke(brand_stroke)
@@ -1653,14 +1668,23 @@ impl McLauncherApp {
                     let (row_rect, _) =
                         ui.allocate_exact_size(Vec2::new(row_w, 36.0), Sense::hover());
                     let icon_rect = Rect::from_min_size(row_rect.min, Vec2::splat(36.0));
-                    draw_brand_logo(ui.painter(), icon_rect);
+                    if let Some(Some(tex)) = &self.brand_logo_tex {
+                        ui.painter().image(
+                            tex.id(),
+                            icon_rect,
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        draw_brand_logo(ui.painter(), icon_rect);
+                    }
                     if row_rect.width() > 42.0 {
                         let clipped = ui.painter().with_clip_rect(row_rect);
                         let text_x = row_rect.left() + 45.0;
                         clipped.text(
                             Pos2::new(text_x, row_rect.top() + 10.5),
                             egui::Align2::LEFT_CENTER,
-                            "Svarka Launcher",
+                            "Sunset Launcher",
                             egui::FontId::proportional(15.0),
                             text_primary(),
                         );
@@ -1685,7 +1709,7 @@ impl McLauncherApp {
                 .response
                 .interact(Sense::click())
                 .on_hover_text(concat!(
-                    "Svarka Launcher v",
+                    "Sunset Launcher v",
                     env!("CARGO_PKG_VERSION"),
                     " • by svarka (@svarkawm)"
                 ));
@@ -5233,7 +5257,7 @@ impl McLauncherApp {
                 ui.add_space(4.0);
                 ui_wrap_row(ui, 22.0, |ui| {
                     ui.strong(
-                        egui::RichText::new(concat!("Svarka Launcher v", env!("CARGO_PKG_VERSION")))
+                        egui::RichText::new(concat!("Sunset Launcher v", env!("CARGO_PKG_VERSION")))
                             .color(text_primary()),
                     );
                     ui.label(
@@ -5924,7 +5948,7 @@ impl McLauncherApp {
                     .clicked()
                     {
                         let mut parts = Vec::new();
-                        parts.push(format!("Svarka Launcher v{}", env!("CARGO_PKG_VERSION")));
+                        parts.push(format!("Sunset Launcher v{}", env!("CARGO_PKG_VERSION")));
                         if let Some(p) = self.profiles.get(self.selected_idx) {
                             parts.push(format!(
                                 "Instance: {} (MC {}, {:?})",

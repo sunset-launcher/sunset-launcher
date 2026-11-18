@@ -141,7 +141,7 @@ pub fn resolve_selected_profile_index(profiles: &[Profile], saved_id: Option<&st
         .unwrap_or(0)
 }
 
-/// Installs the Svarka Launcher icon and `.desktop` menu entry on Linux so the binary
+/// Installs the Sunset Launcher icon and `.desktop` menu entry on Linux so the binary
 /// appears in desktop application launchers with its icon.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn ensure_linux_desktop_entry(paths: &LauncherPaths) -> Result<PathBuf, String> {
@@ -150,33 +150,36 @@ pub fn ensure_linux_desktop_entry(paths: &LauncherPaths) -> Result<PathBuf, Stri
         .map_err(|e| format!("Failed to locate current executable: {e}"))?;
     let exe_escaped = exe_path.to_string_lossy().replace('"', "\\\"");
 
-    let icon_path = paths.root.join("svarka-launcher.png");
+    let icon_path = paths.root.join("sunset-launcher.png");
     fs::write(&icon_path, LOGO_PNG)
         .map_err(|e| format!("Failed to write icon {}: {e}", icon_path.display()))?;
+    let _ = fs::remove_file(paths.root.join("svarka-launcher.png"));
 
     let data_dir = dirs::data_local_dir()
         .ok_or_else(|| "Could not determine XDG data directory".to_string())?;
     let hicolor_dir = data_dir.join("icons/hicolor/512x512/apps");
     if fs::create_dir_all(&hicolor_dir).is_ok() {
-        let _ = fs::write(hicolor_dir.join("svarka-launcher.png"), LOGO_PNG);
+        let _ = fs::write(hicolor_dir.join("sunset-launcher.png"), LOGO_PNG);
+        let _ = fs::remove_file(hicolor_dir.join("svarka-launcher.png"));
     }
 
     let apps_dir = data_dir.join("applications");
     fs::create_dir_all(&apps_dir)
         .map_err(|e| format!("Failed to create {}: {e}", apps_dir.display()))?;
-    let desktop_path = apps_dir.join("svarka-launcher.desktop");
+    let _ = fs::remove_file(apps_dir.join("svarka-launcher.desktop"));
+    let desktop_path = apps_dir.join("sunset-launcher.desktop");
     let desktop_contents = format!(
         "[Desktop Entry]\n\
 Type=Application\n\
 Version=1.0\n\
-Name=Svarka Launcher\n\
+Name=Sunset Launcher\n\
 Comment=Native Minecraft launcher in Rust with Modrinth & Multi-Loader support\n\
 Exec=\"{exe_escaped}\"\n\
 Icon={}\n\
 Terminal=false\n\
 Categories=Game;\n\
 StartupNotify=true\n\
-StartupWMClass=Svarka Launcher\n",
+StartupWMClass=Sunset Launcher\n",
         icon_path.display()
     );
     fs::write(&desktop_path, desktop_contents)
@@ -205,7 +208,7 @@ pub fn save_launcher_settings(
 /// Ensures the multi-size Windows `.ico` icon file exists in the launcher root directory.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn ensure_windows_icon(paths: &LauncherPaths) -> Result<PathBuf, String> {
-    let ico_path = paths.root.join("svarka-launcher.ico");
+    let ico_path = paths.root.join("sunset-launcher.ico");
     let ico_bytes: &[u8] = include_bytes!("../logo.ico");
     let needs_write = match fs::read(&ico_path) {
         Ok(existing) => existing != ico_bytes,
@@ -215,10 +218,11 @@ pub fn ensure_windows_icon(paths: &LauncherPaths) -> Result<PathBuf, String> {
         fs::write(&ico_path, ico_bytes)
             .map_err(|e| format!("Failed to write {}: {e}", ico_path.display()))?;
     }
+    let _ = fs::remove_file(paths.root.join("svarka-launcher.ico"));
     Ok(ico_path)
 }
 
-/// Ensures a Start Menu shortcut (`Svarka Launcher.lnk`) with a crisp `.ico` exists on Windows.
+/// Ensures a Start Menu shortcut (`Sunset Launcher.lnk`) with a crisp `.ico` exists on Windows.
 #[cfg(target_os = "windows")]
 pub fn ensure_windows_shortcut(paths: &LauncherPaths) -> Result<PathBuf, String> {
     use std::os::windows::process::CommandExt;
@@ -243,7 +247,8 @@ pub fn ensure_windows_shortcut(paths: &LauncherPaths) -> Result<PathBuf, String>
         .join("Programs");
     fs::create_dir_all(&programs_dir)
         .map_err(|e| format!("Failed to create {}: {e}", programs_dir.display()))?;
-    let lnk_path = programs_dir.join("Svarka Launcher.lnk");
+    let _ = fs::remove_file(programs_dir.join("Svarka Launcher.lnk"));
+    let lnk_path = programs_dir.join("Sunset Launcher.lnk");
 
     let stamp_path = paths.root.join(".windows-shortcut-target");
     let prev_target = fs::read_to_string(&stamp_path).unwrap_or_default();
@@ -252,13 +257,13 @@ pub fn ensure_windows_shortcut(paths: &LauncherPaths) -> Result<PathBuf, String>
         return Ok(lnk_path);
     }
 
-    let script = "$ws=New-Object -ComObject WScript.Shell;$s=$ws.CreateShortcut($env:SVARKA_LNK);$s.TargetPath=$env:SVARKA_EXE;$s.WorkingDirectory=$env:SVARKA_DIR;$s.IconLocation=$env:SVARKA_ICO;$s.Description='Svarka Launcher';$s.Save()";
+    let script = "$ws=New-Object -ComObject WScript.Shell;$s=$ws.CreateShortcut($env:SUNSET_LNK);$s.TargetPath=$env:SUNSET_EXE;$s.WorkingDirectory=$env:SUNSET_DIR;$s.IconLocation=$env:SUNSET_ICO;$s.Description='Sunset Launcher';$s.Save()";
     let status = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", script])
-        .env("SVARKA_LNK", &lnk_path)
-        .env("SVARKA_EXE", &exe_str)
-        .env("SVARKA_DIR", &work_dir)
-        .env("SVARKA_ICO", &ico_path)
+        .env("SUNSET_LNK", &lnk_path)
+        .env("SUNSET_EXE", &exe_str)
+        .env("SUNSET_DIR", &work_dir)
+        .env("SUNSET_ICO", &ico_path)
         .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map_err(|e| format!("Failed to invoke powershell for Start Menu shortcut: {e}"))?;

@@ -1,14 +1,14 @@
 <div align="center">
-  <img src="logo.svg" width="96" height="96" alt="Svarka Launcher" />
-  <h1>Svarka Launcher</h1>
+  <img src="logo.png" width="96" height="96" alt="Sunset Launcher" />
+  <h1>Sunset Launcher</h1>
   <p><strong>Fast, native Minecraft launcher built in pure Rust (<code>eframe</code> / <code>egui</code>)</strong></p>
 
   <p>
-    <a href="https://github.com/svarkawm/svarka-launcher/releases">
-      <img src="https://img.shields.io/github/v/release/svarkawm/svarka-launcher?color=1BD96A&label=Release&style=for-the-badge" alt="Release" />
+    <a href="https://github.com/svarkawm/sunset-launcher/releases">
+      <img src="https://img.shields.io/github/v/release/svarkawm/sunset-launcher?color=FF7833&label=Release&style=for-the-badge" alt="Release" />
     </a>
-    <a href="https://github.com/svarkawm/svarka-launcher/actions/workflows/build.yml">
-      <img src="https://img.shields.io/github/actions/workflow/status/svarkawm/svarka-launcher/build.yml?branch=main&label=Build&style=for-the-badge" alt="Build & Release CI" />
+    <a href="https://github.com/svarkawm/sunset-launcher/actions/workflows/build.yml">
+      <img src="https://img.shields.io/github/actions/workflow/status/svarkawm/sunset-launcher/build.yml?branch=main&label=Build&style=for-the-badge" alt="Build & Release CI" />
     </a>
     <img src="https://img.shields.io/badge/Rust-2021-orange?style=for-the-badge&logo=rust" alt="Rust 2021" />
     <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-blue?style=for-the-badge" alt="Linux & Windows" />
@@ -18,7 +18,7 @@
   </p>
 
   <p>
-    <img width="920" alt="Svarka Launcher Preview" src="https://github.com/user-attachments/assets/926a4243-2ce9-4b93-8d6d-6c1eb5d41ddc" />
+    <img width="920" alt="Sunset Launcher Preview" src="https://github.com/user-attachments/assets/926a4243-2ce9-4b93-8d6d-6c1eb5d41ddc" />
   </p>
 </div>
 
@@ -49,15 +49,15 @@
 
 ## Quick Start (Releases)
 
-Download the prebuilt binary for your OS from [GitHub Releases](https://github.com/svarkawm/svarka-launcher/releases):
+Download the prebuilt binary for your OS from [GitHub Releases](https://github.com/svarkawm/sunset-launcher/releases):
 
-- **Linux (`svarka-launcher-linux-x64`)**: mark the file as executable before the first launch:
+- **Linux (`sunset-launcher-linux-x64`)**: mark the file as executable before the first launch:
   ```bash
-  chmod +x ~/Downloads/svarka-launcher-linux-x64
-  ~/Downloads/svarka-launcher-linux-x64
+  chmod +x ~/Downloads/sunset-launcher-linux-x64
+  ~/Downloads/sunset-launcher-linux-x64
   ```
-  On first run, the launcher automatically installs its icon and application menu entry (`~/.local/share/applications/svarka-launcher.desktop`).
-- **Windows (`svarka-launcher-windows-x64.exe`)**: run the `.exe` directly (automatically creates a Start Menu shortcut and icon on first launch).
+  On first run, the launcher automatically installs its icon and application menu entry (`~/.local/share/applications/sunset-launcher.desktop`).
+- **Windows (`sunset-launcher-windows-x64.exe`)**: run the `.exe` directly (automatically creates a Start Menu shortcut and icon on first launch).
   > **Note on Windows SmartScreen**: Release binaries are currently unsigned open-source builds, so Windows may show an *"Unknown publisher"* SmartScreen prompt on first launch (`More info` → `Run anyway`). You can verify binary integrity with the published `.sha256` checksum or build directly from source.
 
 ## Build & Run
@@ -88,7 +88,7 @@ Inside this folder:
 - `java/` — optional launcher-local Java runtimes
 
 ## Privacy
-- **Privacy Policy**: Svarka Launcher does **not** collect telemetry, analytics, or crash tracking, and does not send any personal data to developer-controlled servers. All credentials (Microsoft / Ely.by tokens, accounts, and profiles) are stored locally in the launcher data directory. Network requests occur only to third-party services explicitly required by user features (Mojang/Minecraft, Fabric/Quilt/Forge/NeoForge, Modrinth, Adoptium Java, Microsoft OAuth / Ely.by authentication, GitHub Releases for update checks, and local Discord RPC IPC when enabled).
+- **Privacy Policy**: Sunset Launcher does **not** collect telemetry, analytics, or crash tracking, and does not send any personal data to developer-controlled servers. All credentials (Microsoft / Ely.by tokens, accounts, and profiles) are stored locally in the launcher data directory. Network requests occur only to third-party services explicitly required by user features (Mojang/Minecraft, Fabric/Quilt/Forge/NeoForge, Modrinth, Adoptium Java, Microsoft OAuth / Ely.by authentication, GitHub Releases for update checks, and local Discord RPC IPC when enabled).
 
 ## Credits & License
 - **Author**: `svarka` ([@svarkawm](https://github.com/svarkawm))

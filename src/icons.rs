@@ -408,42 +408,31 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
     }
 }
 
-/// Draws the bespoke Svarka Launcher emblem: obsidian-emerald squircle,
-/// 3-face shaded isometric Minecraft cube, and bright welding arc spark bolt.
+/// Draws the Sunset Launcher vector emblem fallback: twilight squircle,
+/// glowing sunset sun disc, and dark isometric Minecraft cube with amber rim-lighting.
 pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
-    let accent = crate::theme::accent();
     let s = rect.width().min(rect.height());
     let rounding = Rounding::same((s * 0.26).clamp(6.0, 12.0));
+    let sun_coral = Color32::from_rgb(245, 114, 62);
+    let sun_gold = Color32::from_rgb(255, 198, 92);
 
-    // Soft ambient emerald outer glow
     painter.rect_filled(
         rect.expand(2.0),
         Rounding::same((s * 0.30).clamp(7.0, 14.0)),
-        Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 42),
+        Color32::from_rgba_unmultiplied(sun_coral.r(), sun_coral.g(), sun_coral.b(), 48),
     );
-    // Deep obsidian-emerald squircle badge + crisp emerald border
     painter.rect(
         rect,
         rounding,
-        Color32::from_rgb(13, 24, 20),
-        Stroke::new(1.25_f32, Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 195)),
-    );
-    let acc = crate::theme::accent();
-    let acc_light = crate::theme::lerp_color(acc, Color32::WHITE, 0.35);
-    let acc_dark = crate::theme::lerp_color(acc, Color32::BLACK, 0.44);
-    // Subtle inner top specular rim
-    let pad = (s * 0.22).max(5.0);
-    painter.line_segment(
-        [
-            Pos2::new(rect.left() + pad, rect.top() + 1.6),
-            Pos2::new(rect.right() - pad, rect.top() + 1.6),
-        ],
-        Stroke::new(1.0_f32, crate::theme::with_alpha(acc_light, 110)),
+        Color32::from_rgb(30, 21, 46),
+        Stroke::new(1.25_f32, Color32::from_rgba_unmultiplied(sun_gold.r(), sun_gold.g(), sun_gold.b(), 190)),
     );
 
-    // 3-face shaded isometric voxel cube
-    let c = Pos2::new(rect.center().x, rect.center().y + s * 0.015);
-    let r = s * 0.34;
+    let c = Pos2::new(rect.center().x, rect.center().y + s * 0.03);
+    painter.circle_filled(Pos2::new(c.x, c.y - s * 0.07), s * 0.27, sun_gold);
+    painter.circle_filled(Pos2::new(c.x, c.y - s * 0.04), s * 0.21, sun_coral);
+
+    let r = s * 0.28;
     let dx = r * 0.866;
     let dy = r * 0.50;
     let top = Pos2::new(c.x, c.y - r);
@@ -455,217 +444,44 @@ pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
 
     painter.add(egui::Shape::convex_polygon(
         vec![top, tr, c, tl],
-        acc_light,
+        Color32::from_rgb(44, 34, 58),
         Stroke::NONE,
     ));
     painter.add(egui::Shape::convex_polygon(
         vec![tl, c, bot, bl],
-        acc,
+        Color32::from_rgb(31, 24, 44),
         Stroke::NONE,
     ));
     painter.add(egui::Shape::convex_polygon(
         vec![c, tr, br, bot],
-        acc_dark,
+        Color32::from_rgb(20, 15, 31),
         Stroke::NONE,
     ));
 
-    let seam = Stroke::new((s * 0.042).clamp(1.1, 1.8), Color32::from_rgba_unmultiplied(8, 16, 13, 215));
-    for pair in [top, tr, br, bot, bl, tl, top].windows(2) {
-        painter.line_segment([pair[0], pair[1]], seam);
-    }
-    painter.line_segment([tl, c], seam);
-    painter.line_segment([tr, c], seam);
-    painter.line_segment([c, bot], seam);
-
-    // Signature "Svarka" welding arc bolt ("S"-spark flash across the cube)
-    let bolt = [
-        Pos2::new(c.x + r * 0.24, c.y - r * 0.58),
-        Pos2::new(c.x - r * 0.24, c.y - r * 0.04),
-        Pos2::new(c.x + r * 0.22, c.y + r * 0.04),
-        Pos2::new(c.x - r * 0.24, c.y + r * 0.58),
-    ];
-    let halo_stroke = Stroke::new(
-        (s * 0.11).clamp(2.2, 4.2),
-        crate::theme::with_alpha(acc_light, 125),
-    );
-    let core_stroke = Stroke::new((s * 0.055).clamp(1.4, 2.3), Color32::from_rgb(255, 252, 235));
-    for pair in bolt.windows(2) {
-        painter.line_segment([pair[0], pair[1]], halo_stroke);
-    }
-    for pair in bolt.windows(2) {
-        painter.line_segment([pair[0], pair[1]], core_stroke);
-    }
-
-    // Welding spark glints
-    let spark_gold = Color32::from_rgb(255, 224, 115);
-    painter.circle_filled(Pos2::new(c.x + r * 0.62, c.y - r * 0.62), (s * 0.042).max(1.2), spark_gold);
-    painter.circle_filled(Pos2::new(c.x - r * 0.64, c.y + r * 0.54), (s * 0.036).max(1.0), spark_gold);
-    painter.circle_filled(c, (s * 0.045).max(1.3), Color32::WHITE);
+    let rim = Stroke::new((s * 0.045).clamp(1.0, 1.8), sun_gold);
+    painter.line_segment([tl, top], rim);
+    painter.line_segment([top, tr], rim);
+    painter.line_segment([tl, c], rim);
+    painter.line_segment([tr, c], rim);
 }
 
-/// Rasterizes the Svarka Launcher emblem into a 64x64 RGBA `egui::IconData` for the OS window/taskbar.
+/// Decodes `logo.png` into a 64x64 RGBA `egui::IconData` for the OS window/taskbar.
 pub fn build_window_icon() -> egui::IconData {
-    const SIZE: usize = 64;
-    let mut rgba = vec![0u8; SIZE * SIZE * 4];
-
-    fn blend_px(rgba: &mut [u8], x: usize, y: usize, col: [u8; 4]) {
-        if x >= SIZE || y >= SIZE || col[3] == 0 {
-            return;
-        }
-        let idx = (y * SIZE + x) * 4;
-        let sa = col[3] as f32 / 255.0;
-        let da = rgba[idx + 3] as f32 / 255.0;
-        let out_a = sa + da * (1.0 - sa);
-        if out_a <= 0.0 {
-            return;
-        }
-        for c in 0..3 {
-            let sc = col[c] as f32;
-            let dc = rgba[idx + c] as f32;
-            rgba[idx + c] = ((sc * sa + dc * da * (1.0 - sa)) / out_a).clamp(0.0, 255.0) as u8;
-        }
-        rgba[idx + 3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
-    }
-
-    fn dist_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
-        let vx = bx - ax;
-        let vy = by - ay;
-        let wx = px - ax;
-        let wy = py - ay;
-        let len2 = vx * vx + vy * vy;
-        let t = if len2 > 0.0 {
-            ((wx * vx + wy * vy) / len2).clamp(0.0, 1.0)
-        } else {
-            0.0
+    const SIZE: u32 = 64;
+    if let Ok(img) = image::load_from_memory(include_bytes!("../logo.png")) {
+        let resized = img
+            .resize_exact(SIZE, SIZE, image::imageops::FilterType::Lanczos3)
+            .to_rgba8();
+        return egui::IconData {
+            rgba: resized.into_raw(),
+            width: SIZE,
+            height: SIZE,
         };
-        let cx = ax + vx * t;
-        let cy = ay + vy * t;
-        ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
     }
-
-    let cx = SIZE as f32 * 0.5;
-    let cy = SIZE as f32 * 0.5;
-    let half = 29.0_f32;
-    let rad = 14.0_f32;
-
-    // 1. Anti-aliased squircle background + emerald rim
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            let qx = (px - cx).abs() - (half - rad);
-            let qy = (py - cy).abs() - (half - rad);
-            let sdf = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - rad;
-            if sdf < 1.0 {
-                let cov = (1.0 - sdf).clamp(0.0, 1.0);
-                let is_border = sdf > -2.3;
-                let (r, g, b) = if is_border {
-                    (27, 217, 106)
-                } else {
-                    (13, 24, 20)
-                };
-                blend_px(&mut rgba, x, y, [r, g, b, (cov * 255.0) as u8]);
-            }
-        }
-    }
-
-    // 2. 3-face isometric cube (in local coordinates relative to cube center)
-    let cube_cy = cy + 0.8;
-    let r_cube = 21.5_f32;
-    let dx = r_cube * 0.866;
-    let dy = r_cube * 0.50;
-    let top = (cx, cube_cy - r_cube);
-    let tr = (cx + dx, cube_cy - dy);
-    let br = (cx + dx, cube_cy + dy);
-    let bot = (cx, cube_cy + r_cube);
-    let bl = (cx - dx, cube_cy + dy);
-    let tl = (cx - dx, cube_cy - dy);
-    let center = (cx, cube_cy);
-
-    let bolt = [
-        (cx + r_cube * 0.24, cube_cy - r_cube * 0.58),
-        (cx - r_cube * 0.24, cube_cy - r_cube * 0.04),
-        (cx + r_cube * 0.22, cube_cy + r_cube * 0.04),
-        (cx - r_cube * 0.24, cube_cy + r_cube * 0.58),
-    ];
-
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            let lx = px - cx;
-            let ly = py - cube_cy;
-            // Hexagon containment check: |x| <= dx && |y| + |x|/sqrt(3) <= r_cube
-            let hex_d = lx.abs() / dx;
-            let hex_h = ly.abs() + lx.abs() * 0.577_350_26;
-            if hex_d <= 1.0 && hex_h <= r_cube {
-                // Determine face using isometric divider rays from center:
-                // upper-left ray: y = -x * tan(30deg), upper-right ray: y = x * tan(30deg), down ray: x = 0 (y >= 0)
-                let up_boundary = lx.abs() * 0.577_350_26;
-                let face_col = if ly < -up_boundary {
-                    [66, 245, 138, 255] // Top diamond
-                } else if lx < 0.0 {
-                    [27, 217, 106, 255] // Left face
-                } else {
-                    [14, 128, 62, 255] // Right face
-                };
-                blend_px(&mut rgba, x, y, face_col);
-            }
-
-            // Crisp dark seams on cube edges & inner Y-seams
-            let edges = [
-                (top, tr),
-                (tr, br),
-                (br, bot),
-                (bot, bl),
-                (bl, tl),
-                (tl, top),
-                (tl, center),
-                (tr, center),
-                (center, bot),
-            ];
-            let min_seam = edges
-                .iter()
-                .map(|&(a, b)| dist_to_segment(px, py, a.0, a.1, b.0, b.1))
-                .fold(f32::INFINITY, f32::min);
-            if min_seam < 1.35 {
-                let a = ((1.35 - min_seam) / 0.85).clamp(0.0, 1.0);
-                blend_px(&mut rgba, x, y, [8, 16, 13, (a * 225.0) as u8]);
-            }
-
-            // Welding arc bolt halo + core
-            let min_bolt = bolt
-                .windows(2)
-                .map(|w| dist_to_segment(px, py, w[0].0, w[0].1, w[1].0, w[1].1))
-                .fold(f32::INFINITY, f32::min);
-            if min_bolt < 3.4 {
-                let halo_a = ((3.4 - min_bolt) / 2.2).clamp(0.0, 1.0) * 0.55;
-                blend_px(&mut rgba, x, y, [140, 255, 205, (halo_a * 255.0) as u8]);
-            }
-            if min_bolt < 1.55 {
-                let core_a = ((1.55 - min_bolt) / 0.7).clamp(0.0, 1.0);
-                blend_px(&mut rgba, x, y, [255, 252, 235, (core_a * 255.0) as u8]);
-            }
-
-            // Spark glints
-            for (sx, sy, sr, col) in [
-                (cx + r_cube * 0.62, cube_cy - r_cube * 0.62, 2.2_f32, [255, 224, 115]),
-                (cx - r_cube * 0.64, cube_cy + r_cube * 0.54, 1.9_f32, [255, 224, 115]),
-                (cx, cube_cy, 2.1_f32, [255, 255, 255]),
-            ] {
-                let d = ((px - sx).powi(2) + (py - sy).powi(2)).sqrt();
-                if d < sr {
-                    let a = ((sr - d) / 0.9).clamp(0.0, 1.0);
-                    blend_px(&mut rgba, x, y, [col[0], col[1], col[2], (a * 255.0) as u8]);
-                }
-            }
-        }
-    }
-
     egui::IconData {
-        rgba,
-        width: SIZE as u32,
-        height: SIZE as u32,
+        rgba: vec![0u8; (SIZE * SIZE * 4) as usize],
+        width: SIZE,
+        height: SIZE,
     }
 }
 
@@ -679,10 +495,8 @@ mod tests {
         assert_eq!(icon.width, 64);
         assert_eq!(icon.height, 64);
         assert_eq!(icon.rgba.len(), 64 * 64 * 4);
-        // Center pixel must be opaque white/emerald from emblem core
         let center_alpha = icon.rgba[(32 * 64 + 32) * 4 + 3];
         assert_eq!(center_alpha, 255);
-        // Outer corner must remain transparent outside squircle
         assert_eq!(icon.rgba[3], 0);
     }
 }

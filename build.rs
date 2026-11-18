@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName", "svarkawm"
-            VALUE "FileDescription", "Svarka Launcher"
+            VALUE "FileDescription", "Sunset Launcher"
             VALUE "FileVersion", "{ver_str}"
             VALUE "InternalName", "mc-launcher"
             VALUE "LegalCopyright", "Copyright (C) 2026 svarkawm (MIT)"
-            VALUE "OriginalFilename", "svarka-launcher-windows-x64.exe"
-            VALUE "ProductName", "Svarka Launcher"
+            VALUE "OriginalFilename", "sunset-launcher-windows-x64.exe"
+            VALUE "ProductName", "Sunset Launcher"
             VALUE "ProductVersion", "{ver_str}"
         END
     END

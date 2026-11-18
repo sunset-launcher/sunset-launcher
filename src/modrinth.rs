@@ -33,7 +33,7 @@ fn icon_http_client() -> Result<&'static Client, String> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     match CLIENT.get_or_init(|| {
         Client::builder()
-            .user_agent("svarka-launcher/0.1.0")
+            .user_agent(concat!("sunset-launcher/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(20))
             .pool_max_idle_per_host(8)
             .build()
@@ -1092,7 +1092,7 @@ pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Resul
         "game": "minecraft",
         "versionId": "1.0.0",
         "name": profile.name,
-        "summary": format!("Exported from Svarka Launcher ({})", profile.version_id),
+        "summary": format!("Exported from Sunset Launcher ({})", profile.version_id),
         "files": [],
         "dependencies": deps,
     });

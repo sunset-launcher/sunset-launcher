@@ -31,7 +31,7 @@ const RESOURCES_BASE: &str = "https://resources.download.minecraft.net";
 
 pub fn build_http_client() -> Result<Client, String> {
     Client::builder()
-        .user_agent("svarka-launcher/0.1.0")
+        .user_agent(concat!("sunset-launcher/", env!("CARGO_PKG_VERSION")))
         .pool_max_idle_per_host(32)
         .pool_idle_timeout(Duration::from_secs(60))
         .tcp_nodelay(true)
@@ -43,7 +43,7 @@ pub fn build_http_client() -> Result<Client, String> {
 
 pub(crate) fn build_async_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .user_agent("svarka-launcher/0.1.0")
+        .user_agent(concat!("sunset-launcher/", env!("CARGO_PKG_VERSION")))
         .pool_max_idle_per_host(64)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_nodelay(true)

@@ -784,12 +784,15 @@ fn select_release_asset<'a>(
     os: &str,
     arch: &str,
 ) -> Option<&'a GithubAsset> {
-    let exact_name = match (os, arch) {
-        ("linux", "x86_64") => Some("svarka-launcher-linux-x64"),
-        ("windows", "x86_64") => Some("svarka-launcher-windows-x64.exe"),
-        _ => None,
+    let preferred_names: &[&str] = match (os, arch) {
+        ("linux", "x86_64") => &["sunset-launcher-linux-x64", "svarka-launcher-linux-x64"],
+        ("windows", "x86_64") => &[
+            "sunset-launcher-windows-x64.exe",
+            "svarka-launcher-windows-x64.exe",
+        ],
+        _ => &[],
     };
-    if let Some(exact) = exact_name {
+    for exact in preferred_names {
         if let Some(found) = assets.iter().find(|a| a.name.eq_ignore_ascii_case(exact)) {
             return Some(found);
         }
@@ -1036,11 +1039,11 @@ pub fn cleanup_stale_update_files() {
     let _ = remaining;
 }
 
-/// Checks GitHub Releases (`svarkawm/svarka-launcher`) for a newer version than `current_version`.
+/// Checks GitHub Releases (`svarkawm/sunset-launcher`) for a newer version than `current_version`.
 pub fn check_github_latest_release(current_version: &str) -> Result<Option<LauncherUpdateInfo>, String> {
     let client = build_http_client()?;
     let resp = client
-        .get("https://api.github.com/repos/svarkawm/svarka-launcher/releases/latest")
+        .get("https://api.github.com/repos/svarkawm/sunset-launcher/releases/latest")
         .header("Accept", "application/vnd.github+json")
         .send()
         .map_err(|e| format!("Update check failed: {e}"))?;
@@ -1096,7 +1099,7 @@ pub fn download_and_apply_update(
     std::fs::create_dir_all(&updates_dir)
         .map_err(|e| format!("Failed to create updates folder: {e}"))?;
 
-    let asset_name = info.asset_name.as_deref().unwrap_or("svarka-launcher-update");
+    let asset_name = info.asset_name.as_deref().unwrap_or("sunset-launcher-update");
     let is_zip = asset_name.to_ascii_lowercase().ends_with(".zip");
     let dl_path = updates_dir.join(format!("download-{asset_name}"));
 
@@ -1106,7 +1109,7 @@ pub fn download_and_apply_update(
     });
 
     let client = reqwest::blocking::Client::builder()
-        .user_agent("svarka-launcher")
+        .user_agent(concat!("sunset-launcher/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
@@ -1259,7 +1262,7 @@ mod tests {
 
     #[test]
     fn test_select_release_asset_matches_os_and_skips_signatures() {
-        let assets = vec![
+        let legacy_assets = vec![
             GithubAsset {
                 name: "svarka-launcher-linux-x64.sha256".to_string(),
                 browser_download_url: "https://example.invalid/linux.sha256".to_string(),
@@ -1277,18 +1280,48 @@ mod tests {
             },
         ];
         assert_eq!(
-            select_release_asset(&assets, "linux", "x86_64")
+            select_release_asset(&legacy_assets, "linux", "x86_64")
                 .unwrap()
                 .name,
             "svarka-launcher-linux-x64"
         );
         assert_eq!(
-            select_release_asset(&assets, "windows", "x86_64")
+            select_release_asset(&legacy_assets, "windows", "x86_64")
                 .unwrap()
                 .name,
             "svarka-launcher-windows-x64.exe"
         );
-        assert!(select_release_asset(&assets, "macos", "aarch64").is_none());
+
+        let sunset_assets = vec![
+            GithubAsset {
+                name: "sunset-launcher-linux-x64.sha256".to_string(),
+                browser_download_url: "https://example.invalid/sunset-linux.sha256".to_string(),
+                size: 64,
+            },
+            GithubAsset {
+                name: "sunset-launcher-linux-x64".to_string(),
+                browser_download_url: "https://example.invalid/sunset-linux".to_string(),
+                size: 12_000_000,
+            },
+            GithubAsset {
+                name: "sunset-launcher-windows-x64.exe".to_string(),
+                browser_download_url: "https://example.invalid/sunset-win".to_string(),
+                size: 13_000_000,
+            },
+        ];
+        assert_eq!(
+            select_release_asset(&sunset_assets, "linux", "x86_64")
+                .unwrap()
+                .name,
+            "sunset-launcher-linux-x64"
+        );
+        assert_eq!(
+            select_release_asset(&sunset_assets, "windows", "x86_64")
+                .unwrap()
+                .name,
+            "sunset-launcher-windows-x64.exe"
+        );
+        assert!(select_release_asset(&sunset_assets, "macos", "aarch64").is_none());
     }
 
     #[test]

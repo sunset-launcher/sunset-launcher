@@ -22,7 +22,7 @@ fn main() -> eframe::Result<()> {
     let wait_for_relaunch = std::env::args().any(|a| a == "--relaunch-wait");
     let Some(_instance_guard) = storage::acquire_single_instance_lock(&paths, wait_for_relaunch)
     else {
-        eprintln!("Svarka Launcher is already running.");
+        eprintln!("Sunset Launcher is already running.");
         return Ok(());
     };
     #[cfg(target_os = "linux")]
@@ -39,12 +39,12 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1060.0, 680.0])
             .with_min_inner_size([440.0, 380.0])
             .with_icon(std::sync::Arc::new(icons::build_window_icon()))
-            .with_title("Svarka Launcher"),
+            .with_title("Sunset Launcher"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Svarka Launcher",
+        "Sunset Launcher",
         options,
         Box::new(move |cc| {
             theme::apply_modrinth_theme(&cc.egui_ctx);

@@ -339,7 +339,7 @@ fn download_adoptium_jre(
     emit_progress(tx, format!("Downloading Java {major} (Temurin)..."), 0.02);
 
     let client = reqwest::blocking::Client::builder()
-        .user_agent("svarka-launcher/0.1")
+        .user_agent(concat!("sunset-launcher/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(600))
         .build()
@@ -694,7 +694,7 @@ pub fn launch_game(
         "natives_directory",
         prepared.natives_dir.to_string_lossy().to_string(),
     );
-    vars.insert("launcher_name", "Svarka Launcher".to_string());
+    vars.insert("launcher_name", "Sunset Launcher".to_string());
     vars.insert("launcher_version", env!("CARGO_PKG_VERSION").to_string());
     vars.insert("classpath", classpath_str.clone());
     vars.insert("classpath_separator", sep.to_string());
