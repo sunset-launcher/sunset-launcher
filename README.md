@@ -5,7 +5,7 @@
 
   <p>
     <a href="https://github.com/svarkawm/sunset-launcher/releases">
-      <img src="https://img.shields.io/github/v/release/svarkawm/sunset-launcher?color=FF7833&label=Release&style=for-the-badge" alt="Release" />
+      <img src="https://img.shields.io/github/v/release/svarkawm/sunset-launcher?color=FF7833&label=Release&style=for-the-badge&v=1" alt="Release" />
     </a>
     <a href="https://github.com/svarkawm/sunset-launcher/actions/workflows/build.yml">
       <img src="https://img.shields.io/github/actions/workflow/status/svarkawm/sunset-launcher/build.yml?branch=main&label=Build&style=for-the-badge" alt="Build & Release CI" />
