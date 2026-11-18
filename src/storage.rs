@@ -1,13 +1,17 @@
 use crate::models::{Account, AccountStore, LauncherPaths, LauncherSettings, ModLoader, Profile};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Returns standard launcher data directories (e.g. ~/.local/share/mc-launcher on Linux).
+/// Returns standard launcher data directories (e.g. ~/.local/share/sunset-launcher on Linux).
 pub fn get_launcher_paths() -> Result<LauncherPaths, String> {
     let base = dirs::data_local_dir()
         .or_else(dirs::home_dir)
         .ok_or_else(|| "Could not determine local data directory".to_string())?;
-    let root = base.join("mc-launcher");
+    let root = base.join("sunset-launcher");
+    let legacy_root = base.join("mc-launcher");
+    if !root.exists() && legacy_root.is_dir() {
+        let _ = fs::rename(&legacy_root, &root);
+    }
     let paths = LauncherPaths {
         versions_dir: root.join("versions"),
         libraries_dir: root.join("libraries"),
@@ -34,24 +38,228 @@ pub fn get_launcher_paths() -> Result<LauncherPaths, String> {
     Ok(paths)
 }
 
+/// Converts an instance display name into a safe, human-readable directory name.
+pub fn sanitize_instance_dir_name(name: &str) -> String {
+    let mut cleaned = String::with_capacity(name.len());
+    let mut prev_space = false;
+    for ch in name.trim().chars() {
+        let mapped = if ch.is_control()
+            || matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        {
+            '-'
+        } else {
+            ch
+        };
+        if mapped.is_whitespace() {
+            if !prev_space {
+                cleaned.push(' ');
+                prev_space = true;
+            }
+        } else {
+            cleaned.push(mapped);
+            prev_space = false;
+        }
+    }
+
+    let trimmed = cleaned.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    let mut truncated = String::new();
+    for ch in trimmed.chars().take(80) {
+        truncated.push(ch);
+    }
+    let final_name = truncated
+        .trim_matches(|c: char| c.is_whitespace() || c == '.')
+        .to_string();
+
+    if final_name.is_empty() || final_name == "." || final_name == ".." {
+        return "instance".to_string();
+    }
+
+    let upper = final_name.to_ascii_uppercase();
+    let is_windows_reserved = matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if is_windows_reserved {
+        format!("{final_name}_instance")
+    } else {
+        final_name
+    }
+}
+
+fn is_dir_name_taken(
+    paths: &LauncherPaths,
+    candidate: &str,
+    existing: &[Profile],
+    ignore_profile_id: Option<&str>,
+) -> bool {
+    let used_by_profile = existing.iter().any(|p| {
+        ignore_profile_id != Some(p.id.as_str())
+            && !p.dir_name.is_empty()
+            && p.dir_name.eq_ignore_ascii_case(candidate)
+    });
+    used_by_profile || paths.instances_dir.join(candidate).exists()
+}
+
+/// Picks a unique, human-readable folder name inside `instances/` for a profile.
+pub fn unique_instance_dir_name(
+    paths: &LauncherPaths,
+    name: &str,
+    existing: &[Profile],
+) -> String {
+    unique_instance_dir_name_excluding(paths, name, existing, None)
+}
+
+fn unique_instance_dir_name_excluding(
+    paths: &LauncherPaths,
+    name: &str,
+    existing: &[Profile],
+    ignore_profile_id: Option<&str>,
+) -> String {
+    let base = sanitize_instance_dir_name(name);
+    if !is_dir_name_taken(paths, &base, existing, ignore_profile_id) {
+        return base;
+    }
+    for n in 2.. {
+        let candidate = format!("{base} ({n})");
+        if !is_dir_name_taken(paths, &candidate, existing, ignore_profile_id) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+fn rewrite_path_prefix(path_str: &mut String, old_dir: &Path, new_dir: &Path) {
+    let trimmed = path_str.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Ok(rel) = Path::new(trimmed).strip_prefix(old_dir) {
+        *path_str = new_dir.join(rel).to_string_lossy().to_string();
+    }
+}
+
+/// Migrates legacy UUID-named instance folders (`instances/<id>`) to readable names
+/// and updates `dir_name` on profiles that don't have one yet.
+pub fn migrate_profile_instance_dirs(paths: &LauncherPaths, profiles: &mut [Profile]) -> bool {
+    let mut changed = false;
+    if let Some(parent) = paths.root.parent() {
+        let legacy_root = parent.join("mc-launcher");
+        for p in profiles.iter_mut() {
+            let old_icon = p.icon_path.clone();
+            let old_java = p.java_path.clone();
+            rewrite_path_prefix(&mut p.icon_path, &legacy_root, &paths.root);
+            rewrite_path_prefix(&mut p.java_path, &legacy_root, &paths.root);
+            if p.icon_path != old_icon || p.java_path != old_java {
+                changed = true;
+            }
+        }
+    }
+
+    for idx in 0..profiles.len() {
+        if !profiles[idx].dir_name.is_empty() {
+            continue;
+        }
+        let pid = profiles[idx].id.clone();
+        let pname = profiles[idx].name.clone();
+        let target = unique_instance_dir_name_excluding(paths, &pname, profiles, Some(&pid));
+        let legacy_dir = paths.instances_dir.join(&pid);
+        let new_dir = paths.instances_dir.join(&target);
+
+        let assigned = if legacy_dir.is_dir() {
+            if !new_dir.exists() && fs::rename(&legacy_dir, &new_dir).is_ok() {
+                rewrite_path_prefix(&mut profiles[idx].icon_path, &legacy_dir, &new_dir);
+                target
+            } else {
+                pid
+            }
+        } else {
+            target
+        };
+
+        profiles[idx].dir_name = assigned;
+        changed = true;
+    }
+
+    changed
+}
+
+/// Renames a profile's folder in `instances/` to match its updated `name` when safe.
+pub fn rename_instance_dir_for_profile(
+    paths: &LauncherPaths,
+    profile: &mut Profile,
+    all_profiles: &[Profile],
+) -> bool {
+    let target = unique_instance_dir_name_excluding(
+        paths,
+        &profile.name,
+        all_profiles,
+        Some(&profile.id),
+    );
+    if profile.dir_name == target {
+        return false;
+    }
+    let old_key = if profile.dir_name.is_empty() {
+        profile.id.clone()
+    } else {
+        profile.dir_name.clone()
+    };
+    let old_dir = paths.instances_dir.join(&old_key);
+    let new_dir = paths.instances_dir.join(&target);
+
+    if old_dir.is_dir() {
+        if new_dir.exists() || fs::rename(&old_dir, &new_dir).is_err() {
+            return false;
+        }
+        rewrite_path_prefix(&mut profile.icon_path, &old_dir, &new_dir);
+    }
+    profile.dir_name = target;
+    true
+}
+
 /// Loads saved profiles from profiles.json, or creates a default profile if none exist.
 pub fn load_profiles(paths: &LauncherPaths) -> Vec<Profile> {
     if !paths.profiles_file.exists() {
-        let default_profile = Profile::new(
+        let mut default_profile = Profile::new(
             "Default Vanilla".to_string(),
             "1.21.4".to_string(),
             ModLoader::Vanilla,
             "Player".to_string(),
         );
+        default_profile.dir_name = unique_instance_dir_name(paths, &default_profile.name, &[]);
         let profiles = vec![default_profile];
         let _ = save_profiles(paths, &profiles);
         return profiles;
     }
 
-    match fs::read_to_string(&paths.profiles_file) {
+    let mut profiles: Vec<Profile> = match fs::read_to_string(&paths.profiles_file) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => Vec::new(),
+    };
+    if migrate_profile_instance_dirs(paths, &mut profiles) {
+        let _ = save_profiles(paths, &profiles);
     }
+    profiles
 }
 
 /// Persists profiles to profiles.json.
@@ -64,7 +272,18 @@ pub fn save_profiles(paths: &LauncherPaths, profiles: &[Profile]) -> Result<(), 
 
 /// Returns the game directory for a specific profile instance.
 pub fn instance_dir(paths: &LauncherPaths, profile: &Profile) -> PathBuf {
-    let dir = paths.instances_dir.join(&profile.id);
+    let dir = if !profile.dir_name.is_empty() {
+        paths.instances_dir.join(&profile.dir_name)
+    } else {
+        let legacy = paths.instances_dir.join(&profile.id);
+        if legacy.exists() {
+            legacy
+        } else {
+            paths
+                .instances_dir
+                .join(sanitize_instance_dir_name(&profile.name))
+        }
+    };
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -441,6 +660,61 @@ mod tests {
         let guard2 = acquire_single_instance_lock(&paths, false)
             .expect("lock should be re-acquirable after drop");
         drop(guard2);
+
+        let _ = fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn sanitize_and_unique_instance_dir_names() {
+        assert_eq!(sanitize_instance_dir_name("My Instance 1.21"), "My Instance 1.21");
+        assert_eq!(sanitize_instance_dir_name("Ванилла / Тест: 1.21*"), "Ванилла - Тест- 1.21-");
+        assert_eq!(sanitize_instance_dir_name("  ...  "), "instance");
+        assert_eq!(sanitize_instance_dir_name("CON"), "CON_instance");
+
+        let paths = test_paths("unique_names");
+        fs::create_dir_all(paths.instances_dir.join("Survival")).unwrap();
+        let mut p1 = Profile::new("Survival".into(), "1.21.4".into(), ModLoader::Vanilla, "P".into());
+        p1.dir_name = "Survival".into();
+        let p2 = Profile::new("Survival".into(), "1.21.4".into(), ModLoader::Vanilla, "P".into());
+
+        assert_eq!(
+            unique_instance_dir_name(&paths, &p2.name, &[p1]),
+            "Survival (2)"
+        );
+
+        let _ = fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn load_profiles_migrates_legacy_uuid_dir_and_renames_cleanly() {
+        let paths = test_paths("migrate_uuid_dir");
+        fs::create_dir_all(&paths.instances_dir).unwrap();
+
+        let mut p = Profile::new("Fabric 1.21".into(), "1.21.4".into(), ModLoader::Vanilla, "P".into());
+        let legacy_dir = paths.instances_dir.join(&p.id);
+        fs::create_dir_all(legacy_dir.join("mods")).unwrap();
+        fs::write(legacy_dir.join("mods").join("sodium.jar"), b"jar").unwrap();
+        p.icon_path = legacy_dir.join("icon.png").to_string_lossy().to_string();
+        save_profiles(&paths, &[p.clone()]).unwrap();
+
+        let mut loaded = load_profiles(&paths);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].dir_name, "Fabric 1.21");
+        assert!(!legacy_dir.exists());
+        assert!(paths.instances_dir.join("Fabric 1.21").join("mods").join("sodium.jar").is_file());
+        assert_eq!(
+            loaded[0].icon_path,
+            paths.instances_dir.join("Fabric 1.21").join("icon.png").to_string_lossy()
+        );
+
+        loaded[0].name = "Better Fabric".into();
+        assert!(rename_instance_dir_for_profile(&paths, &mut loaded[0], &[]));
+        assert_eq!(loaded[0].dir_name, "Better Fabric");
+        assert!(paths.instances_dir.join("Better Fabric").join("mods").join("sodium.jar").is_file());
+        assert_eq!(
+            loaded[0].icon_path,
+            paths.instances_dir.join("Better Fabric").join("icon.png").to_string_lossy()
+        );
 
         let _ = fs::remove_dir_all(&paths.root);
     }

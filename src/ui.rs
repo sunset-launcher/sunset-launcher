@@ -28,8 +28,9 @@ use crate::modrinth::{
 };
 use crate::mojang::{fetch_loader_versions, fetch_version_manifest, prepare_version};
 use crate::storage::{
-    instance_dir, is_version_installed, load_selected_profile_id, resolve_selected_profile_index,
-    save_accounts, save_launcher_settings, save_profiles, save_selected_profile_id,
+    instance_dir, is_version_installed, load_selected_profile_id, rename_instance_dir_for_profile,
+    resolve_selected_profile_index, save_accounts, save_launcher_settings, save_profiles,
+    save_selected_profile_id, unique_instance_dir_name,
 };
 use crate::theme::{
     self, animated_card, animated_progress_bar, apply_modrinth_theme, apply_ui_font, badge,
@@ -700,6 +701,7 @@ impl McLauncherApp {
         let mut copy = orig.clone();
         copy.id = uuid::Uuid::new_v4().to_string();
         copy.name = format!("{} (Copy)", orig.name);
+        copy.dir_name = unique_instance_dir_name(&self.paths, &copy.name, &self.profiles);
         copy.created_at = chrono::Utc::now().to_rfc3339();
         copy.last_played = None;
         self.profiles.push(copy);
@@ -4679,6 +4681,7 @@ impl McLauncherApp {
         let mut rescan_java = false;
         let mut trigger_dup = false;
         let mut trigger_del = false;
+        let mut rename_dir = false;
         let can_delete = self.profiles.len() > 1;
         let paths = self.paths.clone();
         let selected_idx = self.selected_idx;
@@ -4760,17 +4763,19 @@ impl McLauncherApp {
                             ui.end_row();
 
                             ui.label(tr(self.settings.language, "inst.name"));
-                            if ui_text_input(
+                            let name_resp = ui_text_input(
                                 ui,
                                 "cfg_inst_name_w",
                                 &mut profile.name,
                                 tr(self.settings.language, "inst.name_hint"),
                                 (field_w - 90.0).max(160.0),
                                 false,
-                            )
-                            .changed()
-                            {
+                            );
+                            if name_resp.changed() {
                                 changed = true;
+                            }
+                            if name_resp.lost_focus() {
+                                rename_dir = true;
                             }
                             ui.end_row();
 
@@ -4855,10 +4860,19 @@ impl McLauncherApp {
                             .small()
                             .color(text_secondary()),
                     );
-                    if ui_text_input(ui, "cfg_inst_name_n", &mut profile.name, tr(self.settings.language, "inst.name_hint"), field_w, false)
-                        .changed()
-                    {
+                    let name_resp = ui_text_input(
+                        ui,
+                        "cfg_inst_name_n",
+                        &mut profile.name,
+                        tr(self.settings.language, "inst.name_hint"),
+                        field_w,
+                        false,
+                    );
+                    if name_resp.changed() {
                         changed = true;
+                    }
+                    if name_resp.lost_focus() {
+                        rename_dir = true;
                     }
                     ui.add_space(6.0);
 
@@ -5277,6 +5291,22 @@ impl McLauncherApp {
         }
         if trigger_del {
             self.confirm_delete_idx = Some(selected_idx);
+        }
+        if rename_dir && !self.profiles[selected_idx].name.trim().is_empty() {
+            let others: Vec<Profile> = self
+                .profiles
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != selected_idx)
+                .map(|(_, p)| p.clone())
+                .collect();
+            if rename_instance_dir_for_profile(
+                &self.paths,
+                &mut self.profiles[selected_idx],
+                &others,
+            ) {
+                changed = true;
+            }
         }
         if changed {
             let new_loader = self.profiles[selected_idx].loader.kind();
@@ -7527,6 +7557,8 @@ impl McLauncherApp {
                             self.new_username.trim().to_string(),
                         );
                         profile.max_ram_mb = self.new_ram_mb;
+                        profile.dir_name =
+                            unique_instance_dir_name(&self.paths, &profile.name, &self.profiles);
                         self.profiles.push(profile);
                         let new_idx = self.profiles.len() - 1;
                         let _ = save_profiles(&self.paths, &self.profiles);

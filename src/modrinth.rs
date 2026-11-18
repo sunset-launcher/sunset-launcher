@@ -1159,7 +1159,8 @@ pub fn install_mrpack(
 
     let (mc_version, loader) = parse_mrpack_loader(&index.dependencies)?;
 
-    let new_profile = Profile::new(index.name.clone(), mc_version, loader, username);
+    let mut new_profile = Profile::new(index.name.clone(), mc_version, loader, username);
+    new_profile.dir_name = crate::storage::unique_instance_dir_name(paths, &new_profile.name, &[]);
     let inst_dir = instance_dir(paths, &new_profile);
 
     let client = build_http_client()?;

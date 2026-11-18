@@ -953,7 +953,7 @@ fn replace_executable_file(staged_in_target_dir: &Path, target_exe: &Path) -> Re
         let file_name = target_exe
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "mc-launcher.exe".to_string());
+            .unwrap_or_else(|| "sunset-launcher.exe".to_string());
         let backup = pick_windows_backup_path(target_exe, &file_name);
         std::fs::rename(target_exe, &backup)
             .map_err(|e| format!("Failed to move old executable: {e}"))?;

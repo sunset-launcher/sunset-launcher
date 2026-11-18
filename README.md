@@ -23,7 +23,7 @@
 </div>
 
 ## Features
-- **Instances & Profiles**: create, duplicate, edit, and delete instances with isolated `instances/<profile_id>` game directories.
+- **Instances & Profiles**: create, duplicate, edit, and delete instances with isolated `instances/<instance_name>` game directories.
 - **Mod Loaders**: supports **Vanilla**, **Fabric**, **Quilt**, **Forge**, and **NeoForge** via official Mojang, Fabric/Quilt Meta, and Forge/NeoForge Maven APIs (including Forge/NeoForge installer processors).
 - **Modrinth Integration & `.mrpack`**: search and install mods, modpacks (`.mrpack`), resource packs, and shaders; import/export `.mrpack` archives and toggle enabled content files.
 - **Worlds, Quick-Play & Backups**: browse instance worlds, launch directly into a world (`--quickPlaySingleplayer`), and create, restore, or delete `.zip` world backups.
@@ -78,8 +78,8 @@ cargo test
 
 ## Data Storage
 By default, launcher data is stored in:
-- **Linux**: `~/.local/share/mc-launcher`
-- **Windows**: `%LOCALAPPDATA%\mc-launcher` (`C:\Users\<User>\AppData\Local\mc-launcher`)
+- **Linux**: `~/.local/share/sunset-launcher`
+- **Windows**: `%LOCALAPPDATA%\sunset-launcher` (`C:\Users\<User>\AppData\Local\sunset-launcher`)
 
 Inside this folder:
 - `profiles.json` — instance profiles

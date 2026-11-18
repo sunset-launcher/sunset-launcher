@@ -78,7 +78,7 @@ fn push_java_vendor_dirs(root: &Path, candidates: &mut Vec<PathBuf>) {
 pub fn detect_java_installations() -> Vec<JavaInstall> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(base) = dirs::data_local_dir().or_else(dirs::home_dir) {
-        push_java_vendor_dirs(&base.join("mc-launcher").join("java"), &mut candidates);
+        push_java_vendor_dirs(&base.join("sunset-launcher").join("java"), &mut candidates);
     }
     if let Ok(home) = std::env::var("JAVA_HOME") {
         candidates.push(PathBuf::from(home).join("bin").join(JAVA_BIN));

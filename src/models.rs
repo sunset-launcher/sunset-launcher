@@ -167,6 +167,8 @@ pub struct Profile {
     pub prefer_discrete_gpu: bool,
     #[serde(default)]
     pub icon_path: String,
+    #[serde(default)]
+    pub dir_name: String,
 }
 
 impl Profile {
@@ -191,6 +193,7 @@ impl Profile {
             server_address: String::new(),
             prefer_discrete_gpu: false,
             icon_path: String::new(),
+            dir_name: String::new(),
         }
     }
 }
