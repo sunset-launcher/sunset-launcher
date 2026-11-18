@@ -5388,8 +5388,8 @@ impl McLauncherApp {
                     )
                     .clicked()
                     {
-                        self.settings.theme_preset = ThemePreset::Emerald;
-                        self.settings.custom_palette = ThemePreset::Emerald.palette();
+                        self.settings.theme_preset = ThemePreset::Sunset;
+                        self.settings.custom_palette = ThemePreset::Sunset.palette();
                         set_theme_palette(&self.settings.effective_palette());
                         apply_modrinth_theme(ctx);
                         let _ = save_launcher_settings(&self.paths, &self.settings);

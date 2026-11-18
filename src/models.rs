@@ -659,6 +659,7 @@ pub struct LauncherPaths {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ThemePreset {
     #[default]
+    Sunset,
     Emerald,
     Cyan,
     Crimson,
@@ -690,24 +691,25 @@ pub struct CustomPalette {
 impl Default for CustomPalette {
     fn default() -> Self {
         Self {
-            bg_void: [18, 20, 24],
-            bg_sidebar: [24, 26, 32],
-            bg_elevated: [30, 33, 40],
-            bg_card: [36, 40, 48],
-            bg_card_hover: [44, 49, 59],
-            bg_input: [15, 17, 21],
-            border_subtle: [46, 51, 61],
-            border_strong: [69, 76, 90],
-            text_primary: [238, 242, 247],
-            text_secondary: [155, 163, 180],
-            text_muted: [103, 112, 130],
-            accent: [27, 217, 106],
+            bg_void: [18, 15, 24],
+            bg_sidebar: [24, 19, 32],
+            bg_elevated: [31, 24, 41],
+            bg_card: [38, 29, 49],
+            bg_card_hover: [48, 37, 61],
+            bg_input: [14, 11, 20],
+            border_subtle: [56, 44, 70],
+            border_strong: [84, 64, 102],
+            text_primary: [247, 240, 236],
+            text_secondary: [188, 169, 178],
+            text_muted: [130, 112, 128],
+            accent: [255, 128, 66],
         }
     }
 }
 
 impl ThemePreset {
-    pub const ALL: [ThemePreset; 9] = [
+    pub const ALL: [ThemePreset; 10] = [
+        ThemePreset::Sunset,
         ThemePreset::Emerald,
         ThemePreset::Cyan,
         ThemePreset::Crimson,
@@ -721,6 +723,7 @@ impl ThemePreset {
 
     pub fn label(self) -> &'static str {
         match self {
+            ThemePreset::Sunset => "Sunset",
             ThemePreset::Emerald => "Emerald",
             ThemePreset::Cyan => "Obsidian Cyan",
             ThemePreset::Crimson => "Crimson",
@@ -735,7 +738,21 @@ impl ThemePreset {
 
     pub fn palette(self) -> CustomPalette {
         match self {
-            ThemePreset::Emerald | ThemePreset::Custom => CustomPalette::default(),
+            ThemePreset::Sunset | ThemePreset::Custom => CustomPalette::default(),
+            ThemePreset::Emerald => CustomPalette {
+                bg_void: [18, 20, 24],
+                bg_sidebar: [24, 26, 32],
+                bg_elevated: [30, 33, 40],
+                bg_card: [36, 40, 48],
+                bg_card_hover: [44, 49, 59],
+                bg_input: [15, 17, 21],
+                border_subtle: [46, 51, 61],
+                border_strong: [69, 76, 90],
+                text_primary: [238, 242, 247],
+                text_secondary: [155, 163, 180],
+                text_muted: [103, 112, 130],
+                accent: [27, 217, 106],
+            },
             ThemePreset::Cyan => CustomPalette {
                 bg_void: [15, 19, 24],
                 bg_sidebar: [20, 25, 32],
@@ -835,7 +852,7 @@ fn default_true() -> bool {
 }
 
 fn default_custom_accent() -> [u8; 3] {
-    [27, 217, 106]
+    [255, 128, 66]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -867,7 +884,7 @@ impl Default for LauncherSettings {
     fn default() -> Self {
         Self {
             language: crate::i18n::Language::En,
-            theme_preset: ThemePreset::Emerald,
+            theme_preset: ThemePreset::Sunset,
             custom_accent: default_custom_accent(),
             custom_palette: CustomPalette::default(),
             discord_rpc_enabled: true,
@@ -888,6 +905,20 @@ impl LauncherSettings {
         } else {
             self.theme_preset.palette()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sunset_theme_is_first_and_default() {
+        assert_eq!(ThemePreset::ALL[0], ThemePreset::Sunset);
+        assert_eq!(ThemePreset::default(), ThemePreset::Sunset);
+        assert_eq!(LauncherSettings::default().theme_preset, ThemePreset::Sunset);
+        assert_eq!(ThemePreset::Sunset.palette().accent, [255, 128, 66]);
+        assert_eq!(ThemePreset::Emerald.palette().accent, [27, 217, 106]);
     }
 }
 

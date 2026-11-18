@@ -18,7 +18,7 @@
   </p>
 
   <p>
-    <img width="920" alt="Sunset Launcher Preview" src="https://github.com/user-attachments/assets/926a4243-2ce9-4b93-8d6d-6c1eb5d41ddc" />
+    <img width="920" alt="Sunset Launcher — Instances" src="docs/screenshots/library.jpg" />
   </p>
 </div>
 
@@ -38,12 +38,15 @@
 
 <table>
   <tr>
-    <td><img alt="Screenshot 1" src="https://github.com/user-attachments/assets/4e664c71-5f38-4eb8-9c67-5116fdcb4dd6" /></td>
-    <td><img alt="Screenshot 2" src="https://github.com/user-attachments/assets/addc6e05-f003-4708-a5e8-f299b83dac26" /></td>
+    <td><img alt="Modrinth Discover" src="docs/screenshots/discover.jpg" /></td>
+    <td><img alt="Instance Content &amp; Mods" src="docs/screenshots/mods.jpg" /></td>
   </tr>
   <tr>
-    <td><img alt="Screenshot 3" src="https://github.com/user-attachments/assets/ec388498-8890-4041-a68a-d5444caca487" /></td>
-    <td><img alt="Screenshot 4" src="https://github.com/user-attachments/assets/4415462e-0d49-4631-8143-429063fcaf02" /></td>
+    <td><img alt="Accounts &amp; Skin Preview" src="docs/screenshots/accounts.jpg" /></td>
+    <td><img alt="Launcher Settings &amp; Sunset Theme" src="docs/screenshots/settings.jpg" /></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img width="520" alt="Live Console" src="docs/screenshots/console.png" /></td>
   </tr>
 </table>
 

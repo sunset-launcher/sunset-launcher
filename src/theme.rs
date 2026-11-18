@@ -21,18 +21,18 @@ fn store_rgb(slot: &AtomicU32, rgb: [u8; 3]) {
     slot.store(pack_rgb(rgb[0], rgb[1], rgb[2]), Ordering::Relaxed);
 }
 
-static PAL_BG_VOID: AtomicU32 = AtomicU32::new(pack_rgb(18, 20, 24));
-static PAL_BG_SIDEBAR: AtomicU32 = AtomicU32::new(pack_rgb(24, 26, 32));
-static PAL_BG_ELEVATED: AtomicU32 = AtomicU32::new(pack_rgb(30, 33, 40));
-static PAL_BG_CARD: AtomicU32 = AtomicU32::new(pack_rgb(36, 40, 48));
-static PAL_BG_CARD_HOVER: AtomicU32 = AtomicU32::new(pack_rgb(44, 49, 59));
-static PAL_BG_INPUT: AtomicU32 = AtomicU32::new(pack_rgb(15, 17, 21));
-static PAL_BORDER_SUBTLE: AtomicU32 = AtomicU32::new(pack_rgb(46, 51, 61));
-static PAL_BORDER_STRONG: AtomicU32 = AtomicU32::new(pack_rgb(69, 76, 90));
-static PAL_TEXT_PRIMARY: AtomicU32 = AtomicU32::new(pack_rgb(238, 242, 247));
-static PAL_TEXT_SECONDARY: AtomicU32 = AtomicU32::new(pack_rgb(155, 163, 180));
-static PAL_TEXT_MUTED: AtomicU32 = AtomicU32::new(pack_rgb(103, 112, 130));
-static ACTIVE_ACCENT: AtomicU32 = AtomicU32::new(pack_rgb(27, 217, 106));
+static PAL_BG_VOID: AtomicU32 = AtomicU32::new(pack_rgb(18, 15, 24));
+static PAL_BG_SIDEBAR: AtomicU32 = AtomicU32::new(pack_rgb(24, 19, 32));
+static PAL_BG_ELEVATED: AtomicU32 = AtomicU32::new(pack_rgb(31, 24, 41));
+static PAL_BG_CARD: AtomicU32 = AtomicU32::new(pack_rgb(38, 29, 49));
+static PAL_BG_CARD_HOVER: AtomicU32 = AtomicU32::new(pack_rgb(48, 37, 61));
+static PAL_BG_INPUT: AtomicU32 = AtomicU32::new(pack_rgb(14, 11, 20));
+static PAL_BORDER_SUBTLE: AtomicU32 = AtomicU32::new(pack_rgb(56, 44, 70));
+static PAL_BORDER_STRONG: AtomicU32 = AtomicU32::new(pack_rgb(84, 64, 102));
+static PAL_TEXT_PRIMARY: AtomicU32 = AtomicU32::new(pack_rgb(247, 240, 236));
+static PAL_TEXT_SECONDARY: AtomicU32 = AtomicU32::new(pack_rgb(188, 169, 178));
+static PAL_TEXT_MUTED: AtomicU32 = AtomicU32::new(pack_rgb(130, 112, 128));
+static ACTIVE_ACCENT: AtomicU32 = AtomicU32::new(pack_rgb(255, 128, 66));
 
 pub fn bg_void() -> Color32 { unpack_rgb(PAL_BG_VOID.load(Ordering::Relaxed)) }
 pub fn bg_sidebar() -> Color32 { unpack_rgb(PAL_BG_SIDEBAR.load(Ordering::Relaxed)) }
