@@ -289,6 +289,7 @@ pub fn instance_dir(paths: &LauncherPaths, profile: &Profile) -> PathBuf {
 }
 
 /// Checks whether a version's client JAR and JSON are already present locally.
+#[allow(dead_code)]
 pub fn is_version_installed(paths: &LauncherPaths, version_id: &str) -> bool {
     let vdir = paths.versions_dir.join(version_id);
     vdir.join(format!("{version_id}.json")).exists()

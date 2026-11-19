@@ -492,12 +492,19 @@ pub fn ui_toolbar_row<R>(
     row_h: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
+    let avail_w = ui.available_width();
+    let box_h = row_h + 2.0;
     ui.allocate_ui_with_layout(
-        Vec2::new(ui.available_width(), row_h),
+        Vec2::new(avail_w, box_h),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
-            ui.set_min_height(row_h);
-            ui.set_max_height(row_h);
+            ui.set_min_height(box_h);
+            let r = ui.max_rect();
+            let clip = ui.clip_rect().intersect(egui::Rect::from_min_max(
+                Pos2::new(r.left() - 4.0, r.top() - 4.0),
+                Pos2::new(r.right() + 2.0, r.bottom() + 4.0),
+            ));
+            ui.set_clip_rect(clip);
             ui.spacing_mut().interact_size.y = row_h;
             ui.spacing_mut().button_padding = Vec2::new(11.0, ((row_h - 15.0) * 0.5).max(2.0));
             add_contents(ui)
@@ -505,20 +512,37 @@ pub fn ui_toolbar_row<R>(
     )
 }
 
-/// Wrapping horizontal row where every control aligns vertically to the first widget's centerline
-/// and inherits identical row height (`interact_size.y = row_h`).
+/// Single-line horizontal row where controls align to the centerline and compress spacing
+/// when the window narrows instead of wrapping onto another line.
 pub fn ui_wrap_row<R>(
     ui: &mut egui::Ui,
     row_h: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
+    let avail_w = ui.available_width();
+    let pad_x = if avail_w < 420.0 {
+        6.0
+    } else if avail_w < 620.0 {
+        8.5
+    } else {
+        11.0
+    };
+    let gap_x = if avail_w < 460.0 { 4.0 } else { 6.0 };
+    let box_h = row_h + 2.0;
     ui.allocate_ui_with_layout(
-        Vec2::new(ui.available_width(), row_h),
-        egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+        Vec2::new(avail_w, box_h),
+        egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
+            ui.set_min_height(box_h);
+            let r = ui.max_rect();
+            let clip = ui.clip_rect().intersect(egui::Rect::from_min_max(
+                Pos2::new(r.left() - 4.0, r.top() - 4.0),
+                Pos2::new(r.right() + 2.0, r.bottom() + 4.0),
+            ));
+            ui.set_clip_rect(clip);
             ui.spacing_mut().interact_size.y = row_h;
-            ui.spacing_mut().button_padding = Vec2::new(11.0, ((row_h - 15.0) * 0.5).max(2.0));
-            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+            ui.spacing_mut().button_padding = Vec2::new(pad_x, ((row_h - 15.0) * 0.5).max(2.0));
+            ui.spacing_mut().item_spacing = Vec2::new(gap_x, 0.0);
             add_contents(ui)
         },
     )
@@ -1050,6 +1074,7 @@ pub fn animated_card<R>(
 }
 
 /// Renders the hero spotlight card with a subtle loader-tinted ambient corner glow.
+#[allow(dead_code)]
 pub fn hero_spotlight_card<R>(
     ui: &mut egui::Ui,
     id: egui::Id,

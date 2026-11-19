@@ -24,11 +24,12 @@ use crate::modrinth::{
     fetch_project_versions_for_profile, import_local_file, install_mrpack, install_project,
     install_specific_version, list_content_items, list_screenshots, list_world_backups,
     list_worlds, load_installed_index, restore_world_backup, search_projects,
-    set_all_content_enabled, toggle_content_file, update_all_installed_projects, SearchParams,
+    set_all_content_enabled, toggle_content_file, update_all_installed_projects,
+    InstalledContentItem, ScreenshotEntry, SearchParams, WorldBackupEntry, WorldEntry,
 };
 use crate::mojang::{fetch_loader_versions, fetch_version_manifest, prepare_version};
 use crate::storage::{
-    instance_dir, is_version_installed, load_selected_profile_id, rename_instance_dir_for_profile,
+    instance_dir, load_selected_profile_id, rename_instance_dir_for_profile,
     resolve_selected_profile_index, save_accounts, save_launcher_settings, save_profiles,
     save_selected_profile_id, unique_instance_dir_name,
 };
@@ -36,8 +37,8 @@ use crate::theme::{
     self, animated_card, animated_progress_bar, apply_modrinth_theme, apply_ui_font, badge,
     badge_sized, card_frame, discover_system_fonts, draw_icon_placeholder, draw_instance_avatar,
     draw_instance_image_avatar, draw_mini_gauge, draw_ram_allocation_bar, draw_skeleton_card,
-    hero_spotlight_card, lerp_color,
-    loader_badge, loader_badge_sized, loader_colors, mod_toggle_switch, mono_spinner,
+    lerp_color,
+    loader_badge, loader_badge_sized, mod_toggle_switch, mono_spinner,
     primary_action_button, section_header, set_theme_palette, solid_accent_badge,
     ui_alert_banner, ui_button, ui_button_icon, ui_button_sized, ui_checkbox, ui_icon_button,
     ui_loader_pill, ui_pill_tab, ui_pill_tab_icon, ui_ram_slider, ui_search_input, ui_text_input,
@@ -261,6 +262,59 @@ struct ToastMessage {
     created_at: f64,
 }
 
+#[derive(Default)]
+struct ConsoleLayoutCache {
+    revision: u64,
+    errors_only: bool,
+    query: String,
+    wrap_width: f32,
+    warn_err_count: usize,
+    indices: Vec<usize>,
+    y_offsets: Vec<f32>,
+    diag_revision: u64,
+    diag_summary: Option<String>,
+}
+
+const CONSOLE_ROW_GAP: f32 = 2.0;
+
+fn visible_console_range(y_offsets: &[f32], viewport_min_y: f32, viewport_max_y: f32) -> (usize, usize) {
+    let count = y_offsets.len().saturating_sub(1);
+    if count == 0 {
+        return (0, 0);
+    }
+    let first = y_offsets
+        .partition_point(|&y| y <= viewport_min_y)
+        .saturating_sub(1)
+        .min(count.saturating_sub(1));
+    let last = y_offsets
+        .partition_point(|&y| y < viewport_max_y)
+        .clamp(first, count);
+    (first, last)
+}
+
+const FS_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+#[derive(Default)]
+struct FsUiCache {
+    mod_counts: HashMap<String, (usize, usize, std::time::Instant)>,
+    folder_counts: HashMap<(String, &'static str), (usize, std::time::Instant)>,
+    content_items: Option<(String, &'static str, Vec<InstalledContentItem>, std::time::Instant)>,
+    worlds: Option<(String, Vec<WorldEntry>, std::time::Instant)>,
+    world_backups: Option<(String, Vec<WorldBackupEntry>, std::time::Instant)>,
+    screenshots: Option<(String, Vec<ScreenshotEntry>, std::time::Instant)>,
+}
+
+impl FsUiCache {
+    fn invalidate(&mut self) {
+        self.mod_counts.clear();
+        self.folder_counts.clear();
+        self.content_items = None;
+        self.worlds = None;
+        self.world_backups = None;
+        self.screenshots = None;
+    }
+}
+
 pub struct McLauncherApp {
     paths: LauncherPaths,
     profiles: Vec<Profile>,
@@ -303,6 +357,9 @@ pub struct McLauncherApp {
     log_errors_only: bool,
     log_auto_scroll: bool,
     log_error_count: usize,
+    log_revision: u64,
+    log_cache: ConsoleLayoutCache,
+    fs_cache: FsUiCache,
 
     // New profile modal state
     show_new_modal: bool,
@@ -448,6 +505,9 @@ impl McLauncherApp {
             log_errors_only: false,
             log_auto_scroll: true,
             log_error_count: 0,
+            log_revision: 1,
+            log_cache: ConsoleLayoutCache::default(),
+            fs_cache: FsUiCache::default(),
             show_new_modal: false,
             new_name: "New Instance".to_string(),
             new_version: "1.21.4".to_string(),
@@ -636,6 +696,14 @@ impl McLauncherApp {
             level,
             text: line,
         });
+        self.log_revision = self.log_revision.wrapping_add(1);
+    }
+
+    fn clear_logs(&mut self) {
+        self.logs.clear();
+        self.log_error_count = 0;
+        self.last_crash_code = None;
+        self.log_revision = self.log_revision.wrapping_add(1);
     }
 
     fn scan_java(&mut self) {
@@ -690,6 +758,7 @@ impl McLauncherApp {
             if self.mr_installed_profile_id != p.id {
                 self.mr_installed_cache = load_installed_index(&self.paths, p);
                 self.mr_installed_profile_id = p.id.clone();
+                self.fs_cache.invalidate();
             }
         }
     }
@@ -1235,6 +1304,7 @@ impl McLauncherApp {
                     self.progress = 0.0;
                     if let Some(p) = self.profiles.get(self.selected_idx) {
                         self.mr_installed_cache = load_installed_index(&self.paths, p);
+                        self.fs_cache.invalidate();
                         self.mr_installed_profile_id = p.id.clone();
                     }
                     match res {
@@ -1289,6 +1359,7 @@ impl McLauncherApp {
                     self.progress = 0.0;
                     if let Some(p) = self.profiles.get(self.selected_idx) {
                         self.mr_installed_cache = load_installed_index(&self.paths, p);
+                        self.fs_cache.invalidate();
                         self.mr_installed_profile_id = p.id.clone();
                     }
                     let lang = self.settings.language;
@@ -1528,10 +1599,100 @@ impl McLauncherApp {
         }
     }
 
-    fn profile_mod_counts(&self, profile: &Profile) -> (usize, usize) {
+    fn profile_mod_counts(&mut self, profile: &Profile) -> (usize, usize) {
+        let now = std::time::Instant::now();
+        if let Some((total, enabled, ts)) = self.fs_cache.mod_counts.get(&profile.id) {
+            if now.duration_since(*ts) < FS_CACHE_TTL {
+                return (*total, *enabled);
+            }
+        }
         let items = list_content_items(&instance_dir(&self.paths, profile).join("mods"));
         let enabled = items.iter().filter(|m| m.enabled).count();
-        (items.len(), enabled)
+        let total = items.len();
+        self.fs_cache
+            .mod_counts
+            .insert(profile.id.clone(), (total, enabled, now));
+        (total, enabled)
+    }
+
+    fn folder_content_count(&mut self, profile: &Profile, folder: &'static str) -> usize {
+        let now = std::time::Instant::now();
+        if let Some((cnt, ts)) = self
+            .fs_cache
+            .folder_counts
+            .get(&(profile.id.clone(), folder))
+        {
+            if now.duration_since(*ts) < FS_CACHE_TTL {
+                return *cnt;
+            }
+        }
+        let cnt = list_content_items(&instance_dir(&self.paths, profile).join(folder)).len();
+        self.fs_cache
+            .folder_counts
+            .insert((profile.id.clone(), folder), (cnt, now));
+        cnt
+    }
+
+    fn cached_content_items(
+        &mut self,
+        profile: &Profile,
+        folder: &'static str,
+    ) -> Vec<InstalledContentItem> {
+        let now = std::time::Instant::now();
+        if let Some((pid, f, items, ts)) = &self.fs_cache.content_items {
+            if pid == &profile.id && *f == folder && now.duration_since(*ts) < FS_CACHE_TTL {
+                return items.clone();
+            }
+        }
+        let items = list_content_items(&instance_dir(&self.paths, profile).join(folder));
+        let total = items.len();
+        self.fs_cache
+            .folder_counts
+            .insert((profile.id.clone(), folder), (total, now));
+        if folder == "mods" {
+            let enabled = items.iter().filter(|m| m.enabled).count();
+            self.fs_cache
+                .mod_counts
+                .insert(profile.id.clone(), (total, enabled, now));
+        }
+        self.fs_cache.content_items = Some((profile.id.clone(), folder, items.clone(), now));
+        items
+    }
+
+    fn cached_worlds(&mut self, profile: &Profile) -> Vec<WorldEntry> {
+        let now = std::time::Instant::now();
+        if let Some((pid, worlds, ts)) = &self.fs_cache.worlds {
+            if pid == &profile.id && now.duration_since(*ts) < FS_CACHE_TTL {
+                return worlds.clone();
+            }
+        }
+        let worlds = list_worlds(&instance_dir(&self.paths, profile));
+        self.fs_cache.worlds = Some((profile.id.clone(), worlds.clone(), now));
+        worlds
+    }
+
+    fn cached_world_backups(&mut self, profile: &Profile) -> Vec<WorldBackupEntry> {
+        let now = std::time::Instant::now();
+        if let Some((pid, backups, ts)) = &self.fs_cache.world_backups {
+            if pid == &profile.id && now.duration_since(*ts) < FS_CACHE_TTL {
+                return backups.clone();
+            }
+        }
+        let backups = list_world_backups(&instance_dir(&self.paths, profile));
+        self.fs_cache.world_backups = Some((profile.id.clone(), backups.clone(), now));
+        backups
+    }
+
+    fn cached_screenshots(&mut self, profile: &Profile) -> Vec<ScreenshotEntry> {
+        let now = std::time::Instant::now();
+        if let Some((pid, shots, ts)) = &self.fs_cache.screenshots {
+            if pid == &profile.id && now.duration_since(*ts) < FS_CACHE_TTL {
+                return shots.clone();
+            }
+        }
+        let shots = list_screenshots(&instance_dir(&self.paths, profile));
+        self.fs_cache.screenshots = Some((profile.id.clone(), shots.clone(), now));
+        shots
     }
 
     fn render_nav_sidebar(&mut self, ui: &mut egui::Ui, compact: bool) {
@@ -1617,19 +1778,6 @@ impl McLauncherApp {
                 if resp.clicked() {
                     self.switch_page(ui.ctx(), NavPage::Accounts);
                 }
-                let credit_w = (ui.available_width() - 4.0).max(20.0);
-                let (credit_r, _) =
-                    ui.allocate_exact_size(Vec2::new(credit_w, 16.0), Sense::hover());
-                if credit_r.width() > 90.0 {
-                    let clipped = ui.painter().with_clip_rect(credit_r);
-                    clipped.text(
-                        Pos2::new(credit_r.left() + 6.0, credit_r.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        "by svarka (@sunset-launcher) • MIT",
-                        egui::FontId::proportional(10.0),
-                        text_muted(),
-                    );
-                }
             });
 
         // Brand + vertical navigation
@@ -1684,23 +1832,11 @@ impl McLauncherApp {
                         let clipped = ui.painter().with_clip_rect(row_rect);
                         let text_x = row_rect.left() + 45.0;
                         clipped.text(
-                            Pos2::new(text_x, row_rect.top() + 10.5),
+                            Pos2::new(text_x, row_rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             "Sunset Launcher",
                             egui::FontId::proportional(15.0),
                             text_primary(),
-                        );
-                        clipped.circle_filled(
-                            Pos2::new(text_x + 3.0, row_rect.top() + 26.5),
-                            2.5,
-                            accent(),
-                        );
-                        clipped.text(
-                            Pos2::new(text_x + 10.0, row_rect.top() + 26.5),
-                            egui::Align2::LEFT_CENTER,
-                            "Modrinth • Multi-Loader",
-                            egui::FontId::proportional(10.5),
-                            text_muted(),
                         );
                     }
                 });
@@ -1851,8 +1987,8 @@ impl McLauncherApp {
                                         );
                                     }
                                     NavPage::Instance => {
-                                        if let Some(cur) = self.profiles.get(self.selected_idx) {
-                                            let (_, en) = self.profile_mod_counts(cur);
+                                        if let Some(cur) = self.profiles.get(self.selected_idx).cloned() {
+                                            let (_, en) = self.profile_mod_counts(&cur);
                                             let text = if en > 0 {
                                                 format!("{en}")
                                             } else {
@@ -1939,197 +2075,6 @@ impl McLauncherApp {
                             );
                             ui.painter().rect_filled(bar, Rounding::same(1.6), accent());
                         }
-
-                        let expand_t = ui.ctx().animate_bool_with_time(
-                            ui.make_persistent_id("quick_switch_expand_t"),
-                            !compact,
-                            0.16,
-                        );
-                        if expand_t > 0.01 && expand_t < 0.99 {
-                            ui.ctx().request_repaint();
-                        }
-                        if expand_t > 0.01 {
-                            let full_w = nav_w.max(180.0);
-                            let slide_x = -(1.0 - expand_t) * (full_w + 8.0);
-                            let scale_alpha = |col: Color32, t: f32| -> Color32 {
-                                Color32::from_rgba_unmultiplied(
-                                    col.r(),
-                                    col.g(),
-                                    col.b(),
-                                    ((col.a() as f32) * t).clamp(0.0, 255.0) as u8,
-                                )
-                            };
-
-                            ui.add_space(8.0);
-                            ui.separator();
-                            ui.add_space(6.0);
-
-                            let (hdr_rect, _) =
-                                ui.allocate_exact_size(Vec2::new(nav_w, 22.0), Sense::hover());
-                            let hdr_slide = Rect::from_min_size(
-                                Pos2::new(hdr_rect.left() + slide_x, hdr_rect.top()),
-                                Vec2::new(full_w, 22.0),
-                            );
-                            let plus_rect = Rect::from_center_size(
-                                Pos2::new(hdr_slide.right() - 10.0, hdr_slide.center().y),
-                                Vec2::splat(20.0),
-                            );
-                            let plus_id = ui.make_persistent_id("sidebar_quick_new_slide");
-                            let plus_resp = if expand_t > 0.5 && hdr_rect.contains(plus_rect.center())
-                            {
-                                Some(
-                                    ui.interact(plus_rect, plus_id, Sense::click())
-                                        .on_hover_text("New Instance (Ctrl+N)"),
-                                )
-                            } else {
-                                None
-                            };
-                            let plus_hov = plus_resp.as_ref().is_some_and(|r| r.hovered());
-                            if plus_hov {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                            if plus_resp.as_ref().is_some_and(|r| r.clicked()) {
-                                self.show_new_modal = true;
-                            }
-
-                            let hdr_clip =
-                                ui.painter().with_clip_rect(hdr_rect.expand2(Vec2::new(0.0, 2.0)));
-                            hdr_clip.text(
-                                Pos2::new(hdr_slide.left() + 4.0, hdr_slide.center().y),
-                                egui::Align2::LEFT_CENTER,
-                                tr(self.settings.language, "side.quick_switch"),
-                                egui::FontId::proportional(11.0),
-                                scale_alpha(text_muted(), expand_t),
-                            );
-                            hdr_clip.rect(
-                                plus_rect,
-                                Rounding::same(6.0),
-                                scale_alpha(
-                                    if plus_hov { bg_card_hover() } else { bg_card() },
-                                    expand_t,
-                                ),
-                                Stroke::new(
-                                    1.0_f32,
-                                    scale_alpha(
-                                        if plus_hov { border_strong() } else { border_subtle() },
-                                        expand_t,
-                                    ),
-                                ),
-                            );
-                            draw_icon(
-                                &hdr_clip,
-                                plus_rect.shrink(4.0),
-                                Icon::Plus,
-                                scale_alpha(if plus_hov { text_primary() } else { text_secondary() }, expand_t),
-                            );
-                            ui.add_space(4.0);
-
-                            let mut picked: Option<usize> = None;
-                            let mut quick_order: Vec<usize> = (0..self.profiles.len()).collect();
-                            quick_order.sort_by(|&a, &b| {
-                                self.profiles[b].pinned.cmp(&self.profiles[a].pinned)
-                            });
-                            for idx in quick_order {
-                                let p = &self.profiles[idx];
-                                let sel = idx == self.selected_idx;
-                                let is_running =
-                                    self.running_profile_id.as_deref() == Some(p.id.as_str())
-                                        && self.game_handle.is_some();
-                                let hov_id = ui.make_persistent_id(("quick_inst_hov", &p.id));
-                                let (row_rect, resp) =
-                                    ui.allocate_exact_size(Vec2::new(nav_w, 30.0), Sense::click());
-                                let hov_t = ui.ctx().animate_bool_with_time(
-                                    hov_id,
-                                    resp.hovered() && expand_t > 0.5,
-                                    0.11,
-                                );
-                                if hov_t > 0.01 && hov_t < 0.99 {
-                                    ui.ctx().request_repaint();
-                                }
-                                let bg = if sel {
-                                    accent_dim()
-                                } else {
-                                    lerp_color(Color32::TRANSPARENT, bg_card(), hov_t)
-                                };
-                                let border = if sel { accent() } else { Color32::TRANSPARENT };
-                                let (_, loader_dot_col, _) = loader_colors(p.loader.kind());
-                                let dot_col = if is_running { accent() } else { loader_dot_col };
-                                let fg = if is_running {
-                                    accent()
-                                } else if sel {
-                                    accent_text()
-                                } else {
-                                    lerp_color(text_secondary(), text_primary(), hov_t)
-                                };
-
-                                let draw_rect = Rect::from_min_size(
-                                    Pos2::new(row_rect.left() + slide_x + 1.0, row_rect.top() + 1.0),
-                                    Vec2::new((full_w - 2.0).max(20.0), 28.0),
-                                );
-                                let row_clip_rect = Rect::from_min_max(
-                                    Pos2::new(row_rect.left(), row_rect.top() - 2.0),
-                                    Pos2::new(row_rect.right(), row_rect.bottom() + 2.0),
-                                );
-                                let clipped = ui.painter().with_clip_rect(row_clip_rect);
-                                clipped.rect(
-                                    draw_rect,
-                                    Rounding::same(6.5),
-                                    scale_alpha(bg, expand_t),
-                                    Stroke::new(
-                                        if sel { 1.0_f32 } else { 0.0_f32 },
-                                        scale_alpha(border, expand_t),
-                                    ),
-                                );
-                                clipped.circle_filled(
-                                    Pos2::new(draw_rect.left() + 11.0, draw_rect.center().y),
-                                    3.0,
-                                    scale_alpha(dot_col, expand_t),
-                                );
-                                let ver_galley = clipped.layout_no_wrap(
-                                    p.version_id.clone(),
-                                    egui::FontId::proportional(10.0),
-                                    scale_alpha(text_muted(), expand_t),
-                                );
-                                let ver_w = ver_galley.size().x;
-                                clipped.galley(
-                                    Pos2::new(
-                                        draw_rect.right() - 8.0 - ver_w,
-                                        draw_rect.center().y - ver_galley.size().y * 0.5,
-                                    ),
-                                    ver_galley,
-                                    scale_alpha(text_muted(), expand_t),
-                                );
-                                let name_bounds = Rect::from_min_max(
-                                    Pos2::new(draw_rect.left() + 20.0, draw_rect.top()),
-                                    Pos2::new(
-                                        (draw_rect.right() - 14.0 - ver_w)
-                                            .max(draw_rect.left() + 20.0),
-                                        draw_rect.bottom(),
-                                    ),
-                                )
-                                .intersect(row_clip_rect);
-                                if name_bounds.width() > 2.0 {
-                                    let name_clip = ui.painter().with_clip_rect(name_bounds);
-                                    name_clip.text(
-                                        Pos2::new(draw_rect.left() + 20.0, draw_rect.center().y),
-                                        egui::Align2::LEFT_CENTER,
-                                        &p.name,
-                                        egui::FontId::proportional(12.5),
-                                        scale_alpha(fg, expand_t),
-                                    );
-                                }
-                                if resp.hovered() && expand_t > 0.5 {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                }
-                                if resp.clicked() && expand_t > 0.3 {
-                                    picked = Some(idx);
-                                }
-                                ui.add_space(2.0);
-                            }
-                            if let Some(idx) = picked {
-                                self.select_profile(idx);
-                            }
-                        }
                     });
             });
         });
@@ -2180,38 +2125,12 @@ impl McLauncherApp {
                     }
 
                     if let Some(cur) = self.profiles.get(self.selected_idx).cloned() {
-                        let show_folder = left_w >= 430.0;
                         let show_badge = left_w >= 340.0;
-                        let show_avatar = left_w >= 250.0;
                         let reserve = 34.0
                             + 8.0
-                            + (if show_avatar { 40.0 } else { 0.0 })
                             + (if show_badge { 88.0 } else { 0.0 })
-                            + (if show_folder { 42.0 } else { 0.0 })
                             + 18.0;
-                        let combo_w = (left_w - reserve).clamp(80.0, 230.0);
-
-                        if show_avatar {
-                            let (av_rect, av_resp) =
-                                ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
-                            draw_profile_avatar(
-                                ui.painter(),
-                                av_rect,
-                                &cur,
-                                &self.profile_icons,
-                                true,
-                                self.game_handle.is_some(),
-                            );
-                            if av_resp.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                            if av_resp
-                                .on_hover_text("Open instance details (Ctrl+2)")
-                                .clicked()
-                            {
-                                self.switch_page(ui.ctx(), NavPage::Instance);
-                            }
-                        }
+                        let combo_w = (left_w - reserve).clamp(80.0, 240.0);
 
                         egui::ComboBox::from_id_salt("topbar_instance_combo")
                             .selected_text(format!("{} ({})", cur.name, cur.version_id))
@@ -2250,20 +2169,6 @@ impl McLauncherApp {
                                 cur.loader.short_name(),
                                 34.0,
                             );
-                        }
-                        if show_folder
-                            && ui_icon_button(
-                                ui,
-                                "topbar_folder_btn",
-                                Icon::Folder,
-                                tr(self.settings.language, "lib.open_folder"),
-                                ButtonVariant::Subtle,
-                                true,
-                                34.0,
-                            )
-                            .clicked()
-                        {
-                            open_in_file_manager(&instance_dir(&self.paths, &cur));
                         }
                     }
                 },
@@ -2449,118 +2354,38 @@ impl McLauncherApp {
                 self.is_busy || self.mr_installing,
             );
         } else {
-            let avail_w = ui.available_width();
-            let show_console_btn = avail_w >= 360.0;
-            let right_w = if avail_w >= 540.0 {
-                240.0
-            } else if show_console_btn {
-                110.0
-            } else {
-                0.0
-            };
-            let left_w = (avail_w - right_w - 8.0).max(60.0);
-
             ui_toolbar_row(ui, 22.0, |ui| {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(left_w, 22.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                        let is_running = self.game_handle.is_some();
-                        if is_running {
-                            let pulse = (ui.input(|i| i.time) as f32 * 3.8).sin() * 0.5 + 0.5;
-                            ui.painter().circle_stroke(
-                                dot.center(),
-                                3.8 + pulse * 1.4,
-                                Stroke::new(
-                                    1.0_f32,
-                                    with_alpha(accent(), (120.0 * (1.0 - pulse * 0.5)) as u8),
-                                ),
-                            );
-                            ui.painter().circle_filled(dot.center(), 3.5, accent());
-                            ui.ctx().request_repaint();
-                        } else {
-                            ui.painter()
-                                .circle_filled(dot.center(), 3.5, Color32::from_rgb(82, 92, 108));
-                        }
-                        let status_display = if self.status_text == "Ready" {
-                            tr(self.settings.language, "status.ready")
-                        } else {
-                            self.status_text.as_str()
-                        };
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(status_display)
-                                    .small()
-                                    .color(text_secondary()),
-                            )
-                            .truncate(),
-                        );
-                    },
-                );
-
-                if show_console_btn {
-                    let mut open_active_inst = false;
-                    let inst_summary = (avail_w >= 540.0)
-                        .then(|| {
-                            self.profiles
-                                .get(self.selected_idx)
-                                .map(|p| format!("{} • {}", p.name, p.version_id))
-                        })
-                        .flatten();
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        let log_lbl = if self.log_error_count > 0 {
-                            format!(
-                                "{} ({}!)",
-                                tr(self.settings.language, "bar.logs"),
-                                self.log_error_count
-                            )
-                        } else {
-                            format!(
-                                "{} ({})",
-                                tr(self.settings.language, "bar.logs"),
-                                self.logs.len()
-                            )
-                        };
-                        let log_variant = if self.log_error_count > 0 {
-                            ButtonVariant::Danger
-                        } else {
-                            ButtonVariant::Subtle
-                        };
-                        if ui_button_icon(
-                            ui,
-                            "bottom_console_btn",
-                            Some(Icon::Terminal),
-                            &log_lbl,
-                            log_variant,
-                            true,
-                            20.0,
-                        )
-                        .clicked()
-                        {
-                            self.switch_page(ui.ctx(), NavPage::Console);
-                        }
-                        if let Some(summary) = inst_summary {
-                            if ui_button(
-                                ui,
-                                "bottom_inst_pill",
-                                &summary,
-                                ButtonVariant::Subtle,
-                                true,
-                                20.0,
-                            )
-                            .on_hover_text("Open active instance")
-                            .clicked()
-                            {
-                                open_active_inst = true;
-                            }
-                        }
-                    });
-                    if open_active_inst {
-                        self.switch_page(ui.ctx(), NavPage::Instance);
-                    }
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                let is_running = self.game_handle.is_some();
+                if is_running {
+                    let pulse = (ui.input(|i| i.time) as f32 * 3.8).sin() * 0.5 + 0.5;
+                    ui.painter().circle_stroke(
+                        dot.center(),
+                        3.8 + pulse * 1.4,
+                        Stroke::new(
+                            1.0_f32,
+                            with_alpha(accent(), (120.0 * (1.0 - pulse * 0.5)) as u8),
+                        ),
+                    );
+                    ui.painter().circle_filled(dot.center(), 3.5, accent());
+                    ui.ctx().request_repaint();
+                } else {
+                    ui.painter()
+                        .circle_filled(dot.center(), 3.5, Color32::from_rgb(82, 92, 108));
                 }
+                let status_display = if self.status_text == "Ready" {
+                    tr(self.settings.language, "status.ready")
+                } else {
+                    self.status_text.as_str()
+                };
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(status_display)
+                            .small()
+                            .color(text_secondary()),
+                    )
+                    .truncate(),
+                );
             });
         }
     }
@@ -2568,12 +2393,13 @@ impl McLauncherApp {
     fn render_library_page(&mut self, ui: &mut egui::Ui) {
         let lang = self.settings.language;
         let avail_w = ui.available_width();
-        let wide_hdr = avail_w >= 540.0;
+        let wide_hdr = avail_w >= 620.0;
+        let search_w = (avail_w - 430.0).clamp(110.0, 210.0);
         ui_toolbar_row(ui, 30.0, |ui| {
             ui.heading(egui::RichText::new(tr(lang, "lib.title")).size(21.0).color(text_primary()));
             badge(ui, &format!("{}", self.profiles.len()), false);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().item_spacing.x = 6.0;
                 if ui_button_icon(
                     ui,
                     "new_instance_btn",
@@ -2587,7 +2413,7 @@ impl McLauncherApp {
                 {
                     self.show_new_modal = true;
                 }
-                if wide_hdr
+                if avail_w >= 400.0
                     && ui_button_icon(
                         ui,
                         "lib_import_mrpack_btn",
@@ -2609,7 +2435,7 @@ impl McLauncherApp {
                         "lib_search_w",
                         &mut self.library_search,
                         tr(lang, "lib.search"),
-                        210.0,
+                        search_w,
                     );
                 }
             });
@@ -2725,8 +2551,6 @@ impl McLauncherApp {
         let mut action_play: Option<usize> = None;
         let mut action_open: Option<usize> = None;
         let mut action_mods: Option<usize> = None;
-        let mut action_discover: Option<usize> = None;
-        let mut action_console = false;
         let mut action_duplicate: Option<usize> = None;
         let mut action_delete: Option<usize> = None;
         let mut action_toggle_pin: Option<usize> = None;
@@ -2736,207 +2560,9 @@ impl McLauncherApp {
         bounded_scroll(ui, "library_grid_scroll", |ui| {
             let usable_w = (ui.available_width() - 12.0).max(160.0);
 
-            // Active Instance Spotlight Hero Banner
-            if query.is_empty() && self.library_filter == LibraryFilter::All {
-                if let Some(cur) = self.profiles.get(self.selected_idx).cloned() {
-                    let is_running = running_id.as_deref() == Some(cur.id.as_str())
-                        && self.game_handle.is_some();
-                    let mod_items =
-                        list_content_items(&instance_dir(&self.paths, &cur).join("mods"));
-                    let enabled_mods = mod_items.iter().filter(|m| m.enabled).count();
-                    let total_mods = mod_items.len();
-                    let cached = is_version_installed(&self.paths, &cur.version_id);
-                    let (_, loader_accent, _) = loader_colors(cur.loader.kind());
-                    let hero_inner_w = (usable_w - 28.0).max(130.0);
-                    let hero_id = ui.make_persistent_id(("lib_hero_card", &cur.id));
-                    hero_spotlight_card(ui, hero_id, loader_accent, |ui| {
-                        ui.set_min_width(hero_inner_w);
-                        ui.set_max_width(hero_inner_w);
-                        ui.horizontal(|ui| {
-                            let (av_rect, _) =
-                                ui.allocate_exact_size(Vec2::splat(54.0), Sense::hover());
-                            draw_profile_avatar(
-                                ui.painter(),
-                                av_rect,
-                                &cur,
-                                &self.profile_icons,
-                                true,
-                                is_running,
-                            );
-
-                            let text_w = (hero_inner_w - 66.0).max(80.0);
-                            ui.vertical(|ui| {
-                                ui.set_max_width(text_w);
-                                ui_wrap_row(ui, 20.0, |ui| {
-                                    ui.label(
-                                        egui::RichText::new(tr(lang, "lib.active_instance"))
-                                            .size(9.5)
-                                            .strong()
-                                            .color(accent()),
-                                    );
-                                    if is_running {
-                                        badge(ui, tr(lang, "lib.running"), true);
-                                    } else if cached {
-                                        badge(ui, tr(lang, "lib.ready"), true);
-                                    }
-                                    if let Some(rel) =
-                                        format_relative_time(cur.last_played.as_deref(), lang)
-                                    {
-                                        ui.label(
-                                            egui::RichText::new(format!("• {} {rel}", tr(lang, "lib.played_rel")))
-                                                .size(10.5)
-                                                .color(text_muted()),
-                                        );
-                                    }
-                                });
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&cur.name)
-                                            .strong()
-                                            .size(17.5)
-                                            .color(text_primary()),
-                                    )
-                                    .truncate(),
-                                );
-                                ui_wrap_row(ui, 22.0, |ui| {
-                                    badge(ui, &cur.version_id, false);
-                                    loader_badge(ui, cur.loader.kind(), &cur.loader.label());
-                                    badge(ui, &format!("{enabled_mods}/{total_mods} {}", tr(lang, "lib.mods_count")), false);
-                                    badge(ui, &format!("{} {}", cur.max_ram_mb, tr(lang, "lib.mb_ram")), false);
-                                    if cur.playtime_secs > 0 {
-                                        badge(
-                                            ui,
-                                            &format!("{} {}", format_playtime(cur.playtime_secs, lang), tr(lang, "lib.played")),
-                                            false,
-                                        );
-                                    }
-                                    if let Some(acc) = self.active_account() {
-                                        badge(
-                                            ui,
-                                            &format!("{}: {}", tr(lang, "lib.player"), acc.username),
-                                            false,
-                                        );
-                                    }
-                                });
-                            });
-                        });
-
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(5.0);
-                        ui_wrap_row(ui, 30.0, |ui| {
-                            if ui_button_icon(
-                                ui,
-                                "hero_play_btn",
-                                Some(if is_running { Icon::Stop } else { Icon::Play }),
-                                if is_running {
-                                    tr(lang, "btn.stop")
-                                } else {
-                                    tr(lang, "btn.launch")
-                                },
-                                if is_running {
-                                    ButtonVariant::Danger
-                                } else {
-                                    ButtonVariant::Primary
-                                },
-                                !self.is_busy,
-                                30.0,
-                            )
-                            .clicked()
-                            {
-                                if is_running {
-                                    self.stop_game();
-                                } else {
-                                    action_play = Some(self.selected_idx);
-                                }
-                            }
-                            if ui_button_icon(
-                                ui,
-                                "hero_discover_btn",
-                                Some(Icon::Compass),
-                                tr(lang, "btn.add_content"),
-                                ButtonVariant::Secondary,
-                                true,
-                                30.0,
-                            )
-                            .clicked()
-                            {
-                                action_discover = Some(self.selected_idx);
-                            }
-                            if ui_button_icon(
-                                ui,
-                                "hero_mods_btn",
-                                Some(Icon::Layers),
-                                tr(lang, "inst.content"),
-                                ButtonVariant::Subtle,
-                                true,
-                                30.0,
-                            )
-                            .clicked()
-                            {
-                                action_mods = Some(self.selected_idx);
-                            }
-                            if ui_button_icon(
-                                ui,
-                                "hero_cfg_btn",
-                                Some(Icon::Sliders),
-                                tr(lang, "inst.settings_btn"),
-                                ButtonVariant::Subtle,
-                                true,
-                                30.0,
-                            )
-                            .clicked()
-                            {
-                                action_open = Some(self.selected_idx);
-                            }
-                            if ui_button_icon(
-                                ui,
-                                "hero_console_btn",
-                                Some(Icon::Terminal),
-                                tr(lang, "nav.console"),
-                                ButtonVariant::Subtle,
-                                true,
-                                30.0,
-                            )
-                            .clicked()
-                            {
-                                action_console = true;
-                            }
-                            if ui_icon_button(
-                                ui,
-                                "hero_folder_btn",
-                                Icon::Folder,
-                                tr(self.settings.language, "lib.open_folder"),
-                                ButtonVariant::Subtle,
-                                true,
-                                30.0,
-                            )
-                            .clicked()
-                            {
-                                open_in_file_manager(&instance_dir(&self.paths, &cur));
-                            }
-                            if ui_icon_button(
-                                ui,
-                                "hero_dup_btn",
-                                Icon::Duplicate,
-                                tr(self.settings.language, "lib.duplicate"),
-                                ButtonVariant::Subtle,
-                                true,
-                                30.0,
-                            )
-                            .clicked()
-                            {
-                                action_duplicate = Some(self.selected_idx);
-                            }
-                        });
-                    });
-                    ui.add_space(12.0);
-                }
-            }
-
-            let cols = if usable_w >= 820.0 {
+            let cols = if usable_w >= 960.0 {
                 3
-            } else if usable_w >= 480.0 {
+            } else if usable_w >= 540.0 {
                 2
             } else {
                 1
@@ -3021,10 +2647,7 @@ impl McLauncherApp {
                     let selected = *idx == self.selected_idx;
                     let is_running = running_id.as_deref() == Some(p.id.as_str())
                         && self.game_handle.is_some();
-                    let mod_items =
-                        list_content_items(&instance_dir(&self.paths, p).join("mods"));
-                    let enabled_mods = mod_items.iter().filter(|m| m.enabled).count();
-                    let total_mods = mod_items.len();
+                    let (total_mods, enabled_mods) = self.profile_mod_counts(p);
 
                     let row_id = ui.make_persistent_id(("lib_list_hover", &p.id));
                     animated_card(ui, row_id, selected, |ui| {
@@ -3166,10 +2789,11 @@ impl McLauncherApp {
                                     } else {
                                         ButtonVariant::Secondary
                                     },
-                                    !self.is_busy && self.game_handle.is_none(),
+                                    selected && !self.is_busy && self.game_handle.is_none(),
                                     28.0,
                                 )
                                 .clicked()
+                                    && selected
                                 {
                                     action_play = Some(*idx);
                                 }
@@ -3186,10 +2810,7 @@ impl McLauncherApp {
                         let selected = *idx == self.selected_idx;
                         let is_running = running_id.as_deref() == Some(p.id.as_str())
                             && self.game_handle.is_some();
-                        let mod_items =
-                            list_content_items(&instance_dir(&self.paths, p).join("mods"));
-                        let enabled_mods = mod_items.iter().filter(|m| m.enabled).count();
-                        let total_mods = mod_items.len();
+                        let (total_mods, enabled_mods) = self.profile_mod_counts(p);
 
                         let inner_w = (card_w - 22.0).max(110.0);
                         ui.allocate_ui_with_layout(
@@ -3293,41 +2914,55 @@ impl McLauncherApp {
                                     ui.add_space(4.0);
 
                                     ui_toolbar_row(ui, 28.0, |ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        ui.spacing_mut().item_spacing.x = 4.0;
                                         let play_variant = if selected {
                                             ButtonVariant::Primary
                                         } else {
                                             ButtonVariant::Secondary
                                         };
-                                        let play_lbl = if inner_w < 240.0 {
+                                        let play_lbl = if inner_w < 230.0 {
                                             ""
                                         } else {
                                             tr(lang, "btn.play")
                                         };
-                                        let mods_lbl = if inner_w < 200.0 { "" } else { tr(lang, "content.mods") };
                                         if ui_button_icon(
                                             ui,
                                             ("card_play", &p.id),
                                             Some(Icon::Play),
                                             play_lbl,
                                             play_variant,
-                                            !self.is_busy && self.game_handle.is_none(),
+                                            selected && !self.is_busy && self.game_handle.is_none(),
                                             28.0,
                                         )
                                         .clicked()
+                                            && selected
                                         {
                                             action_play = Some(*idx);
                                         }
-                                        if ui_button_icon(
+                                        if inner_w >= 320.0 {
+                                            if ui_button_icon(
+                                                ui,
+                                                ("card_mods", &p.id),
+                                                Some(Icon::Layers),
+                                                tr(lang, "content.mods"),
+                                                ButtonVariant::Subtle,
+                                                true,
+                                                28.0,
+                                            )
+                                            .on_hover_text(tr(self.settings.language, "lib.manage_mods"))
+                                            .clicked()
+                                            {
+                                                action_mods = Some(*idx);
+                                            }
+                                        } else if ui_icon_button(
                                             ui,
                                             ("card_mods", &p.id),
-                                            Some(Icon::Layers),
-                                            mods_lbl,
+                                            Icon::Layers,
+                                            tr(self.settings.language, "lib.manage_mods"),
                                             ButtonVariant::Subtle,
                                             true,
                                             28.0,
                                         )
-                                        .on_hover_text(tr(self.settings.language, "lib.manage_mods"))
                                         .clicked()
                                         {
                                             action_mods = Some(*idx);
@@ -3336,7 +2971,7 @@ impl McLauncherApp {
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                ui.spacing_mut().item_spacing.x = 5.0;
+                                                ui.spacing_mut().item_spacing.x = 4.0;
                                                 if can_delete
                                                     && ui_icon_button(
                                                         ui,
@@ -3367,16 +3002,17 @@ impl McLauncherApp {
                                                         p,
                                                     ));
                                                 }
-                                                if ui_icon_button(
-                                                    ui,
-                                                    ("card_dup", &p.id),
-                                                    Icon::Duplicate,
-                                                    tr(self.settings.language, "lib.duplicate"),
-                                                    ButtonVariant::Subtle,
-                                                    true,
-                                                    28.0,
-                                                )
-                                                .clicked()
+                                                if inner_w >= 290.0
+                                                    && ui_icon_button(
+                                                        ui,
+                                                        ("card_dup", &p.id),
+                                                        Icon::Duplicate,
+                                                        tr(self.settings.language, "lib.duplicate"),
+                                                        ButtonVariant::Subtle,
+                                                        true,
+                                                        28.0,
+                                                    )
+                                                    .clicked()
                                                 {
                                                     action_duplicate = Some(*idx);
                                                 }
@@ -3457,14 +3093,6 @@ impl McLauncherApp {
             self.instance_tab = InstanceSubTab::Content;
             self.switch_page(ui.ctx(), NavPage::Instance);
         }
-        if let Some(idx) = action_discover {
-            self.select_profile(idx);
-            self.switch_page(ui.ctx(), NavPage::Discover);
-            self.trigger_modrinth_search(false);
-        }
-        if action_console {
-            self.switch_page(ui.ctx(), NavPage::Console);
-        }
         if let Some(idx) = action_duplicate {
             self.duplicate_profile(ui.ctx(), idx);
         }
@@ -3502,22 +3130,47 @@ impl McLauncherApp {
         }
 
         let profile = self.profiles[self.selected_idx].clone();
-        let wide = ui.available_width() >= 760.0;
+        let avail_w = ui.available_width();
+        let wide = avail_w >= 820.0;
         if wide {
+            let left_w = (avail_w - 420.0).max(140.0);
             ui_toolbar_row(ui, 30.0, |ui| {
-                let (av_r, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
-                draw_profile_avatar(
-                    ui.painter(),
-                    av_r,
-                    &profile,
-                    &self.profile_icons,
-                    true,
-                    self.running_profile_id.as_deref() == Some(profile.id.as_str())
-                        && self.game_handle.is_some(),
+                ui.allocate_ui_with_layout(
+                    Vec2::new(left_w, 30.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_max_width(left_w);
+                        let (av_r, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+                        draw_profile_avatar(
+                            ui.painter(),
+                            av_r,
+                            &profile,
+                            &self.profile_icons,
+                            true,
+                            self.running_profile_id.as_deref() == Some(profile.id.as_str())
+                                && self.game_handle.is_some(),
+                        );
+                        let title_w = (left_w - 220.0).max(60.0);
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(title_w, 30.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_max_width(title_w);
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&profile.name)
+                                            .size(21.0)
+                                            .strong()
+                                            .color(text_primary()),
+                                    )
+                                    .truncate(),
+                                );
+                            },
+                        );
+                        badge_sized(ui, &profile.version_id, false, 30.0, None);
+                        loader_badge_sized(ui, profile.loader.kind(), &profile.loader.label(), 30.0);
+                    },
                 );
-                ui.heading(egui::RichText::new(&profile.name).size(21.0).color(text_primary()));
-                badge_sized(ui, &profile.version_id, false, 30.0, None);
-                loader_badge_sized(ui, profile.loader.kind(), &profile.loader.label(), 30.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     if ui_button_icon(
@@ -3615,12 +3268,12 @@ impl McLauncherApp {
         ui.add_space(6.0);
 
         let (total_mods, enabled_mods) = self.profile_mod_counts(&profile);
-        let inst_path = instance_dir(&self.paths, &profile);
-        let worlds_cnt = list_worlds(&inst_path).len();
-        let shots_cnt = list_screenshots(&inst_path).len();
+        let worlds_cnt = self.cached_worlds(&profile).len();
+        let shots_cnt = self.cached_screenshots(&profile).len();
         let mut active_rect = Rect::NOTHING;
-        ui_wrap_row(ui, 32.0, |ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(6.0, 5.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y = 18.0;
+            ui.spacing_mut().item_spacing.x = 6.0;
             for tab in InstanceSubTab::ALL {
                 let is_active = self.instance_tab == tab;
                 let hover_id = ui.make_persistent_id(("inst_subtab_hov", tab.label()));
@@ -3767,7 +3420,8 @@ impl McLauncherApp {
     fn render_worlds_tab(&mut self, ui: &mut egui::Ui, profile: &Profile) {
         let inst = instance_dir(&self.paths, profile);
         let saves_dir = inst.join("saves");
-        let worlds = list_worlds(&inst);
+        let worlds = self.cached_worlds(profile);
+        let backups = self.cached_world_backups(profile);
         ui_toolbar_row(ui, 30.0, |ui| {
             ui.label(
                 egui::RichText::new(format!("{} {}", worlds.len(), tr(self.settings.language, "inst.saved_worlds")))
@@ -3957,7 +3611,6 @@ impl McLauncherApp {
                 ui.add_space(5.0);
             }
 
-            let backups = list_world_backups(&inst);
             if !backups.is_empty() {
                 let lang = self.settings.language;
                 ui.add_space(8.0);
@@ -4115,7 +3768,7 @@ impl McLauncherApp {
     fn render_screenshots_tab(&mut self, ui: &mut egui::Ui, profile: &Profile) {
         let inst = instance_dir(&self.paths, profile);
         let shots_dir = inst.join("screenshots");
-        let shots = list_screenshots(&inst);
+        let shots = self.cached_screenshots(profile);
         ui_toolbar_row(ui, 30.0, |ui| {
             ui.label(
                 egui::RichText::new(format!(
@@ -4197,7 +3850,7 @@ impl McLauncherApp {
         let inst = instance_dir(&self.paths, profile);
         let folder_name = self.content_folder.dir_name();
         let target_dir = inst.join(folder_name);
-        let items = list_content_items(&target_dir);
+        let items = self.cached_content_items(profile, folder_name);
         let total_count = items.len();
         let enabled_count = items.iter().filter(|i| i.enabled).count();
         let disabled_count = total_count.saturating_sub(enabled_count);
@@ -4218,7 +3871,7 @@ impl McLauncherApp {
         // Folder switcher
         ui_wrap_row(ui, 30.0, |ui| {
             for f in ContentFolder::ALL {
-                let count = list_content_items(&inst.join(f.dir_name())).len();
+                let count = self.folder_content_count(profile, f.dir_name());
                 let lbl = format!("{} ({count})", f.translated_label(self.settings.language));
                 let ic = match f {
                     ContentFolder::Mods => Icon::Layers,
@@ -4236,33 +3889,6 @@ impl McLauncherApp {
                 {
                     self.content_folder = f;
                 }
-            }
-            if ui_button_icon(
-                ui,
-                "content_open_dir_btn",
-                Some(Icon::Folder),
-                tr(self.settings.language, "btn.open_folder"),
-                ButtonVariant::Subtle,
-                true,
-                28.0,
-            )
-            .clicked()
-            {
-                let _ = std::fs::create_dir_all(&target_dir);
-                open_in_file_manager(&target_dir);
-            }
-            if ui_button_icon(
-                ui,
-                "content_get_more_btn",
-                Some(Icon::Compass),
-                tr(self.settings.language, "content.get_more"),
-                ButtonVariant::Secondary,
-                true,
-                28.0,
-            )
-            .clicked()
-            {
-                go_discover = true;
             }
             if !self.mr_installed_cache.is_empty()
                 && ui_button_icon(
@@ -4345,10 +3971,13 @@ impl McLauncherApp {
                 .clicked()
             {
                 match set_all_content_enabled(&target_dir, true) {
-                    Ok(n) => self.show_toast(
-                        ui.ctx(),
-                        format!("{}: {n}", tr(self.settings.language, "toast.enabled_count")),
-                    ),
+                    Ok(n) => {
+                        self.fs_cache.invalidate();
+                        self.show_toast(
+                            ui.ctx(),
+                            format!("{}: {n}", tr(self.settings.language, "toast.enabled_count")),
+                        );
+                    }
                     Err(e) => self.show_toast(ui.ctx(), e),
                 }
             }
@@ -4364,10 +3993,13 @@ impl McLauncherApp {
                 .clicked()
             {
                 match set_all_content_enabled(&target_dir, false) {
-                    Ok(n) => self.show_toast(
-                        ui.ctx(),
-                        format!("{}: {n}", tr(self.settings.language, "toast.disabled_count")),
-                    ),
+                    Ok(n) => {
+                        self.fs_cache.invalidate();
+                        self.show_toast(
+                            ui.ctx(),
+                            format!("{}: {n}", tr(self.settings.language, "toast.disabled_count")),
+                        );
+                    }
                     Err(e) => self.show_toast(ui.ctx(), e),
                 }
             }
@@ -4395,19 +4027,12 @@ impl McLauncherApp {
 
         ui.add_space(6.0);
         let q = self.content_search.trim().to_lowercase();
-        let indexed_by_file: HashMap<String, InstalledProject> = self
+        let indexed_by_file: HashMap<String, &InstalledProject> = self
             .mr_installed_cache
             .values()
             .filter(|p| p.folder == folder_name)
-            .map(|p| (p.filename.clone(), p.clone()))
+            .map(|p| (p.filename.clone(), p))
             .collect();
-        let pending_icons: Vec<String> = indexed_by_file
-            .values()
-            .filter_map(|p| p.icon_url.clone())
-            .collect();
-        for icon_url in pending_icons {
-            self.request_icon(&icon_url);
-        }
 
         let filtered: Vec<_> = items
             .into_iter()
@@ -4429,12 +4054,13 @@ impl McLauncherApp {
 
         let mut toggle_disk_name: Option<String> = None;
         let mut delete_disk_name: Option<(String, String)> = None;
+        let mut icons_to_request: Vec<String> = Vec::new();
 
-        bounded_scroll(ui, "instance_content_scroll", |ui| {
-            let card_outer_w = (ui.available_width() - 10.0).max(150.0);
-            let card_inner_w = (card_outer_w - 24.0).max(110.0);
-
-            if filtered.is_empty() {
+        let avail_h = ui.available_height().max(120.0);
+        if filtered.is_empty() {
+            bounded_scroll(ui, "instance_content_scroll", |ui| {
+                let card_outer_w = (ui.available_width() - 10.0).max(150.0);
+                let card_inner_w = (card_outer_w - 24.0).max(110.0);
                 card_frame(false, 0.0).show(ui, |ui| {
                     ui.set_min_width(card_inner_w);
                     ui.set_max_width(card_inner_w);
@@ -4460,156 +4086,190 @@ impl McLauncherApp {
                         }
                     });
                 });
-                return;
-            }
-
-            for item in &filtered {
-                let info = indexed_by_file.get(&item.base_name);
-                let display_title = info
-                    .map(|i| i.title.clone())
-                    .unwrap_or_else(|| item.base_name.clone());
-
-                let card_id =
-                    ui.make_persistent_id(("mod_card_hover", folder_name, &item.base_name));
-                animated_card(ui, card_id, false, |ui| {
-                    ui.set_min_width(card_inner_w);
-                    ui.set_max_width(card_inner_w);
-                    let compact_row = card_inner_w < 380.0;
-                    let right_pill: Option<(&str, bool)> = if !item.enabled {
-                        Some((tr(self.settings.language, "content.disabled"), false))
-                    } else {
-                        info.map(|inf| (inf.version_number.as_str(), true))
-                    };
-                    let show_right_pill = !compact_row && right_pill.is_some();
-                    let del_reserve = if compact_row {
-                        36.0
-                    } else if show_right_pill {
-                        214.0
-                    } else {
-                        96.0
-                    };
-                    let switch_w = 38.0;
-                    let icon_px = 30.0;
-                    let mid_w = (card_inner_w - switch_w - icon_px - del_reserve - 26.0).max(60.0);
-
-                    ui_toolbar_row(ui, 36.0, |ui| {
-                        if mod_toggle_switch(
-                            ui,
-                            &format!("{}_{}_{}", profile.id, folder_name, item.base_name),
-                            item.enabled,
-                        )
-                        .on_hover_text(if item.enabled {
-                            tr(self.settings.language, "content.disabled")
-                        } else {
-                            tr(self.settings.language, "content.enable")
-                        })
-                        .clicked()
-                        {
-                            toggle_disk_name = Some(item.disk_name.clone());
+            });
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("instance_content_scroll")
+                .auto_shrink([false, false])
+                .max_height(avail_h)
+                .show_rows(ui, 60.0, filtered.len(), |ui, row_range| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    let card_outer_w = (ui.available_width() - 10.0).max(150.0);
+                    let card_inner_w = (card_outer_w - 24.0).max(110.0);
+                    for item in &filtered[row_range] {
+                        let info = indexed_by_file.get(&item.base_name).copied();
+                        let display_title = info
+                            .map(|i| i.title.clone())
+                            .unwrap_or_else(|| item.base_name.clone());
+                        if let Some(url) = info.and_then(|i| i.icon_url.as_deref()) {
+                            if !self.mr_icons.contains_key(url) {
+                                icons_to_request.push(url.to_string());
+                            }
                         }
 
-                        let icon_url_opt = info.and_then(|i| i.icon_url.as_ref());
-                        let tex_opt = icon_url_opt
-                            .and_then(|u| self.mr_icons.get(u))
-                            .and_then(|o| o.as_ref());
-                        let is_icon_loading = icon_url_opt
-                            .is_some_and(|u| self.mr_icons_pending.contains(u.as_str()));
-                        let icon_size = Vec2::splat(icon_px);
-                        if let Some(tex) = tex_opt {
-                            ui.add(
-                                egui::Image::new(tex)
-                                    .fit_to_exact_size(icon_size)
-                                    .rounding(Rounding::same(6.5)),
-                            );
-                        } else {
-                            let (rect, _) = ui.allocate_exact_size(icon_size, Sense::hover());
-                            draw_icon_placeholder(
-                                ui,
-                                rect,
-                                6.5,
-                                &display_title,
-                                is_icon_loading,
-                            );
-                        }
-
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(mid_w, 34.0),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.set_min_width(mid_w);
-                                ui.set_max_width(mid_w);
-                                let mut title_rt = egui::RichText::new(&display_title).strong();
-                                if !item.enabled {
-                                    title_rt = title_rt.strikethrough().color(text_muted());
-                                } else {
-                                    title_rt = title_rt.color(text_primary());
-                                }
-                                ui.add(egui::Label::new(title_rt).truncate());
-                                let src_tag = if info.is_some() { "Modrinth" } else { tr(self.settings.language, "content.local") };
-                                let meta = format!(
-                                    "{src_tag} • {} • {}",
-                                    item.disk_name,
-                                    format_size(item.size_bytes)
-                                );
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(meta)
-                                            .monospace()
-                                            .small()
-                                            .color(text_muted()),
-                                    )
-                                    .truncate(),
-                                );
-                            },
-                        );
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            let del_clicked = if compact_row {
-                                ui_icon_button(
-                                    ui,
-                                    ("mod_del", &item.disk_name),
-                                    Icon::Trash,
-                                    &format!("Remove {}", item.disk_name),
-                                    ButtonVariant::Danger,
-                                    true,
-                                    28.0,
-                                )
-                                .clicked()
+                        let card_id = ui.make_persistent_id((
+                            "mod_card_hover",
+                            folder_name,
+                            &item.base_name,
+                        ));
+                        animated_card(ui, card_id, false, |ui| {
+                            ui.set_min_width(card_inner_w);
+                            ui.set_max_width(card_inner_w);
+                            let compact_row = card_inner_w < 380.0;
+                            let right_pill: Option<(&str, bool)> = if !item.enabled {
+                                Some((tr(self.settings.language, "content.disabled"), false))
                             } else {
-                                ui_button_icon(
-                                    ui,
-                                    ("mod_del", &item.disk_name),
-                                    Some(Icon::Trash),
-                                    tr(self.settings.language, "btn.remove"),
-                                    ButtonVariant::Danger,
-                                    true,
-                                    28.0,
-                                )
-                                .on_hover_text(format!("Remove {}", item.disk_name))
-                                .clicked()
+                                info.map(|inf| (inf.version_number.as_str(), true))
                             };
-                            if del_clicked {
-                                delete_disk_name =
-                                    Some((item.disk_name.clone(), display_title.clone()));
-                            }
-                            if show_right_pill {
-                                if let Some((pill_txt, highlighted)) = right_pill {
-                                    badge_sized(ui, pill_txt, highlighted, 28.0, Some(112.0))
-                                        .on_hover_text(pill_txt);
+                            let show_right_pill = !compact_row && right_pill.is_some();
+                            let del_reserve = if compact_row {
+                                36.0
+                            } else if show_right_pill {
+                                214.0
+                            } else {
+                                96.0
+                            };
+                            let switch_w = 38.0;
+                            let icon_px = 30.0;
+                            let mid_w =
+                                (card_inner_w - switch_w - icon_px - del_reserve - 26.0).max(60.0);
+
+                            ui_toolbar_row(ui, 36.0, |ui| {
+                                if mod_toggle_switch(
+                                    ui,
+                                    &format!("{}_{}_{}", profile.id, folder_name, item.base_name),
+                                    item.enabled,
+                                )
+                                .on_hover_text(if item.enabled {
+                                    tr(self.settings.language, "content.disabled")
+                                } else {
+                                    tr(self.settings.language, "content.enable")
+                                })
+                                .clicked()
+                                {
+                                    toggle_disk_name = Some(item.disk_name.clone());
                                 }
-                            }
+
+                                let icon_url_opt = info.and_then(|i| i.icon_url.as_ref());
+                                let tex_opt = icon_url_opt
+                                    .and_then(|u| self.mr_icons.get(u))
+                                    .and_then(|o| o.as_ref());
+                                let is_icon_loading = icon_url_opt
+                                    .is_some_and(|u| self.mr_icons_pending.contains(u.as_str()));
+                                let icon_size = Vec2::splat(icon_px);
+                                if let Some(tex) = tex_opt {
+                                    ui.add(
+                                        egui::Image::new(tex)
+                                            .fit_to_exact_size(icon_size)
+                                            .rounding(Rounding::same(6.5)),
+                                    );
+                                } else {
+                                    let (rect, _) = ui.allocate_exact_size(icon_size, Sense::hover());
+                                    draw_icon_placeholder(
+                                        ui,
+                                        rect,
+                                        6.5,
+                                        &display_title,
+                                        is_icon_loading,
+                                    );
+                                }
+
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(mid_w, 34.0),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        ui.set_min_width(mid_w);
+                                        ui.set_max_width(mid_w);
+                                        let mut title_rt =
+                                            egui::RichText::new(&display_title).strong();
+                                        if !item.enabled {
+                                            title_rt = title_rt.strikethrough().color(text_muted());
+                                        } else {
+                                            title_rt = title_rt.color(text_primary());
+                                        }
+                                        ui.add(egui::Label::new(title_rt).truncate());
+                                        let src_tag = if info.is_some() {
+                                            "Modrinth"
+                                        } else {
+                                            tr(self.settings.language, "content.local")
+                                        };
+                                        let meta = format!(
+                                            "{src_tag} • {} • {}",
+                                            item.disk_name,
+                                            format_size(item.size_bytes)
+                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(meta)
+                                                    .monospace()
+                                                    .small()
+                                                    .color(text_muted()),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        let del_clicked = if compact_row {
+                                            ui_icon_button(
+                                                ui,
+                                                ("mod_del", &item.disk_name),
+                                                Icon::Trash,
+                                                &format!("Remove {}", item.disk_name),
+                                                ButtonVariant::Danger,
+                                                true,
+                                                28.0,
+                                            )
+                                            .clicked()
+                                        } else {
+                                            ui_button_icon(
+                                                ui,
+                                                ("mod_del", &item.disk_name),
+                                                Some(Icon::Trash),
+                                                tr(self.settings.language, "btn.remove"),
+                                                ButtonVariant::Danger,
+                                                true,
+                                                28.0,
+                                            )
+                                            .on_hover_text(format!("Remove {}", item.disk_name))
+                                            .clicked()
+                                        };
+                                        if del_clicked {
+                                            delete_disk_name =
+                                                Some((item.disk_name.clone(), display_title.clone()));
+                                        }
+                                        if show_right_pill {
+                                            if let Some((pill_txt, highlighted)) = right_pill {
+                                                badge_sized(
+                                                    ui,
+                                                    pill_txt,
+                                                    highlighted,
+                                                    28.0,
+                                                    Some(112.0),
+                                                )
+                                                .on_hover_text(pill_txt);
+                                            }
+                                        }
+                                    },
+                                );
+                            });
                         });
-                    });
+                    }
                 });
-                ui.add_space(4.0);
-            }
-        });
+        }
+        for url in icons_to_request {
+            self.request_icon(&url);
+        }
 
         if let Some(name) = toggle_disk_name {
             let lang = self.settings.language;
             match toggle_content_file(&target_dir, &name) {
                 Ok(now_on) => {
+                    self.fs_cache.invalidate();
                     let msg = if now_on {
                         format!(
                             "{}: {}",
@@ -4628,6 +4288,7 @@ impl McLauncherApp {
             let lang = self.settings.language;
             match delete_content_file(&self.paths, profile, folder_name, &disk_name) {
                 Ok(()) => {
+                    self.fs_cache.invalidate();
                     self.mr_installed_cache = load_installed_index(&self.paths, profile);
                     self.show_toast(ui.ctx(), format!("{}: {title}", tr(lang, "toast.removed")));
                 }
@@ -5919,52 +5580,103 @@ impl McLauncherApp {
     fn render_console_page(&mut self, ui: &mut egui::Ui) {
         let lang = self.settings.language;
         let is_running = self.game_handle.is_some();
+        if self.log_cache.diag_revision != self.log_revision {
+            self.log_cache.diag_summary = diagnose_console_logs(&self.logs);
+            self.log_cache.warn_err_count = self
+                .logs
+                .iter()
+                .filter(|e| e.level != LogLevel::Info)
+                .count();
+            self.log_cache.diag_revision = self.log_revision;
+        }
+        let diag_summary = self.log_cache.diag_summary.clone();
+        let warn_err_count = self.log_cache.warn_err_count;
+
+        let avail_w = ui.available_width();
+        let has_crash_btn = self.last_crash_code.is_some() || diag_summary.is_some();
+        let compact_hdr = avail_w < if has_crash_btn { 680.0 } else { 540.0 };
         ui_toolbar_row(ui, 32.0, |ui| {
             ui.heading(egui::RichText::new(tr(lang, "nav.console")).size(21.0).color(text_primary()));
-            if is_running {
-                badge(ui, tr(lang, "console.live"), true);
-            } else {
-                badge(ui, &format!("{} {}", self.logs.len(), tr(lang, "console.lines")), false);
+            if !compact_hdr {
+                if is_running {
+                    badge(ui, tr(lang, "console.live"), true);
+                } else {
+                    badge(ui, &format!("{} {}", self.logs.len(), tr(lang, "console.lines")), false);
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if ui_button_icon(
-                    ui,
-                    "console_clear_btn",
-                    Some(Icon::Trash),
-                    tr(lang, "btn.clear"),
-                    ButtonVariant::Subtle,
-                    !self.logs.is_empty(),
-                    28.0,
-                )
-                .clicked()
-                {
-                    self.logs.clear();
-                    self.log_error_count = 0;
-                    self.last_crash_code = None;
+                if compact_hdr {
+                    if ui_icon_button(
+                        ui,
+                        "console_clear_btn",
+                        Icon::Trash,
+                        tr(lang, "btn.clear"),
+                        ButtonVariant::Subtle,
+                        !self.logs.is_empty(),
+                        28.0,
+                    )
+                    .clicked()
+                    {
+                        self.clear_logs();
+                    }
+                    if ui_icon_button(
+                        ui,
+                        "console_copy_btn",
+                        Icon::Copy,
+                        tr(lang, "btn.copy_all"),
+                        ButtonVariant::Secondary,
+                        !self.logs.is_empty(),
+                        28.0,
+                    )
+                    .clicked()
+                    {
+                        let all_text: String = self
+                            .logs
+                            .iter()
+                            .map(|l| format!("[{}] {}", l.timestamp, l.text))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.ctx().copy_text(all_text);
+                        let msg = tr(self.settings.language, "toast.logs_copied").to_string();
+                        self.show_toast(ui.ctx(), msg);
+                    }
+                } else {
+                    if ui_button_icon(
+                        ui,
+                        "console_clear_btn",
+                        Some(Icon::Trash),
+                        tr(lang, "btn.clear"),
+                        ButtonVariant::Subtle,
+                        !self.logs.is_empty(),
+                        28.0,
+                    )
+                    .clicked()
+                    {
+                        self.clear_logs();
+                    }
+                    if ui_button_icon(
+                        ui,
+                        "console_copy_btn",
+                        Some(Icon::Copy),
+                        tr(lang, "btn.copy_all"),
+                        ButtonVariant::Secondary,
+                        !self.logs.is_empty(),
+                        28.0,
+                    )
+                    .clicked()
+                    {
+                        let all_text: String = self
+                            .logs
+                            .iter()
+                            .map(|l| format!("[{}] {}", l.timestamp, l.text))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.ctx().copy_text(all_text);
+                        let msg = tr(self.settings.language, "toast.logs_copied").to_string();
+                        self.show_toast(ui.ctx(), msg);
+                    }
                 }
-                if ui_button_icon(
-                    ui,
-                    "console_copy_btn",
-                    Some(Icon::Copy),
-                    tr(lang, "btn.copy_all"),
-                    ButtonVariant::Secondary,
-                    !self.logs.is_empty(),
-                    28.0,
-                )
-                .clicked()
-                {
-                    let all_text: String = self
-                        .logs
-                        .iter()
-                        .map(|l| format!("[{}] {}", l.timestamp, l.text))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    ui.ctx().copy_text(all_text);
-                    let msg = tr(self.settings.language, "toast.logs_copied").to_string();
-                    self.show_toast(ui.ctx(), msg);
-                }
-                let diag_summary = diagnose_console_logs(&self.logs);
                 if self.last_crash_code.is_some() || diag_summary.is_some() {
                     if ui_button_icon(
                         ui,
@@ -6004,20 +5716,15 @@ impl McLauncherApp {
         });
 
         ui.add_space(6.0);
-        let avail_w = ui.available_width();
         let total_logs = self.logs.len();
-        let warn_err_count = self
-            .logs
-            .iter()
-            .filter(|e| e.level != LogLevel::Info)
-            .count();
+        let console_search_w = (avail_w - 320.0).clamp(85.0, 260.0);
         ui_wrap_row(ui, 30.0, |ui| {
             ui_search_input(
                 ui,
                 "console_search",
                 &mut self.log_search,
                 tr(lang, "console.filter"),
-                (avail_w * 0.42).clamp(130.0, 280.0),
+                console_search_w,
             );
             if ui_pill_tab(
                 ui,
@@ -6048,16 +5755,15 @@ impl McLauncherApp {
         });
 
         ui.add_space(8.0);
-        let diag = diagnose_console_logs(&self.logs);
         if let Some(code) = self.last_crash_code {
-            let banner = match &diag {
+            let banner = match &diag_summary {
                 Some(d) => format!("{}: {code} — {d}", tr(lang, "console.crash_banner")),
                 None => format!("{}: {code}", tr(lang, "console.crash_banner")),
             };
             ui_alert_banner(ui, AlertKind::Error, &banner, ui.available_width());
             ui.add_space(6.0);
-        } else if let Some(d) = diag {
-            ui_alert_banner(ui, AlertKind::Warning, &d, ui.available_width());
+        } else if let Some(d) = &diag_summary {
+            ui_alert_banner(ui, AlertKind::Warning, d, ui.available_width());
             ui.add_space(6.0);
         }
         let q = self.log_search.trim().to_lowercase();
@@ -6094,16 +5800,86 @@ impl McLauncherApp {
                 if self.log_auto_scroll {
                     scroll = scroll.stick_to_bottom(true);
                 }
-                scroll.show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
+                scroll.show_viewport(ui, |ui, viewport| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     let row_w = (ui.available_width() - 4.0).max(100.0);
-                    for (row_idx, entry) in self.logs.iter().enumerate() {
-                        if self.log_errors_only && entry.level == LogLevel::Info {
-                            continue;
-                        }
-                        if !q.is_empty() && !entry.text.to_lowercase().contains(&q) {
-                            continue;
-                        }
+                    let wrap_w = ui.fonts(|f| {
+                        let ts_w = f
+                            .layout_no_wrap(
+                                "00:00:00".to_string(),
+                                egui::FontId::monospace(11.0),
+                                Color32::WHITE,
+                            )
+                            .size()
+                            .x;
+                        let tag_w = f
+                            .layout_no_wrap(
+                                "WARN".to_string(),
+                                egui::FontId::monospace(10.0),
+                                Color32::WHITE,
+                            )
+                            .size()
+                            .x
+                            + 10.0;
+                        (row_w - 12.0 - ts_w - tag_w - 14.0).max(60.0)
+                    });
+
+                    if self.log_cache.revision != self.log_revision
+                        || self.log_cache.errors_only != self.log_errors_only
+                        || self.log_cache.query != q
+                        || (self.log_cache.wrap_width - wrap_w).abs() > 1.0
+                    {
+                        self.log_cache.indices.clear();
+                        self.log_cache.y_offsets.clear();
+                        self.log_cache.y_offsets.push(0.0);
+                        let mut y = 0.0_f32;
+                        ui.fonts(|f| {
+                            let font_id = egui::FontId::monospace(11.5);
+                            for (idx, entry) in self.logs.iter().enumerate() {
+                                if self.log_errors_only && entry.level == LogLevel::Info {
+                                    continue;
+                                }
+                                if !q.is_empty() && !entry.text.to_lowercase().contains(&q) {
+                                    continue;
+                                }
+                                let text_h = f
+                                    .layout(
+                                        entry.text.clone(),
+                                        font_id.clone(),
+                                        Color32::WHITE,
+                                        wrap_w,
+                                    )
+                                    .size()
+                                    .y;
+                                let row_h = (text_h + 5.0).max(20.0);
+                                y += row_h + CONSOLE_ROW_GAP;
+                                self.log_cache.indices.push(idx);
+                                self.log_cache.y_offsets.push(y);
+                            }
+                        });
+                        self.log_cache.revision = self.log_revision;
+                        self.log_cache.errors_only = self.log_errors_only;
+                        self.log_cache.query = q.clone();
+                        self.log_cache.wrap_width = wrap_w;
+                    }
+
+                    let total_h = self.log_cache.y_offsets.last().copied().unwrap_or(0.0);
+                    let (first, last) = visible_console_range(
+                        &self.log_cache.y_offsets,
+                        viewport.min.y,
+                        viewport.max.y,
+                    );
+                    let top_h = self.log_cache.y_offsets.get(first).copied().unwrap_or(0.0);
+                    let bottom_h = (total_h
+                        - self.log_cache.y_offsets.get(last).copied().unwrap_or(total_h))
+                    .max(0.0);
+
+                    if top_h > 0.0 {
+                        ui.allocate_space(Vec2::new(row_w, top_h));
+                    }
+
+                    for vis_idx in first..last {
+                        let entry = &self.logs[self.log_cache.indices[vis_idx]];
                         let (tag, tag_col, tag_bg, msg_col, row_tint) = match entry.level {
                             LogLevel::Error => (
                                 "ERR",
@@ -6124,7 +5900,7 @@ impl McLauncherApp {
                                 text_muted(),
                                 Color32::from_rgb(27, 31, 39),
                                 text_secondary(),
-                                if row_idx % 2 == 1 {
+                                if vis_idx % 2 == 1 {
                                     Color32::from_rgba_unmultiplied(255, 255, 255, 4)
                                 } else {
                                     Color32::TRANSPARENT
@@ -6158,6 +5934,7 @@ impl McLauncherApp {
                                                     .color(tag_col),
                                             );
                                         });
+                                    ui.set_max_width(wrap_w);
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(&entry.text)
@@ -6178,6 +5955,11 @@ impl McLauncherApp {
                         if row_resp.clicked() {
                             copied_line = Some(format!("[{}] {}", entry.timestamp, entry.text));
                         }
+                        ui.add_space(CONSOLE_ROW_GAP);
+                    }
+
+                    if bottom_h > 0.0 {
+                        ui.allocate_space(Vec2::new(row_w, bottom_h));
                     }
                 });
             });
@@ -6705,11 +6487,12 @@ impl McLauncherApp {
             })
             .unwrap_or_else(|| tr(self.settings.language, "mr.no_instance").to_string());
 
+        let avail_w = ui.available_width();
         ui_toolbar_row(ui, 30.0, |ui| {
             ui.heading(egui::RichText::new("Modrinth").size(21.0).color(text_primary()));
-            if let Some(p) = self.profiles.get(self.selected_idx) {
-                badge(ui, &p.name, false);
-                loader_badge(ui, p.loader.kind(), p.loader.short_name());
+            if avail_w >= 460.0 {
+                let max_badge_w = (avail_w - 290.0).max(90.0);
+                badge_sized(ui, &target_label, !is_vanilla_mods, 26.0, Some(max_badge_w));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui_button_icon(
@@ -6770,7 +6553,7 @@ impl McLauncherApp {
             };
             egui::ComboBox::from_id_salt("mr_sort_combo")
                 .selected_text(sort_label(self.mr_sort))
-                .width(136.0)
+                .width(124.0)
                 .show_ui(ui, |ui| {
                     for s in [
                         ModrinthSort::Relevance,
@@ -6783,7 +6566,6 @@ impl McLauncherApp {
                         }
                     }
                 });
-            badge_sized(ui, &target_label, !is_vanilla_mods, 28.0, None);
         });
 
         ui.add_space(5.0);
@@ -6814,62 +6596,6 @@ impl McLauncherApp {
             }
             if self.mr_searching {
                 mono_spinner(ui, 16.0);
-            } else if !self.mr_results.is_empty() {
-                ui.label(
-                    egui::RichText::new(format!("{} {}", self.mr_results.len(), tr(self.settings.language, "mr.compatible")))
-                        .small()
-                        .color(text_muted()),
-                );
-            }
-        });
-
-        ui.add_space(5.0);
-        let topic_chips: &[&str] = match self.mr_type {
-            ModrinthProjectType::Mod => &[
-                "All",
-                "Optimization",
-                "Sodium",
-                "Iris",
-                "JEI",
-                "Worldgen",
-                "Minimap",
-            ],
-            ModrinthProjectType::Modpack => {
-                &["All", "Optimization", "FPS", "RPG", "Tech", "Kitchen Sink"]
-            }
-            ModrinthProjectType::Resourcepack => {
-                &["All", "Faithful", "GUI", "PvP", "3D", "Dark Mode"]
-            }
-            ModrinthProjectType::Shader => {
-                &["All", "BSL", "Complementary", "Iris", "Vanilla", "PBR"]
-            }
-        };
-        ui_wrap_row(ui, 26.0, |ui| {
-            for &topic in topic_chips {
-                let active = if topic == "All" {
-                    self.mr_query.trim().is_empty()
-                } else {
-                    self.mr_query.trim().eq_ignore_ascii_case(topic)
-                };
-                let topic_lbl = match topic {
-                    "All" => tr(self.settings.language, "lib.all"),
-                    "Optimization" => tr(self.settings.language, "mr.topic_opt"),
-                    "Worldgen" => tr(self.settings.language, "mr.topic_worldgen"),
-                    "Minimap" => tr(self.settings.language, "mr.topic_minimap"),
-                    "Tech" => tr(self.settings.language, "mr.topic_tech"),
-                    "Dark Mode" => tr(self.settings.language, "mr.topic_dark"),
-                    _ => topic,
-                };
-                if ui_pill_tab(ui, ("mr_topic", self.mr_type.api_str(), topic), topic_lbl, active)
-                    .clicked()
-                {
-                    if topic == "All" || active {
-                        self.mr_query.clear();
-                    } else {
-                        self.mr_query = topic.to_string();
-                    }
-                    self.trigger_modrinth_search(false);
-                }
             }
         });
 
@@ -8790,9 +8516,7 @@ impl McLauncherApp {
                     self.show_toast(ctx, msg);
                 }
                 PaletteAction::ClearLogs => {
-                    self.logs.clear();
-                    self.log_error_count = 0;
-                    self.last_crash_code = None;
+                    self.clear_logs();
                     let msg = tr(self.settings.language, "toast.logs_cleared").to_string();
                     self.show_toast(ctx, msg);
                 }
@@ -9584,5 +9308,14 @@ mod tests {
         assert!(utf16.ends_with(&[0, 0]));
         let decoded = String::from_utf16(&utf16).unwrap();
         assert_eq!(decoded, "Modpacks (*.mrpack;*.zip)\0*.mrpack;*.zip\0\0");
+    }
+
+    #[test]
+    fn test_visible_console_range_binary_search() {
+        assert_eq!(visible_console_range(&[0.0], 0.0, 200.0), (0, 0));
+        let offsets = [0.0, 22.0, 44.0, 80.0, 102.0, 124.0];
+        assert_eq!(visible_console_range(&offsets, 0.0, 50.0), (0, 3));
+        assert_eq!(visible_console_range(&offsets, 22.0, 80.0), (1, 3));
+        assert_eq!(visible_console_range(&offsets, 45.0, 124.0), (2, 5));
     }
 }
