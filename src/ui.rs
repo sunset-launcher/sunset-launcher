@@ -1778,6 +1778,19 @@ impl McLauncherApp {
                 if resp.clicked() {
                     self.switch_page(ui.ctx(), NavPage::Accounts);
                 }
+                let credit_w = (ui.available_width() - 4.0).max(20.0);
+                let (credit_r, _) =
+                    ui.allocate_exact_size(Vec2::new(credit_w, 16.0), Sense::hover());
+                if credit_r.width() > 90.0 {
+                    let clipped = ui.painter().with_clip_rect(credit_r);
+                    clipped.text(
+                        Pos2::new(credit_r.left() + 6.0, credit_r.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        "by svarka (@svarkawm) • MIT",
+                        egui::FontId::proportional(10.0),
+                        text_muted(),
+                    );
+                }
             });
 
         // Brand + vertical navigation
@@ -2344,50 +2357,13 @@ impl McLauncherApp {
     }
 
     fn render_bottom_bar(&mut self, ui: &mut egui::Ui) {
-        let busy_progress = self.is_busy || self.mr_installing || self.progress > 0.0;
-        if busy_progress {
-            animated_progress_bar(
-                ui,
-                "main_progress",
-                self.progress,
-                &self.status_text,
-                self.is_busy || self.mr_installing,
-            );
-        } else {
-            ui_toolbar_row(ui, 22.0, |ui| {
-                let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                let is_running = self.game_handle.is_some();
-                if is_running {
-                    let pulse = (ui.input(|i| i.time) as f32 * 3.8).sin() * 0.5 + 0.5;
-                    ui.painter().circle_stroke(
-                        dot.center(),
-                        3.8 + pulse * 1.4,
-                        Stroke::new(
-                            1.0_f32,
-                            with_alpha(accent(), (120.0 * (1.0 - pulse * 0.5)) as u8),
-                        ),
-                    );
-                    ui.painter().circle_filled(dot.center(), 3.5, accent());
-                    ui.ctx().request_repaint();
-                } else {
-                    ui.painter()
-                        .circle_filled(dot.center(), 3.5, Color32::from_rgb(82, 92, 108));
-                }
-                let status_display = if self.status_text == "Ready" {
-                    tr(self.settings.language, "status.ready")
-                } else {
-                    self.status_text.as_str()
-                };
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(status_display)
-                            .small()
-                            .color(text_secondary()),
-                    )
-                    .truncate(),
-                );
-            });
-        }
+        animated_progress_bar(
+            ui,
+            "main_progress",
+            self.progress,
+            &self.status_text,
+            self.is_busy || self.mr_installing,
+        );
     }
 
     fn render_library_page(&mut self, ui: &mut egui::Ui) {
@@ -9069,18 +9045,20 @@ impl eframe::App for McLauncherApp {
                 self.render_top_bar(ui, compact_sidebar);
             });
 
-        // 2. Bottom Status / Progress Bar
-        egui::TopBottomPanel::bottom("bottom_status_bar")
-            .exact_height(34.0)
-            .frame(
-                egui::Frame::none()
-                    .fill(bg_sidebar())
-                    .stroke(Stroke::new(1.0_f32, border_subtle()))
-                    .inner_margin(Margin::symmetric(if compact_pad { 10.0 } else { 14.0 }, 6.0)),
-            )
-            .show(ctx, |ui| {
-                self.render_bottom_bar(ui);
-            });
+        // 2. Bottom Progress Bar (only visible while downloading / launching / installing)
+        if self.is_busy || self.mr_installing || self.progress > 0.0 {
+            egui::TopBottomPanel::bottom("bottom_status_bar")
+                .exact_height(34.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(bg_sidebar())
+                        .stroke(Stroke::new(1.0_f32, border_subtle()))
+                        .inner_margin(Margin::symmetric(if compact_pad { 10.0 } else { 14.0 }, 6.0)),
+                )
+                .show(ctx, |ui| {
+                    self.render_bottom_bar(ui);
+                });
+        }
 
         // 3. Left navigation rail
         egui::SidePanel::left("nav_sidebar")
