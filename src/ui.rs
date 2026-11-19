@@ -1625,7 +1625,7 @@ impl McLauncherApp {
                     clipped.text(
                         Pos2::new(credit_r.left() + 6.0, credit_r.center().y),
                         egui::Align2::LEFT_CENTER,
-                        "by svarka (@svarkawm) • MIT",
+                        "by svarka (@sunset-launcher) • MIT",
                         egui::FontId::proportional(10.0),
                         text_muted(),
                     );
@@ -1713,7 +1713,7 @@ impl McLauncherApp {
                 .on_hover_text(concat!(
                     "Sunset Launcher v",
                     env!("CARGO_PKG_VERSION"),
-                    " • by svarka (@svarkawm)"
+                    " • by svarka (@sunset-launcher)"
                 ));
             if brand_click.hovered() || brand_hov_now {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -5275,7 +5275,7 @@ impl McLauncherApp {
                             .color(text_primary()),
                     );
                     ui.label(
-                        egui::RichText::new("• Author: svarka (@svarkawm) • Co-Author: Antigravity (Gemini)")
+                        egui::RichText::new("• Author: svarka (@sunset-launcher) • Co-Author: Antigravity (Gemini)")
                             .small()
                             .color(text_secondary()),
                     );

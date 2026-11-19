@@ -2,7 +2,7 @@
 name = "mc-launcher"
 version = "0.1.6"
 edition = "2021"
-authors = ["svarka (@svarkawm)", "Antigravity (Gemini)"]
+authors = ["svarka (@sunset-launcher)", "Antigravity (Gemini)"]
 license = "MIT"
 description = "Native Minecraft launcher in Rust with Vanilla, Fabric, Quilt, Forge, and NeoForge support"
 

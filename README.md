@@ -4,11 +4,11 @@
   <p><strong>Fast, native Minecraft launcher built in pure Rust (<code>eframe</code> / <code>egui</code>)</strong></p>
 
   <p>
-    <a href="https://github.com/svarkawm/sunset-launcher/releases">
-      <img src="https://img.shields.io/github/v/release/svarkawm/sunset-launcher?color=FF7833&label=Release&style=for-the-badge&v=1" alt="Release" />
+    <a href="https://github.com/sunset-launcher/sunset-launcher/releases">
+      <img src="https://img.shields.io/github/v/release/sunset-launcher/sunset-launcher?color=FF7833&label=Release&style=for-the-badge&v=1" alt="Release" />
     </a>
-    <a href="https://github.com/svarkawm/sunset-launcher/actions/workflows/build.yml">
-      <img src="https://img.shields.io/github/actions/workflow/status/svarkawm/sunset-launcher/build.yml?branch=main&label=Build&style=for-the-badge" alt="Build & Release CI" />
+    <a href="https://github.com/sunset-launcher/sunset-launcher/actions/workflows/build.yml">
+      <img src="https://img.shields.io/github/actions/workflow/status/sunset-launcher/sunset-launcher/build.yml?branch=main&label=Build&style=for-the-badge" alt="Build & Release CI" />
     </a>
     <img src="https://img.shields.io/badge/Rust-2021-orange?style=for-the-badge&logo=rust" alt="Rust 2021" />
     <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-blue?style=for-the-badge" alt="Linux & Windows" />
@@ -52,7 +52,7 @@
 
 ## Quick Start (Releases)
 
-Download the prebuilt binary for your OS from [GitHub Releases](https://github.com/svarkawm/sunset-launcher/releases):
+Download the prebuilt binary for your OS from [GitHub Releases](https://github.com/sunset-launcher/sunset-launcher/releases):
 
 - **Linux (`sunset-launcher-linux-x64`)**: mark the file as executable before the first launch:
   ```bash
@@ -94,7 +94,7 @@ Inside this folder:
 - **Privacy Policy**: Sunset Launcher does **not** collect telemetry, analytics, or crash tracking, and does not send any personal data to developer-controlled servers. All credentials (Microsoft / Ely.by tokens, accounts, and profiles) are stored locally in the launcher data directory. Network requests occur only to third-party services explicitly required by user features (Mojang/Minecraft, Fabric/Quilt/Forge/NeoForge, Modrinth, Adoptium Java, Microsoft OAuth / Ely.by authentication, GitHub Releases for update checks, and local Discord RPC IPC when enabled).
 
 ## Credits & License
-- **Author**: `svarka` ([@svarkawm](https://github.com/svarkawm))
+- **Author**: `svarka` ([@sunset-launcher](https://github.com/sunset-launcher))
 - **Co-Author / AI Contributor**: **Antigravity (Gemini)**
 - **License**: [MIT](LICENSE)
 

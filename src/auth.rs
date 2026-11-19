@@ -1039,11 +1039,11 @@ pub fn cleanup_stale_update_files() {
     let _ = remaining;
 }
 
-/// Checks GitHub Releases (`svarkawm/sunset-launcher`) for a newer version than `current_version`.
+/// Checks GitHub Releases (`sunset-launcher/sunset-launcher`) for a newer version than `current_version`.
 pub fn check_github_latest_release(current_version: &str) -> Result<Option<LauncherUpdateInfo>, String> {
     let client = build_http_client()?;
     let resp = client
-        .get("https://api.github.com/repos/svarkawm/sunset-launcher/releases/latest")
+        .get("https://api.github.com/repos/sunset-launcher/sunset-launcher/releases/latest")
         .header("Accept", "application/vnd.github+json")
         .send()
         .map_err(|e| format!("Update check failed: {e}"))?;

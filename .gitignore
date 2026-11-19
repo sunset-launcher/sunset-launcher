@@ -30,3 +30,6 @@ crash-reports/
 accounts.json
 profiles.json
 
+# Separate website repository
+/site/
+
