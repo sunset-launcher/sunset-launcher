@@ -1786,7 +1786,7 @@ impl McLauncherApp {
                     clipped.text(
                         Pos2::new(credit_r.left() + 6.0, credit_r.center().y),
                         egui::Align2::LEFT_CENTER,
-                        "by svarka (@svarkawm) • MIT",
+                        "by svarka (@sunset-launcher) • MIT",
                         egui::FontId::proportional(10.0),
                         text_muted(),
                     );
