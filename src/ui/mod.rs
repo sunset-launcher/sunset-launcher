@@ -67,15 +67,15 @@ use crate::theme::{
     self, animated_card, animated_progress_bar, apply_modrinth_theme, apply_ui_font, badge,
     badge_sized, card_frame, discover_system_fonts, draw_icon_placeholder, draw_instance_avatar,
     draw_instance_image_avatar, draw_ram_allocation_bar, draw_running_pulse_dot,
-    draw_skeleton_card, lerp_color, loader_badge, loader_badge_sized, mod_toggle_switch,
-    mono_spinner, primary_action_button, section_header, set_theme_palette, solid_accent_badge,
-    tick_theme_transition, transition_theme_palette, ui_alert_banner, ui_button, ui_button_icon,
-    ui_button_sized, ui_checkbox, ui_flow_row, ui_icon_button, ui_int_slider, ui_loader_pill,
-    ui_pill_tab, ui_pill_tab_icon, ui_ram_slider, ui_search_input, ui_text_input, ui_toolbar_row,
-    ui_wrap_row, with_alpha, AlertKind, ButtonVariant, SystemFont, accent, accent_dim, accent_text,
-    bg_card,
-    bg_card_active, bg_card_hover, bg_elevated, bg_input, bg_sidebar, bg_void, border_strong,
-    border_subtle, DANGER, INFO, text_muted, text_primary, text_secondary, WARNING,
+    draw_server_avatar, draw_skeleton_card, lerp_color, loader_badge, loader_badge_sized,
+    mod_toggle_switch, mono_spinner, primary_action_button, section_header,
+    server_software_badge, set_theme_palette, solid_accent_badge, tick_theme_transition,
+    transition_theme_palette, ui_alert_banner, ui_button, ui_button_icon, ui_button_sized,
+    ui_checkbox, ui_flow_row, ui_icon_button, ui_int_slider, ui_loader_pill, ui_pill_tab,
+    ui_pill_tab_icon, ui_ram_slider, ui_search_input, ui_text_input, ui_toolbar_row, ui_wrap_row,
+    with_alpha, AlertKind, ButtonVariant, SystemFont, accent, accent_text, bg_card,
+    bg_card_active, bg_card_hover, bg_elevated, bg_input, bg_sidebar, bg_void, border_subtle,
+    DANGER, INFO, text_muted, text_primary, text_secondary, WARNING,
 };
 use eframe::egui::{self, Color32, Margin, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -253,6 +253,21 @@ enum LibraryViewMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerFilter {
+    All,
+    Plugins,
+    Mods,
+    Vanilla,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerSort {
+    Recent,
+    Name,
+    Port,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaletteCategory {
     All,
     Menus,
@@ -340,6 +355,7 @@ const FS_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(1500)
 #[derive(Default)]
 struct FsUiCache {
     mod_counts: HashMap<String, (usize, usize, std::time::Instant)>,
+    server_counts: HashMap<String, (usize, usize, std::time::Instant)>,
     folder_counts: HashMap<(String, &'static str), (usize, std::time::Instant)>,
     content_items: Option<(String, &'static str, Vec<InstalledContentItem>, std::time::Instant)>,
     worlds: Option<(String, Vec<WorldEntry>, std::time::Instant)>,
@@ -350,6 +366,7 @@ struct FsUiCache {
 impl FsUiCache {
     fn invalidate(&mut self) {
         self.mod_counts.clear();
+        self.server_counts.clear();
         self.folder_counts.clear();
         self.content_items = None;
         self.worlds = None;
@@ -371,6 +388,10 @@ pub struct McLauncherApp {
     library_filter: LibraryFilter,
     library_sort: LibrarySort,
     library_view: LibraryViewMode,
+    server_search: String,
+    server_filter: ServerFilter,
+    server_sort: ServerSort,
+    server_view: LibraryViewMode,
     content_folder: ContentFolder,
     content_state_filter: ContentStateFilter,
     content_search: String,
@@ -566,6 +587,10 @@ impl McLauncherApp {
             library_filter: LibraryFilter::All,
             library_sort: LibrarySort::Recent,
             library_view: LibraryViewMode::Grid,
+            server_search: String::new(),
+            server_filter: ServerFilter::All,
+            server_sort: ServerSort::Recent,
+            server_view: LibraryViewMode::Grid,
             content_folder: ContentFolder::Mods,
             content_state_filter: ContentStateFilter::All,
             content_search: String::new(),
@@ -2089,6 +2114,30 @@ impl McLauncherApp {
             .mod_counts
             .insert(profile.id.clone(), (total, enabled, now));
         (total, enabled)
+    }
+
+    fn server_content_counts(&mut self, srv: &DedicatedServer) -> (usize, usize) {
+        let now = std::time::Instant::now();
+        if let Some((plugins, mods, ts)) = self.fs_cache.server_counts.get(&srv.id) {
+            if now.duration_since(*ts) < FS_CACHE_TTL {
+                return (*plugins, *mods);
+            }
+        }
+        let dir = server_dir(&self.paths, srv);
+        let plugins = if srv.software.supports_plugins() {
+            list_content_items(&dir.join("plugins")).len()
+        } else {
+            0
+        };
+        let mods = if srv.software.supports_mods() {
+            list_content_items(&dir.join("mods")).len()
+        } else {
+            0
+        };
+        self.fs_cache
+            .server_counts
+            .insert(srv.id.clone(), (plugins, mods, now));
+        (plugins, mods)
     }
 
     fn folder_content_count(&mut self, profile: &Profile, folder: &'static str) -> usize {

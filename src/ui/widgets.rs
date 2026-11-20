@@ -413,6 +413,28 @@ pub(super) fn draw_profile_avatar(
     }
 }
 
+pub(super) fn draw_server_card_avatar(
+    painter: &egui::Painter,
+    rect: Rect,
+    srv: &DedicatedServer,
+    icon_tex: Option<&egui::TextureHandle>,
+    selected: bool,
+    is_running: bool,
+) {
+    if let Some(tex) = icon_tex {
+        draw_instance_image_avatar(painter, rect, tex.id(), selected, is_running);
+    } else {
+        draw_server_avatar(
+            painter,
+            rect,
+            &srv.name,
+            srv.software,
+            selected,
+            is_running,
+        );
+    }
+}
+
 pub(super) fn apply_profile_icon_from_file(
     ctx: &egui::Context,
     paths: &LauncherPaths,

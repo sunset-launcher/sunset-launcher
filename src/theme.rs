@@ -1732,6 +1732,116 @@ pub fn loader_badge(ui: &mut egui::Ui, kind: crate::models::LoaderKind, text: &s
         });
 }
 
+/// Returns signature `(bg_fill, border_color, text_color)` for each `ServerSoftware`.
+pub fn server_software_colors(
+    software: crate::models::ServerSoftware,
+) -> (Color32, Color32, Color32) {
+    use crate::models::{LoaderKind, ServerSoftware};
+    let light = is_light_theme();
+    let adapt = |dark_bg: Color32, border: Color32, dark_fg: Color32| {
+        if light {
+            (
+                lerp_color(bg_card(), border, 0.14),
+                border,
+                lerp_color(border, Color32::BLACK, 0.42),
+            )
+        } else {
+            (dark_bg, border, dark_fg)
+        }
+    };
+    match software {
+        ServerSoftware::Vanilla => loader_colors(LoaderKind::Vanilla),
+        ServerSoftware::Fabric => loader_colors(LoaderKind::Fabric),
+        ServerSoftware::Quilt => loader_colors(LoaderKind::Quilt),
+        ServerSoftware::Forge => loader_colors(LoaderKind::Forge),
+        ServerSoftware::NeoForge => loader_colors(LoaderKind::NeoForge),
+        ServerSoftware::Paper => adapt(
+            Color32::from_rgb(24, 46, 58),
+            Color32::from_rgb(72, 184, 218),
+            Color32::from_rgb(168, 232, 252),
+        ),
+        ServerSoftware::Purpur => adapt(
+            Color32::from_rgb(48, 28, 60),
+            Color32::from_rgb(184, 108, 224),
+            Color32::from_rgb(232, 188, 255),
+        ),
+        ServerSoftware::Folia => adapt(
+            Color32::from_rgb(24, 52, 40),
+            Color32::from_rgb(64, 198, 134),
+            Color32::from_rgb(164, 244, 204),
+        ),
+        ServerSoftware::Arclight => adapt(
+            Color32::from_rgb(56, 42, 22),
+            Color32::from_rgb(232, 168, 60),
+            Color32::from_rgb(255, 220, 150),
+        ),
+    }
+}
+
+/// Draws a color-coded pill badge for a specific `ServerSoftware`.
+pub fn server_software_badge(ui: &mut egui::Ui, software: crate::models::ServerSoftware) {
+    let (fill, border, fg) = server_software_colors(software);
+    egui::Frame::none()
+        .fill(fill)
+        .stroke(Stroke::new(1.0_f32, border))
+        .rounding(Rounding::same(5.5))
+        .inner_margin(Margin::symmetric(7.0, 2.0))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(software.label())
+                    .size(10.5)
+                    .strong()
+                    .color(fg),
+            );
+        });
+}
+
+/// Draws a stylized server emblem with software-tinted colors and running indicator.
+pub fn draw_server_avatar(
+    painter: &egui::Painter,
+    rect: Rect,
+    name: &str,
+    software: crate::models::ServerSoftware,
+    selected: bool,
+    is_running: bool,
+) {
+    let (sw_bg, sw_border, sw_fg) = server_software_colors(software);
+    let bg = if selected {
+        lerp_color(sw_bg, accent_dim(), 0.48)
+    } else {
+        sw_bg
+    };
+    let border = if is_running || selected {
+        accent()
+    } else {
+        sw_border
+    };
+    let rounding = Rounding::same((rect.width() * 0.22).clamp(6.0, 12.0));
+    painter.rect_filled(rect, rounding, bg);
+    painter.rect_stroke(rect, rounding, Stroke::new(1.2_f32, border));
+
+    let initial = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .or_else(|| name.chars().next())
+        .unwrap_or('S')
+        .to_uppercase()
+        .to_string();
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        initial,
+        FontId::new((rect.height() * 0.44).clamp(12.0, 24.0), FontFamily::Proportional),
+        if selected { accent_text() } else { sw_fg },
+    );
+
+    if is_running && rect.width() >= 28.0 {
+        let dot_center = Pos2::new(rect.right() - 5.5, rect.bottom() - 5.5);
+        painter.circle_filled(dot_center, 4.6, bg_card());
+        painter.circle_filled(dot_center, 3.1, accent());
+    }
+}
+
 /// Draws a stylized instance emblem with loader-tinted accent() and running indicator.
 pub fn draw_instance_avatar(
     painter: &egui::Painter,
