@@ -11,7 +11,7 @@
       <img src="https://img.shields.io/github/actions/workflow/status/sunset-launcher/sunset-launcher/build.yml?branch=main&label=Build&style=for-the-badge" alt="Build & Release CI" />
     </a>
     <img src="https://img.shields.io/badge/Rust-2021-orange?style=for-the-badge&logo=rust" alt="Rust 2021" />
-    <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-blue?style=for-the-badge" alt="Linux & Windows" />
+    <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-blue?style=for-the-badge" alt="Linux & Windows & Mac" />
     <a href="LICENSE">
       <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="MIT License" />
     </a>
