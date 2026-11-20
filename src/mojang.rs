@@ -29,6 +29,35 @@ const NEOFORGE_LEGACY_META: &str =
     "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml";
 const RESOURCES_BASE: &str = "https://resources.download.minecraft.net";
 
+/// Error message returned when an active download or installation is cancelled by the user.
+pub const CANCELLED_ERR_MSG: &str = "Operation cancelled by user";
+
+static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Clears the cooperative download cancellation flag before starting a new background task.
+pub fn reset_download_cancel() {
+    DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
+}
+
+/// Signals all active download streams and batch workers to abort immediately.
+pub fn request_download_cancel() {
+    DOWNLOAD_CANCELLED.store(true, Ordering::SeqCst);
+}
+
+/// Returns `true` if the user has requested cancellation of the current download/install task.
+pub fn is_download_cancelled() -> bool {
+    DOWNLOAD_CANCELLED.load(Ordering::Relaxed)
+}
+
+/// Returns `Err(CANCELLED_ERR_MSG)` if cancellation has been requested.
+pub fn check_not_cancelled() -> Result<(), String> {
+    if is_download_cancelled() {
+        Err(CANCELLED_ERR_MSG.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn build_http_client() -> Result<Client, String> {
     Client::builder()
         .user_agent(concat!("sunset-launcher/", env!("CARGO_PKG_VERSION")))
@@ -275,8 +304,38 @@ pub fn current_os_name() -> &'static str {
     }
 }
 
-/// Evaluates Mojang library/argument rules for the current OS (ignoring feature-gated rules).
+/// Feature flags evaluated against Mojang `arguments.game` / `arguments.jvm` rules.
+#[derive(Debug, Clone, Default)]
+pub struct RuleFeatures {
+    pub is_demo_user: bool,
+    pub has_custom_resolution: bool,
+    pub has_quick_plays_support: bool,
+    pub is_quick_play_singleplayer: bool,
+    pub is_quick_play_multiplayer: bool,
+    pub is_quick_play_realms: bool,
+}
+
+impl RuleFeatures {
+    pub fn get(&self, key: &str) -> bool {
+        match key {
+            "is_demo_user" => self.is_demo_user,
+            "has_custom_resolution" => self.has_custom_resolution,
+            "has_quick_plays_support" => self.has_quick_plays_support,
+            "is_quick_play_singleplayer" => self.is_quick_play_singleplayer,
+            "is_quick_play_multiplayer" => self.is_quick_play_multiplayer,
+            "is_quick_play_realms" => self.is_quick_play_realms,
+            _ => false,
+        }
+    }
+}
+
+/// Evaluates Mojang library/argument rules for the current OS (with default/disabled optional features).
 pub fn rules_allow(rules: Option<&Vec<Rule>>) -> bool {
+    rules_allow_with_features(rules, &RuleFeatures::default())
+}
+
+/// Evaluates Mojang library/argument rules for the current OS and active launch `features`.
+pub fn rules_allow_with_features(rules: Option<&Vec<Rule>>, features: &RuleFeatures) -> bool {
     let Some(rules) = rules else {
         return true;
     };
@@ -288,8 +347,13 @@ pub fn rules_allow(rules: Option<&Vec<Rule>>) -> bool {
     let mut allowed = false;
 
     for rule in rules {
-        // Skip feature-specific rules (demo, custom resolution, quick play)
-        if rule.features.as_ref().is_some_and(|f| !f.is_empty()) {
+        let features_match = match &rule.features {
+            None => true,
+            Some(req_map) => req_map
+                .iter()
+                .all(|(feat_name, expected)| features.get(feat_name) == *expected),
+        };
+        if !features_match {
             continue;
         }
 
@@ -408,8 +472,10 @@ pub fn download_file(
     // Retry transient network failures a few times before giving up.
     let mut last_err = String::new();
     for attempt in 1..=3 {
+        check_not_cancelled()?;
         match download_once(client, url, dest, expected_sha1) {
             Ok(()) => return Ok(()),
+            Err(e) if e == CANCELLED_ERR_MSG => return Err(e),
             Err(e) => {
                 last_err = e;
                 if attempt < 3 {
@@ -427,6 +493,7 @@ fn download_once(
     dest: &Path,
     expected_sha1: Option<&str>,
 ) -> Result<(), String> {
+    check_not_cancelled()?;
     let mut resp = client
         .get(url)
         .send()
@@ -442,6 +509,11 @@ fn download_once(
     let mut buf = [0u8; 65536];
 
     loop {
+        if is_download_cancelled() {
+            drop(out);
+            let _ = fs::remove_file(&tmp_path);
+            return Err(CANCELLED_ERR_MSG.to_string());
+        }
         let n = resp
             .read(&mut buf)
             .map_err(|e| format!("Download stream error for {url}: {e}"))?;
@@ -475,6 +547,7 @@ async fn download_async_with_retry(
     client: &reqwest::Client,
     job: &DownloadJob,
 ) -> Result<(), String> {
+    check_not_cancelled()?;
     if job.dest.is_file() {
         match job.sha1.as_deref() {
             Some(sha1) if verify_sha1(&job.dest, sha1) => return Ok(()),
@@ -485,8 +558,10 @@ async fn download_async_with_retry(
 
     let mut last_err = String::new();
     for attempt in 1..=3 {
+        check_not_cancelled()?;
         match download_async_once(client, &job.url, &job.dest, job.sha1.as_deref()).await {
             Ok(()) => return Ok(()),
+            Err(e) if e == CANCELLED_ERR_MSG => return Err(e),
             Err(e) => {
                 let extra_delay = if e.contains("429") { 800 } else { 250 };
                 last_err = e;
@@ -505,6 +580,7 @@ async fn download_async_once(
     dest: &Path,
     expected_sha1: Option<&str>,
 ) -> Result<(), String> {
+    check_not_cancelled()?;
     let mut resp = client
         .get(url)
         .send()
@@ -524,6 +600,11 @@ async fn download_async_once(
         .await
         .map_err(|e| format!("Download stream error for {url}: {e}"))?
     {
+        if is_download_cancelled() {
+            drop(out);
+            let _ = fs::remove_file(&tmp_path);
+            return Err(CANCELLED_ERR_MSG.to_string());
+        }
         if let Some(ref mut h) = hasher {
             h.update(&chunk);
         }
@@ -565,6 +646,7 @@ pub fn download_parallel(
     concurrency: usize,
     on_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<(), String> {
+    check_not_cancelled()?;
     let mut seen = HashSet::new();
     let jobs: Vec<DownloadJob> = jobs
         .into_iter()
@@ -627,6 +709,13 @@ pub fn download_parallel(
                 handles.push(tokio::spawn(async move {
                     loop {
                         if aborted.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if is_download_cancelled() {
+                            aborted.store(true, Ordering::Relaxed);
+                            if let Ok(mut slot) = first_error.lock() {
+                                slot.get_or_insert_with(|| CANCELLED_ERR_MSG.to_string());
+                            }
                             break;
                         }
                         let idx = next.fetch_add(1, Ordering::Relaxed);
@@ -694,6 +783,17 @@ pub struct PreparedLaunch {
     pub loader_overlay: Option<LoaderProfileOverlay>,
     pub classpath: Vec<PathBuf>,
     pub natives_dir: PathBuf,
+    pub log_config_arg: Option<String>,
+    pub game_assets_dir: PathBuf,
+    pub map_to_resources_index: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyForgeInstallMeta {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(rename = "filePath", default)]
+    file_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -704,6 +804,10 @@ struct ForgeInstallProfile {
     data: HashMap<String, InstallerSideValue>,
     #[serde(default)]
     processors: Vec<InstallerProcessor>,
+    #[serde(default)]
+    install: Option<LegacyForgeInstallMeta>,
+    #[serde(rename = "versionInfo", default)]
+    version_info: Option<LoaderProfileOverlay>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -787,9 +891,14 @@ fn collect_libraries(
                 }
             }
         } else if let Some(rel_path) = maven_to_path(&lib.name) {
-            let base = lib.url.as_deref().unwrap_or(default_maven_base);
+            let raw_base = lib.url.as_deref().unwrap_or(default_maven_base);
+            let base = if raw_base.starts_with("http://files.minecraftforge.net/maven") {
+                "https://maven.minecraftforge.net/"
+            } else {
+                raw_base
+            };
             let dest = libraries_dir.join(&rel_path);
-            if !base.is_empty() {
+            if !base.is_empty() && !dest.is_file() {
                 lib_jobs.push(DownloadJob {
                     url: join_url(base, &rel_path),
                     dest: dest.clone(),
@@ -946,20 +1055,55 @@ fn extract_installer_jar(
         }
     }
 
-    let overlay_str = version_json_raw
-        .ok_or_else(|| "Installer jar does not contain version.json".to_string())?;
-    let _ = fs::write(loader_dir.join("version.json"), &overlay_str);
-    let overlay: LoaderProfileOverlay = serde_json::from_str(&overlay_str)
-        .map_err(|e| format!("Failed to parse installer version.json: {e}"))?;
-
     let install_profile = match install_profile_raw {
         Some(raw) => {
             let _ = fs::write(loader_dir.join("install_profile.json"), &raw);
             let parsed: ForgeInstallProfile = serde_json::from_str(&raw)
                 .map_err(|e| format!("Failed to parse install_profile.json: {e}"))?;
+            // Legacy Forge (<= 1.12.2) bundles `forge-...-universal.jar` at the root of `installer.jar`
+            // referenced by `install.filePath` and `install.path`.
+            if let Some(ref meta) = parsed.install {
+                if let (Some(coord), Some(file_path)) =
+                    (meta.path.as_deref(), meta.file_path.as_deref())
+                {
+                    let clean_entry = file_path.trim_start_matches('/');
+                    if let Some(rel_dest) = maven_to_path(coord) {
+                        let dest = libraries_dir.join(rel_dest);
+                        if !dest.is_file() {
+                            if let Ok(mut jar_entry) = archive.by_name(clean_entry) {
+                                if let Some(parent) = dest.parent() {
+                                    let _ = fs::create_dir_all(parent);
+                                }
+                                if let Ok(mut out) = File::create(&dest) {
+                                    let _ = io::copy(&mut jar_entry, &mut out);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Some(parsed)
         }
         None => None,
+    };
+
+    let overlay: LoaderProfileOverlay = if let Some(overlay_str) = version_json_raw {
+        let _ = fs::write(loader_dir.join("version.json"), &overlay_str);
+        serde_json::from_str(&overlay_str)
+            .map_err(|e| format!("Failed to parse installer version.json: {e}"))?
+    } else if let Some(legacy_overlay) = install_profile
+        .as_ref()
+        .and_then(|ip| ip.version_info.clone())
+    {
+        if let Ok(serialized) = serde_json::to_string_pretty(&legacy_overlay) {
+            let _ = fs::write(loader_dir.join("version.json"), serialized);
+        }
+        legacy_overlay
+    } else {
+        return Err(
+            "Installer jar does not contain version.json or legacy install_profile versionInfo"
+                .to_string(),
+        );
     };
 
     Ok((overlay, install_profile))
@@ -1173,6 +1317,83 @@ fn installer_url_for(
     }
 }
 
+fn safe_asset_rel_path(logical_name: &str) -> Option<PathBuf> {
+    let mut rel = PathBuf::new();
+    for comp in Path::new(logical_name).components() {
+        match comp {
+            std::path::Component::Normal(seg) => rel.push(seg),
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!rel.as_os_str().is_empty()).then_some(rel)
+}
+
+/// Copies hashed asset objects into `<target_root>/<logical_name>` for pre-1.7.3 `virtual`
+/// or `map_to_resources` asset indexes.
+pub fn sync_mapped_assets_to_dir(
+    objects_dir: &Path,
+    asset_index: &AssetIndex,
+    target_root: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(target_root)
+        .map_err(|e| format!("Failed to create {}: {e}", target_root.display()))?;
+    for (logical_name, obj) in &asset_index.objects {
+        if obj.hash.len() <= 2 {
+            continue;
+        }
+        let Some(rel) = safe_asset_rel_path(logical_name) else {
+            continue;
+        };
+        let src = objects_dir.join(&obj.hash[..2]).join(&obj.hash);
+        if !src.is_file() {
+            continue;
+        }
+        let dst = target_root.join(rel);
+        let already_ok = dst
+            .metadata()
+            .map(|m| m.is_file() && m.len() == obj.size)
+            .unwrap_or(false);
+        if already_ok {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::copy(&src, &dst).map_err(|e| {
+            format!(
+                "Failed to materialize legacy asset {}: {e}",
+                dst.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Materializes pre-1.7.3 virtual/legacy assets and returns the effective `game_assets` root directory.
+pub fn materialize_legacy_assets(
+    assets_dir: &Path,
+    index_id: &str,
+    asset_index: &AssetIndex,
+    instance_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let objects_dir = assets_dir.join("objects");
+    if asset_index.map_to_resources {
+        let virtual_dir = assets_dir.join("virtual").join(index_id);
+        sync_mapped_assets_to_dir(&objects_dir, asset_index, &virtual_dir)?;
+        if let Some(inst) = instance_dir {
+            sync_mapped_assets_to_dir(&objects_dir, asset_index, &inst.join("resources"))?;
+        }
+        Ok(virtual_dir)
+    } else if asset_index.is_virtual {
+        let virtual_dir = assets_dir.join("virtual").join(index_id);
+        sync_mapped_assets_to_dir(&objects_dir, asset_index, &virtual_dir)?;
+        Ok(virtual_dir)
+    } else {
+        Ok(assets_dir.to_path_buf())
+    }
+}
+
 /// Ensures the requested Minecraft version, optional mod loader (Fabric, Quilt, Forge, NeoForge),
 /// libraries, natives, and assets are downloaded and verified.
 pub fn prepare_version(
@@ -1183,6 +1404,7 @@ pub fn prepare_version(
     resolve_java: &dyn Fn(Option<u32>) -> Result<PathBuf, String>,
     tx: &Sender<WorkerEvent>,
 ) -> Result<PreparedLaunch, String> {
+    check_not_cancelled()?;
     let client = build_http_client()?;
     let version_dir = paths.versions_dir.join(version_id);
     fs::create_dir_all(&version_dir)
@@ -1371,8 +1593,39 @@ pub fn prepare_version(
 
     classpath.extend(vanilla_cp.into_iter().map(|(p, _)| p));
 
+    // Download official Mojang Log4j XML configuration when present (protects 1.7-1.18 against Log4Shell).
+    let log_config_arg = if let Some(log_client) =
+        details.logging.as_ref().and_then(|l| l.client.as_ref())
+    {
+        if !log_client.file.id.is_empty() && !log_client.file.url.is_empty() {
+            let log_dir = paths.assets_dir.join("log_configs");
+            fs::create_dir_all(&log_dir)
+                .map_err(|e| format!("Failed to create log_configs dir: {e}"))?;
+            let safe_id = Path::new(&log_client.file.id)
+                .file_name()
+                .ok_or_else(|| "Invalid logging config filename".to_string())?;
+            let xml_dest = log_dir.join(safe_id);
+            download_file(
+                &client,
+                &log_client.file.url,
+                &xml_dest,
+                Some(&log_client.file.sha1),
+            )?;
+            Some(
+                log_client
+                    .argument
+                    .replace("${path}", &xml_dest.to_string_lossy()),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Fetch asset index early so Vanilla/Fabric/Quilt can download client.jar, libraries, and
     // thousands of assets in a single 64-connection async batch.
+    let mut parsed_asset_meta: Option<(String, PathBuf, AssetIndex)> = None;
     let asset_jobs: Vec<DownloadJob> = if let Some(asset_info) = &details.asset_index {
         let _ = tx.send(WorkerEvent::Progress {
             stage: format!("Asset index ({})...", asset_info.id),
@@ -1389,7 +1642,7 @@ pub fn prepare_version(
         let asset_index: AssetIndex = serde_json::from_str(&index_raw)
             .map_err(|e| format!("Failed to parse asset index: {e}"))?;
 
-        asset_index
+        let jobs = asset_index
             .objects
             .values()
             .filter(|obj| obj.hash.len() > 2)
@@ -1402,7 +1655,9 @@ pub fn prepare_version(
                     size: Some(obj.size),
                 }
             })
-            .collect()
+            .collect();
+        parsed_asset_meta = Some((asset_info.id.clone(), index_path, asset_index));
+        jobs
     } else {
         Vec::new()
     };
@@ -1480,6 +1735,15 @@ pub fn prepare_version(
         }
     }
 
+    let (game_assets_dir, map_to_resources_index) =
+        if let Some((ref idx_id, ref idx_path, ref asset_idx)) = parsed_asset_meta {
+            let ga_dir = materialize_legacy_assets(&paths.assets_dir, idx_id, asset_idx, None)?;
+            let map_idx = asset_idx.map_to_resources.then(|| idx_path.clone());
+            (ga_dir, map_idx)
+        } else {
+            (paths.assets_dir.clone(), None)
+        };
+
     classpath.push(client_jar);
 
     let _ = tx.send(WorkerEvent::Progress {
@@ -1492,6 +1756,9 @@ pub fn prepare_version(
         loader_overlay,
         classpath,
         natives_dir,
+        log_config_arg,
+        game_assets_dir,
+        map_to_resources_index,
     })
 }
 
@@ -1566,6 +1833,107 @@ mod tests {
             libs.join("com/example/helper/1.2/helper-1.2.jar")
                 .to_string_lossy()
         );
+    }
+
+    #[test]
+    fn test_legacy_forge_installer_and_virtual_assets_and_feature_rules() {
+        use super::{
+            extract_installer_jar, materialize_legacy_assets, rules_allow_with_features,
+            RuleFeatures,
+        };
+        use crate::models::{AssetIndex, AssetObject, Rule};
+        use std::io::Write;
+
+        let tmp = std::env::temp_dir().join(format!("sunset_legacy_test_{}", uuid::Uuid::new_v4()));
+        let loader_dir = tmp.join("loader");
+        let libs_dir = tmp.join("libraries");
+        std::fs::create_dir_all(&loader_dir).unwrap();
+        std::fs::create_dir_all(&libs_dir).unwrap();
+
+        // Build a synthetic Forge 1.12.2 installer.jar with install_profile.json (`versionInfo` + bundled universal jar)
+        let installer_jar = loader_dir.join("installer.jar");
+        {
+            let f = std::fs::File::create(&installer_jar).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("install_profile.json", opts).unwrap();
+            zw.write_all(
+                br#"{
+                  "install": {
+                    "path": "net.minecraftforge:forge:1.12.2-14.23.5.2860",
+                    "filePath": "forge-1.12.2-14.23.5.2860-universal.jar"
+                  },
+                  "versionInfo": {
+                    "id": "1.12.2-forge-14.23.5.2860",
+                    "mainClass": "net.minecraft.launchwrapper.Launch",
+                    "minecraftArguments": "--username ${auth_player_name}",
+                    "libraries": []
+                  }
+                }"#,
+            )
+            .unwrap();
+            zw.start_file("forge-1.12.2-14.23.5.2860-universal.jar", opts)
+                .unwrap();
+            zw.write_all(b"universal-jar-bytes").unwrap();
+            zw.finish().unwrap();
+        }
+
+        let (overlay, ip) = extract_installer_jar(&installer_jar, &loader_dir, &libs_dir).unwrap();
+        assert_eq!(overlay.main_class, "net.minecraft.launchwrapper.Launch");
+        assert!(ip.is_some());
+        let extracted_universal = libs_dir
+            .join("net/minecraftforge/forge/1.12.2-14.23.5.2860/forge-1.12.2-14.23.5.2860.jar");
+        assert_eq!(
+            std::fs::read(&extracted_universal).unwrap(),
+            b"universal-jar-bytes"
+        );
+
+        // Test pre-1.7.3 map_to_resources & virtual asset materialization
+        let assets_dir = tmp.join("assets");
+        let hash = "abcdef1234567890abcdef1234567890abcdef12";
+        let obj_path = assets_dir.join("objects").join("ab").join(hash);
+        std::fs::create_dir_all(obj_path.parent().unwrap()).unwrap();
+        std::fs::write(&obj_path, b"ogg-sound").unwrap();
+
+        let mut objects = HashMap::new();
+        objects.insert(
+            "sound/step/grass1.ogg".to_string(),
+            AssetObject {
+                hash: hash.to_string(),
+                size: 9,
+            },
+        );
+        let idx = AssetIndex {
+            objects,
+            is_virtual: false,
+            map_to_resources: true,
+        };
+        let inst_dir = tmp.join("instance");
+        let ga = materialize_legacy_assets(&assets_dir, "pre-1.6", &idx, Some(&inst_dir)).unwrap();
+        assert_eq!(ga, assets_dir.join("virtual").join("pre-1.6"));
+        assert_eq!(
+            std::fs::read(inst_dir.join("resources/sound/step/grass1.ogg")).unwrap(),
+            b"ogg-sound"
+        );
+
+        // Test Mojang feature-gated rules
+        let mut feat_map = HashMap::new();
+        feat_map.insert("has_custom_resolution".to_string(), true);
+        let rules = vec![Rule {
+            action: "allow".to_string(),
+            os: None,
+            features: Some(feat_map),
+        }];
+        assert!(!rules_allow_with_features(Some(&rules), &RuleFeatures::default()));
+        assert!(rules_allow_with_features(
+            Some(&rules),
+            &RuleFeatures {
+                has_custom_resolution: true,
+                ..RuleFeatures::default()
+            }
+        ));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 

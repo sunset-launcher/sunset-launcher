@@ -18,6 +18,7 @@ pub enum Icon {
     Check,      // Checkmark
     Folder,     // Folder
     ChevronLeft,
+    #[allow(dead_code)]
     ChevronRight,
     Download,   // Download arrow
     Refresh,    // Reload / Rescan
@@ -29,6 +30,7 @@ pub enum Icon {
     Sparkle,    // Modrinth / Featured
     List,       // List view toggle
     Star,       // Pin / Favorite
+    Server,     // Dedicated servers
 }
 
 /// Draws a crisp vector icon centered inside `rect` with `color`.
@@ -405,6 +407,20 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
                 painter.line_segment([pts[i], pts[(i + 1) % 10]], st);
             }
         }
+        Icon::Server => {
+            let w = u * 1.44;
+            let h = u * 0.54;
+            let r = Rounding::same((s * 0.12).max(1.5));
+            for dy in [-u * 0.36, u * 0.36] {
+                let box_rect = Rect::from_center_size(Pos2::new(c.x, c.y + dy), Vec2::new(w, h));
+                painter.rect_stroke(box_rect, r, st);
+                painter.circle_filled(
+                    Pos2::new(box_rect.left() + h * 0.5, box_rect.center().y),
+                    (stroke_w * 0.75).max(1.2),
+                    color,
+                );
+            }
+        }
     }
 }
 
@@ -463,6 +479,234 @@ pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
     painter.line_segment([top, tr], rim);
     painter.line_segment([tl, c], rim);
     painter.line_segment([tr, c], rim);
+}
+
+#[inline]
+fn rot_pos(p: Pos2, center: Pos2, sin_a: f32, cos_a: f32) -> Pos2 {
+    let dx = p.x - center.x;
+    let dy = p.y - center.y;
+    Pos2::new(
+        center.x + dx * cos_a - dy * sin_a,
+        center.y + dx * sin_a + dy * cos_a,
+    )
+}
+
+/// Progressively strokes in a crisp checkmark from `progress = 0.0..=1.0`.
+pub fn draw_check_animated(painter: &egui::Painter, rect: Rect, color: Color32, progress: f32) {
+    let p = progress.clamp(0.0, 1.0);
+    if p <= 0.01 {
+        return;
+    }
+    let c = rect.center();
+    let s = rect.width().min(rect.height());
+    let u = s * 0.5;
+    let stroke_w = (s * 0.14).clamp(1.3, 2.3);
+    let st = Stroke::new(stroke_w, color);
+
+    let p1 = Pos2::new(c.x - u * 0.52, c.y + u * 0.04);
+    let p2 = Pos2::new(c.x - u * 0.12, c.y + u * 0.44);
+    let p3 = Pos2::new(c.x + u * 0.58, c.y - u * 0.36);
+
+    let seg1 = (p / 0.42).clamp(0.0, 1.0);
+    let mid = Pos2::new(p1.x + (p2.x - p1.x) * seg1, p1.y + (p2.y - p1.y) * seg1);
+    painter.line_segment([p1, mid], st);
+
+    if p > 0.42 {
+        let seg2 = ((p - 0.42) / 0.58).clamp(0.0, 1.0);
+        let tip = Pos2::new(p2.x + (p3.x - p2.x) * seg2, p2.y + (p3.y - p2.y) * seg2);
+        painter.line_segment([p2, tip], st);
+    }
+}
+
+/// Draws a crisp vector icon with offset, scale, and rotation animation transforms.
+pub fn draw_icon_animated(
+    painter: &egui::Painter,
+    rect: Rect,
+    icon: Icon,
+    color: Color32,
+    anim: crate::ui::anim::IconAnim,
+) {
+    let anim_rect = Rect::from_center_size(rect.center() + anim.offset, rect.size() * anim.scale);
+    if anim.rotation.abs() < 0.002 {
+        draw_icon(painter, anim_rect, icon, color);
+        return;
+    }
+
+    let c = anim_rect.center();
+    let s = anim_rect.width().min(anim_rect.height());
+    let u = s * 0.5;
+    let stroke_w = (s * 0.11).clamp(1.25, 2.2);
+    let st = Stroke::new(stroke_w, color);
+    let (sin_a, cos_a) = anim.rotation.sin_cos();
+
+    match icon {
+        Icon::Refresh => {
+            let rad = u * 0.58;
+            let segments = 14;
+            let start_ang = -0.35_f32 + anim.rotation;
+            let end_ang = std::f32::consts::TAU - 1.15 + anim.rotation;
+            let mut prev = Pos2::new(c.x + start_ang.cos() * rad, c.y + start_ang.sin() * rad);
+            for i in 1..=segments {
+                let t = i as f32 / segments as f32;
+                let a = start_ang + (end_ang - start_ang) * t;
+                let next = Pos2::new(c.x + a.cos() * rad, c.y + a.sin() * rad);
+                painter.line_segment([prev, next], st);
+                prev = next;
+            }
+            let tip = Pos2::new(c.x + start_ang.cos() * rad, c.y + start_ang.sin() * rad);
+            let wing_a = rot_pos(
+                Pos2::new(c.x + (-0.35_f32).cos() * rad - u * 0.30, c.y + (-0.35_f32).sin() * rad - u * 0.08),
+                c,
+                sin_a,
+                cos_a,
+            );
+            let wing_b = rot_pos(
+                Pos2::new(c.x + (-0.35_f32).cos() * rad + u * 0.04, c.y + (-0.35_f32).sin() * rad - u * 0.32),
+                c,
+                sin_a,
+                cos_a,
+            );
+            painter.line_segment([tip, wing_a], st);
+            painter.line_segment([tip, wing_b], st);
+        }
+        Icon::Plus => {
+            let r = u * 0.58;
+            let h0 = rot_pos(Pos2::new(c.x - r, c.y), c, sin_a, cos_a);
+            let h1 = rot_pos(Pos2::new(c.x + r, c.y), c, sin_a, cos_a);
+            let v0 = rot_pos(Pos2::new(c.x, c.y - r), c, sin_a, cos_a);
+            let v1 = rot_pos(Pos2::new(c.x, c.y + r), c, sin_a, cos_a);
+            painter.line_segment([h0, h1], st);
+            painter.line_segment([v0, v1], st);
+        }
+        Icon::Close => {
+            let r = u * 0.48;
+            let a0 = rot_pos(Pos2::new(c.x - r, c.y - r), c, sin_a, cos_a);
+            let a1 = rot_pos(Pos2::new(c.x + r, c.y + r), c, sin_a, cos_a);
+            let b0 = rot_pos(Pos2::new(c.x + r, c.y - r), c, sin_a, cos_a);
+            let b1 = rot_pos(Pos2::new(c.x - r, c.y + r), c, sin_a, cos_a);
+            painter.line_segment([a0, a1], st);
+            painter.line_segment([b0, b1], st);
+        }
+        Icon::Star => {
+            let outer = u * 0.72;
+            let inner = u * 0.32;
+            let mut pts = Vec::with_capacity(10);
+            for i in 0..10 {
+                let angle = -std::f32::consts::FRAC_PI_2
+                    + i as f32 * (std::f32::consts::PI / 5.0)
+                    + anim.rotation;
+                let rad = if i % 2 == 0 { outer } else { inner };
+                pts.push(Pos2::new(c.x + angle.cos() * rad, c.y + angle.sin() * rad));
+            }
+            for i in 0..10 {
+                painter.line_segment([pts[i], pts[(i + 1) % 10]], st);
+            }
+        }
+        Icon::Sparkle => {
+            let r = u * 0.72;
+            let inner = u * 0.22;
+            let base = [
+                Pos2::new(c.x, c.y - r),
+                Pos2::new(c.x + inner, c.y - inner),
+                Pos2::new(c.x + r, c.y),
+                Pos2::new(c.x + inner, c.y + inner),
+                Pos2::new(c.x, c.y + r),
+                Pos2::new(c.x - inner, c.y + inner),
+                Pos2::new(c.x - r, c.y),
+                Pos2::new(c.x - inner, c.y - inner),
+            ];
+            let pts: Vec<Pos2> = base.into_iter().map(|p| rot_pos(p, c, sin_a, cos_a)).collect();
+            for i in 0..8 {
+                painter.line_segment([pts[i], pts[(i + 1) % 8]], st);
+            }
+        }
+        Icon::Compass => {
+            let rad = u * 0.78;
+            painter.circle_stroke(c, rad, st);
+            let n = u * 0.42;
+            let w = u * 0.18;
+            let needle = vec![
+                rot_pos(Pos2::new(c.x + n * 0.7, c.y - n * 0.7), c, sin_a, cos_a),
+                rot_pos(Pos2::new(c.x + w * 0.7, c.y + w * 0.7), c, sin_a, cos_a),
+                rot_pos(Pos2::new(c.x - n * 0.7, c.y + n * 0.7), c, sin_a, cos_a),
+                rot_pos(Pos2::new(c.x - w * 0.7, c.y - w * 0.7), c, sin_a, cos_a),
+            ];
+            painter.add(egui::Shape::convex_polygon(needle, color, Stroke::NONE));
+        }
+        Icon::Trash => {
+            let top_y = c.y - u * 0.42;
+            let bot_y = c.y + u * 0.62;
+            let w = u * 0.52;
+            let r_pt = |p: Pos2| rot_pos(p, c, sin_a, cos_a);
+            painter.line_segment(
+                [r_pt(Pos2::new(c.x - w * 1.2, top_y)), r_pt(Pos2::new(c.x + w * 1.2, top_y))],
+                st,
+            );
+            painter.line_segment(
+                [
+                    r_pt(Pos2::new(c.x - w * 0.4, top_y - u * 0.20)),
+                    r_pt(Pos2::new(c.x + w * 0.4, top_y - u * 0.20)),
+                ],
+                st,
+            );
+            let tl = r_pt(Pos2::new(c.x - w * 0.9, top_y));
+            let tr = r_pt(Pos2::new(c.x + w * 0.9, top_y));
+            let br = r_pt(Pos2::new(c.x + w * 0.9, bot_y));
+            let bl = r_pt(Pos2::new(c.x - w * 0.9, bot_y));
+            for pair in [[tl, tr], [tr, br], [br, bl], [bl, tl]] {
+                painter.line_segment(pair, st);
+            }
+            painter.line_segment(
+                [
+                    r_pt(Pos2::new(c.x - w * 0.32, top_y + u * 0.24)),
+                    r_pt(Pos2::new(c.x - w * 0.32, bot_y - u * 0.18)),
+                ],
+                st,
+            );
+            painter.line_segment(
+                [
+                    r_pt(Pos2::new(c.x + w * 0.32, top_y + u * 0.24)),
+                    r_pt(Pos2::new(c.x + w * 0.32, bot_y - u * 0.18)),
+                ],
+                st,
+            );
+        }
+        _ => draw_icon(painter, anim_rect, icon, color),
+    }
+}
+
+/// Draws the Sunset emblem with hover halo and click pop/burst ring.
+#[allow(dead_code)]
+pub fn draw_brand_logo_animated(
+    painter: &egui::Painter,
+    rect: Rect,
+    hover_t: f32,
+    click_t: Option<f32>,
+) {
+    let pop = click_t.map_or(0.0, |t| (t * std::f32::consts::PI).sin());
+    let s = rect.width().min(rect.height());
+    let draw_rect = Rect::from_center_size(rect.center(), rect.size() * (1.0 + hover_t * 0.04 + pop * 0.08));
+    if hover_t > 0.02 {
+        let halo_a = (hover_t * 48.0).round() as u8;
+        painter.rect_filled(
+            draw_rect.expand(2.0 + hover_t * 2.5),
+            Rounding::same((s * 0.32).clamp(8.0, 15.0)),
+            Color32::from_rgba_unmultiplied(255, 165, 84, halo_a),
+        );
+    }
+    draw_brand_logo(painter, draw_rect);
+    if let Some(t) = click_t {
+        let inv = 1.0 - t.clamp(0.0, 1.0);
+        let expand = crate::ui::anim::ease_out_quint(t) * 6.0;
+        let ring_a = (inv * inv * 180.0).round() as u8;
+        if ring_a > 1 {
+            painter.rect_stroke(
+                draw_rect.expand(expand),
+                Rounding::same((s * 0.28 + expand * 0.4).clamp(7.0, 16.0)),
+                Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(255, 198, 92, ring_a)),
+            );
+        }
+    }
 }
 
 /// Decodes `logo.png` into a 64x64 RGBA `egui::IconData` for the OS window/taskbar.

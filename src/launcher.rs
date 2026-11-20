@@ -1,7 +1,11 @@
 use crate::models::{
-    Account, AccountKind, GameHandle, JavaInstall, LauncherPaths, Profile, Rule, WorkerEvent,
+    Account, AccountKind, AssetIndex, GameHandle, JavaInstall, LauncherPaths, Profile, Rule,
+    WorkerEvent,
 };
-use crate::mojang::{rules_allow, PreparedLaunch};
+use crate::mojang::{
+    check_not_cancelled, is_download_cancelled, rules_allow_with_features,
+    sync_mapped_assets_to_dir, PreparedLaunch, RuleFeatures, CANCELLED_ERR_MSG,
+};
 use crate::storage::instance_dir;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -24,6 +28,49 @@ pub(crate) fn configure_background_command(cmd: &mut Command) {
     }
     #[cfg(not(windows))]
     let _ = cmd;
+}
+
+/// Splits a JVM argument string into tokens while respecting `'...'` and `"..."` quotes
+/// (including inline flags like `-XX:HeapDumpPath="C:\My Games\dump.hprof"`), preserving
+/// Windows backslashes unless escaping a quote (`\"`).
+pub fn split_jvm_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let mut quote: Option<char> = None;
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' && q == '"' && chars.peek() == Some(&'"') {
+                    current.push(chars.next().unwrap());
+                } else if c == q {
+                    quote = None;
+                } else {
+                    current.push(c);
+                }
+            }
+            None => {
+                if c.is_whitespace() {
+                    if in_token {
+                        args.push(std::mem::take(&mut current));
+                        in_token = false;
+                    }
+                } else if c == '"' || c == '\'' {
+                    quote = Some(c);
+                    in_token = true;
+                } else {
+                    current.push(c);
+                    in_token = true;
+                }
+            }
+        }
+    }
+    if in_token {
+        args.push(current);
+    }
+    args
 }
 
 /// Computes Minecraft's standard offline-mode UUID v3 (`OfflinePlayer:<username>`).
@@ -365,6 +412,11 @@ fn download_adoptium_jre(
         let mut downloaded: u64 = 0;
         let mut last_pct: u32 = 0;
         loop {
+            if is_download_cancelled() {
+                drop(out);
+                let _ = std::fs::remove_file(&archive_part);
+                return Err(CANCELLED_ERR_MSG.to_string());
+            }
             let n = resp
                 .read(&mut buf)
                 .map_err(|e| format!("Error reading Java {major} download stream: {e}"))?;
@@ -515,6 +567,7 @@ pub fn ensure_java_runtime(
         }
         match download_adoptium_jre(paths, req, tx) {
             Ok(bin) => return Ok(bin),
+            Err(dl_err) if dl_err == CANCELLED_ERR_MSG => return Err(dl_err),
             Err(dl_err) => {
                 // Offline/fallback: try a newer installed Java if one exists.
                 if let Ok(bin) = resolve_java_binary(profile, Some(req)) {
@@ -587,6 +640,7 @@ fn replace_placeholders(arg: &str, vars: &HashMap<&str, String>) -> String {
 fn collect_arg_values(
     entries: &[serde_json::Value],
     vars: &HashMap<&str, String>,
+    features: &RuleFeatures,
     out: &mut Vec<String>,
 ) {
     for entry in entries {
@@ -598,7 +652,7 @@ fn collect_arg_values(
                 let allowed = obj
                     .get("rules")
                     .and_then(|r| serde_json::from_value::<Vec<Rule>>(r.clone()).ok())
-                    .map_or(true, |rules| rules_allow(Some(&rules)));
+                    .map_or(true, |rules| rules_allow_with_features(Some(&rules), features));
                 if !allowed {
                     continue;
                 }
@@ -628,6 +682,7 @@ pub fn launch_game(
     quick_world: Option<&str>,
     tx: Sender<WorkerEvent>,
 ) -> Result<GameHandle, String> {
+    check_not_cancelled()?;
     let required_java = prepared
         .version_details
         .java_version
@@ -635,6 +690,19 @@ pub fn launch_game(
         .map(|j| j.major_version);
     let java_bin = ensure_java_runtime(paths, profile, required_java, Some(&tx))?;
     let game_dir = instance_dir(paths, profile);
+
+    // Sync pre-1.6 `map_to_resources` assets into `<instance>/resources/` when applicable.
+    if let Some(ref idx_path) = prepared.map_to_resources_index {
+        if let Ok(raw) = std::fs::read_to_string(idx_path) {
+            if let Ok(asset_idx) = serde_json::from_str::<AssetIndex>(&raw) {
+                let _ = sync_mapped_assets_to_dir(
+                    &paths.assets_dir.join("objects"),
+                    &asset_idx,
+                    &game_dir.join("resources"),
+                );
+            }
+        }
+    }
 
     let sep = if cfg!(windows) { ";" } else { ":" };
     let classpath_str = prepared
@@ -674,13 +742,41 @@ pub fn launch_game(
         .clone()
         .unwrap_or_else(|| "release".to_string());
     let assets_root = paths.assets_dir.to_string_lossy().to_string();
+    let game_assets = prepared.game_assets_dir.to_string_lossy().to_string();
+
+    let custom_res = match (
+        profile.window_width.filter(|&w| w >= 320),
+        profile.window_height.filter(|&h| h >= 240),
+    ) {
+        (Some(w), Some(h)) => Some((w, h)),
+        _ => None,
+    };
+    let single_world = quick_world
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string);
+    let multi_server = if single_world.is_none() {
+        let addr = profile.server_address.trim();
+        (!addr.is_empty()).then(|| addr.to_string())
+    } else {
+        None
+    };
+
+    let features = RuleFeatures {
+        is_demo_user: false,
+        has_custom_resolution: custom_res.is_some(),
+        has_quick_plays_support: false,
+        is_quick_play_singleplayer: single_world.is_some(),
+        is_quick_play_multiplayer: multi_server.is_some(),
+        is_quick_play_realms: false,
+    };
 
     let mut vars: HashMap<&str, String> = HashMap::new();
     vars.insert("auth_player_name", username);
     vars.insert("version_name", prepared.version_details.id.clone());
     vars.insert("game_directory", game_dir.to_string_lossy().to_string());
-    vars.insert("assets_root", assets_root.clone());
-    vars.insert("game_assets", assets_root);
+    vars.insert("assets_root", assets_root);
+    vars.insert("game_assets", game_assets);
     vars.insert("assets_index_name", assets_index_name);
     vars.insert("auth_uuid", uuid);
     vars.insert("auth_session", access_token.clone());
@@ -699,6 +795,16 @@ pub fn launch_game(
     vars.insert("classpath", classpath_str.clone());
     vars.insert("classpath_separator", sep.to_string());
     vars.insert("library_directory", paths.libraries_dir.to_string_lossy().to_string());
+    if let Some((w, h)) = custom_res {
+        vars.insert("resolution_width", w.to_string());
+        vars.insert("resolution_height", h.to_string());
+    }
+    if let Some(ref w) = single_world {
+        vars.insert("quickPlaySingleplayer", w.clone());
+    }
+    if let Some(ref addr) = multi_server {
+        vars.insert("quickPlayMultiplayer", addr.clone());
+    }
 
     let mut cmd_args: Vec<String> = Vec::new();
     let max_ram = profile.max_ram_mb.max(512);
@@ -710,7 +816,22 @@ pub fn launch_game(
         cmd_args.push(format!("-javaagent:{}=ely.by", agent.display()));
     }
 
-    cmd_args.extend(profile.jvm_args.split_whitespace().map(str::to_string));
+    let user_jvm_args = split_jvm_args(&profile.jvm_args);
+    if !user_jvm_args
+        .iter()
+        .any(|a| a.starts_with("-Dlog4j2.formatMsgNoLookups="))
+    {
+        cmd_args.push("-Dlog4j2.formatMsgNoLookups=true".to_string());
+    }
+    if let Some(ref log_arg) = prepared.log_config_arg {
+        if !user_jvm_args
+            .iter()
+            .any(|a| a.starts_with("-Dlog4j.configurationFile="))
+        {
+            cmd_args.push(log_arg.clone());
+        }
+    }
+    cmd_args.extend(user_jvm_args);
 
     // JVM args from Mojang version JSON (or fallback for legacy versions)
     if let Some(jvm_entries) = prepared
@@ -719,7 +840,7 @@ pub fn launch_game(
         .as_ref()
         .and_then(|a| a.jvm.as_ref())
     {
-        collect_arg_values(jvm_entries, &vars, &mut cmd_args);
+        collect_arg_values(jvm_entries, &vars, &features, &mut cmd_args);
     } else {
         cmd_args.push(format!(
             "-Djava.library.path={}",
@@ -735,7 +856,7 @@ pub fn launch_game(
         .and_then(|ov| ov.arguments.as_ref())
         .and_then(|a| a.jvm.as_ref())
     {
-        collect_arg_values(jvm_entries, &vars, &mut cmd_args);
+        collect_arg_values(jvm_entries, &vars, &features, &mut cmd_args);
     }
 
     // Main class (mod loader overrides Vanilla)
@@ -761,7 +882,7 @@ pub fn launch_game(
         .as_ref()
         .and_then(|a| a.game.as_ref())
     {
-        collect_arg_values(game_entries, &vars, &mut cmd_args);
+        collect_arg_values(game_entries, &vars, &features, &mut cmd_args);
     } else if let Some(legacy_args) = &prepared.version_details.minecraft_arguments {
         for token in legacy_args.split_whitespace() {
             cmd_args.push(replace_placeholders(token, &vars));
@@ -774,7 +895,7 @@ pub fn launch_game(
         .and_then(|ov| ov.arguments.as_ref())
         .and_then(|a| a.game.as_ref())
     {
-        collect_arg_values(game_entries, &vars, &mut cmd_args);
+        collect_arg_values(game_entries, &vars, &features, &mut cmd_args);
     }
 
     append_profile_launch_args_with_world(profile, quick_world, &mut cmd_args);
@@ -858,24 +979,30 @@ pub fn append_profile_launch_args_with_world(
     quick_world: Option<&str>,
     cmd_args: &mut Vec<String>,
 ) {
-    if profile.fullscreen {
+    if profile.fullscreen && !cmd_args.iter().any(|a| a == "--fullscreen") {
         cmd_args.push("--fullscreen".to_string());
     }
     if let (Some(w), Some(h)) = (
         profile.window_width.filter(|&w| w >= 320),
         profile.window_height.filter(|&h| h >= 240),
     ) {
-        cmd_args.push("--width".to_string());
-        cmd_args.push(w.to_string());
-        cmd_args.push("--height".to_string());
-        cmd_args.push(h.to_string());
+        if !cmd_args.iter().any(|a| a == "--width") {
+            cmd_args.push("--width".to_string());
+            cmd_args.push(w.to_string());
+        }
+        if !cmd_args.iter().any(|a| a == "--height") {
+            cmd_args.push("--height".to_string());
+            cmd_args.push(h.to_string());
+        }
     }
     if let Some(world) = quick_world.map(str::trim).filter(|w| !w.is_empty()) {
-        cmd_args.push("--quickPlaySingleplayer".to_string());
-        cmd_args.push(world.to_string());
+        if !cmd_args.iter().any(|a| a == "--quickPlaySingleplayer") {
+            cmd_args.push("--quickPlaySingleplayer".to_string());
+            cmd_args.push(world.to_string());
+        }
     } else {
         let addr = profile.server_address.trim();
-        if !addr.is_empty() {
+        if !addr.is_empty() && !cmd_args.iter().any(|a| a == "--quickPlayMultiplayer") {
             cmd_args.push("--quickPlayMultiplayer".to_string());
             cmd_args.push(addr.to_string());
         }
@@ -1003,5 +1130,19 @@ mod tests {
         let mut args = Vec::new();
         append_profile_launch_args_with_world(&p, Some("MyWorld"), &mut args);
         assert_eq!(args, vec!["--quickPlaySingleplayer", "MyWorld"]);
+    }
+
+    #[test]
+    fn test_split_jvm_args_preserves_quoted_paths_and_backslashes() {
+        let raw = r#"-XX:+UseG1GC -XX:HeapDumpPath="C:\My Games\dumps\mc.hprof" '-Dfoo.bar=hello world' -Xmx4G"#;
+        assert_eq!(
+            split_jvm_args(raw),
+            vec![
+                "-XX:+UseG1GC",
+                r"-XX:HeapDumpPath=C:\My Games\dumps\mc.hprof",
+                "-Dfoo.bar=hello world",
+                "-Xmx4G",
+            ]
+        );
     }
 }

@@ -1,6 +1,10 @@
 //! Modrinth-inspired Obsidian & Emerald design system, animations, and custom widgets.
 
-use crate::icons::{draw_icon, Icon};
+use crate::ui::anim::{
+    compute_icon_anim, ease_out_back, ease_out_cubic, paint_click_ripple, paint_shimmer_sweep,
+    pulse_01, track_click_anim,
+};
+use crate::icons::{draw_check_animated, draw_icon_animated, Icon};
 use eframe::egui::{
     self, Color32, FontFamily, FontId, Margin, Pos2, Rect, Rounding, Sense, Stroke, TextStyle,
     Vec2,
@@ -8,6 +12,7 @@ use eframe::egui::{
 
 // Dynamic theme palette slots (updated via `set_theme_palette`)
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 const fn pack_rgb(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
@@ -17,8 +22,71 @@ fn unpack_rgb(packed: u32) -> Color32 {
     Color32::from_rgb((packed >> 16) as u8, (packed >> 8) as u8, packed as u8)
 }
 
+fn unpack_rgb_arr(packed: u32) -> [u8; 3] {
+    [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8]
+}
+
 fn store_rgb(slot: &AtomicU32, rgb: [u8; 3]) {
     slot.store(pack_rgb(rgb[0], rgb[1], rgb[2]), Ordering::Relaxed);
+}
+
+fn apply_palette_slots(p: &crate::models::CustomPalette) {
+    store_rgb(&PAL_BG_VOID, p.bg_void);
+    store_rgb(&PAL_BG_SIDEBAR, p.bg_sidebar);
+    store_rgb(&PAL_BG_ELEVATED, p.bg_elevated);
+    store_rgb(&PAL_BG_CARD, p.bg_card);
+    store_rgb(&PAL_BG_CARD_HOVER, p.bg_card_hover);
+    store_rgb(&PAL_BG_INPUT, p.bg_input);
+    store_rgb(&PAL_BORDER_SUBTLE, p.border_subtle);
+    store_rgb(&PAL_BORDER_STRONG, p.border_strong);
+    store_rgb(&PAL_TEXT_PRIMARY, p.text_primary);
+    store_rgb(&PAL_TEXT_SECONDARY, p.text_secondary);
+    store_rgb(&PAL_TEXT_MUTED, p.text_muted);
+    store_rgb(&ACTIVE_ACCENT, p.accent);
+}
+
+fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    let inv = 1.0 - t;
+    [
+        (a[0] as f32 * inv + b[0] as f32 * t).round() as u8,
+        (a[1] as f32 * inv + b[1] as f32 * t).round() as u8,
+        (a[2] as f32 * inv + b[2] as f32 * t).round() as u8,
+    ]
+}
+
+fn lerp_palette(
+    a: &crate::models::CustomPalette,
+    b: &crate::models::CustomPalette,
+    t: f32,
+) -> crate::models::CustomPalette {
+    crate::models::CustomPalette {
+        bg_void: lerp_rgb(a.bg_void, b.bg_void, t),
+        bg_sidebar: lerp_rgb(a.bg_sidebar, b.bg_sidebar, t),
+        bg_elevated: lerp_rgb(a.bg_elevated, b.bg_elevated, t),
+        bg_card: lerp_rgb(a.bg_card, b.bg_card, t),
+        bg_card_hover: lerp_rgb(a.bg_card_hover, b.bg_card_hover, t),
+        bg_input: lerp_rgb(a.bg_input, b.bg_input, t),
+        border_subtle: lerp_rgb(a.border_subtle, b.border_subtle, t),
+        border_strong: lerp_rgb(a.border_strong, b.border_strong, t),
+        text_primary: lerp_rgb(a.text_primary, b.text_primary, t),
+        text_secondary: lerp_rgb(a.text_secondary, b.text_secondary, t),
+        text_muted: lerp_rgb(a.text_muted, b.text_muted, t),
+        accent: lerp_rgb(a.accent, b.accent, t),
+    }
+}
+
+struct PaletteTransition {
+    from: crate::models::CustomPalette,
+    to: crate::models::CustomPalette,
+    start_time: f64,
+    duration: f32,
+}
+
+static PALETTE_TRANSITION: OnceLock<Mutex<Option<PaletteTransition>>> = OnceLock::new();
+
+fn palette_transition_lock() -> &'static Mutex<Option<PaletteTransition>> {
+    PALETTE_TRANSITION.get_or_init(|| Mutex::new(None))
 }
 
 static PAL_BG_VOID: AtomicU32 = AtomicU32::new(pack_rgb(18, 15, 24));
@@ -46,20 +114,73 @@ pub fn text_primary() -> Color32 { unpack_rgb(PAL_TEXT_PRIMARY.load(Ordering::Re
 pub fn text_secondary() -> Color32 { unpack_rgb(PAL_TEXT_SECONDARY.load(Ordering::Relaxed)) }
 pub fn text_muted() -> Color32 { unpack_rgb(PAL_TEXT_MUTED.load(Ordering::Relaxed)) }
 
-/// Updates all 12 theme palette colors at runtime.
+/// Reads the active 12 theme palette colors.
+pub fn current_theme_palette() -> crate::models::CustomPalette {
+    crate::models::CustomPalette {
+        bg_void: unpack_rgb_arr(PAL_BG_VOID.load(Ordering::Relaxed)),
+        bg_sidebar: unpack_rgb_arr(PAL_BG_SIDEBAR.load(Ordering::Relaxed)),
+        bg_elevated: unpack_rgb_arr(PAL_BG_ELEVATED.load(Ordering::Relaxed)),
+        bg_card: unpack_rgb_arr(PAL_BG_CARD.load(Ordering::Relaxed)),
+        bg_card_hover: unpack_rgb_arr(PAL_BG_CARD_HOVER.load(Ordering::Relaxed)),
+        bg_input: unpack_rgb_arr(PAL_BG_INPUT.load(Ordering::Relaxed)),
+        border_subtle: unpack_rgb_arr(PAL_BORDER_SUBTLE.load(Ordering::Relaxed)),
+        border_strong: unpack_rgb_arr(PAL_BORDER_STRONG.load(Ordering::Relaxed)),
+        text_primary: unpack_rgb_arr(PAL_TEXT_PRIMARY.load(Ordering::Relaxed)),
+        text_secondary: unpack_rgb_arr(PAL_TEXT_SECONDARY.load(Ordering::Relaxed)),
+        text_muted: unpack_rgb_arr(PAL_TEXT_MUTED.load(Ordering::Relaxed)),
+        accent: unpack_rgb_arr(ACTIVE_ACCENT.load(Ordering::Relaxed)),
+    }
+}
+
+/// Updates all 12 theme palette colors at runtime immediately (clearing any in-flight fade).
 pub fn set_theme_palette(p: &crate::models::CustomPalette) {
-    store_rgb(&PAL_BG_VOID, p.bg_void);
-    store_rgb(&PAL_BG_SIDEBAR, p.bg_sidebar);
-    store_rgb(&PAL_BG_ELEVATED, p.bg_elevated);
-    store_rgb(&PAL_BG_CARD, p.bg_card);
-    store_rgb(&PAL_BG_CARD_HOVER, p.bg_card_hover);
-    store_rgb(&PAL_BG_INPUT, p.bg_input);
-    store_rgb(&PAL_BORDER_SUBTLE, p.border_subtle);
-    store_rgb(&PAL_BORDER_STRONG, p.border_strong);
-    store_rgb(&PAL_TEXT_PRIMARY, p.text_primary);
-    store_rgb(&PAL_TEXT_SECONDARY, p.text_secondary);
-    store_rgb(&PAL_TEXT_MUTED, p.text_muted);
-    store_rgb(&ACTIVE_ACCENT, p.accent);
+    if let Ok(mut guard) = palette_transition_lock().lock() {
+        *guard = None;
+    }
+    apply_palette_slots(p);
+}
+
+/// Starts a smooth 0.28s crossfade from the current palette to `target`.
+pub fn transition_theme_palette(ctx: &egui::Context, target: &crate::models::CustomPalette) {
+    let from = current_theme_palette();
+    let now = ctx.input(|i| i.time);
+    if let Ok(mut guard) = palette_transition_lock().lock() {
+        *guard = Some(PaletteTransition {
+            from,
+            to: *target,
+            start_time: now,
+            duration: 0.28,
+        });
+    }
+    ctx.request_repaint();
+}
+
+/// Advances any active theme palette crossfade and reapplies visuals cleanly.
+pub fn tick_theme_transition(ctx: &egui::Context) {
+    let snapshot = if let Ok(mut guard) = palette_transition_lock().lock() {
+        let Some(tr) = guard.as_ref() else {
+            return;
+        };
+        let now = ctx.input(|i| i.time);
+        let raw = ((now - tr.start_time) as f32 / tr.duration.max(0.01)).clamp(0.0, 1.0);
+        let eased = ease_out_cubic(raw);
+        let blended = lerp_palette(&tr.from, &tr.to, eased);
+        let done = raw >= 1.0;
+        if done {
+            *guard = None;
+        }
+        Some((blended, !done))
+    } else {
+        None
+    };
+
+    if let Some((blended, still_running)) = snapshot {
+        apply_palette_slots(&blended);
+        apply_modrinth_theme(ctx);
+        if still_running {
+            ctx.request_repaint();
+        }
+    }
 }
 
 pub fn is_light_theme() -> bool {
@@ -128,6 +249,7 @@ pub fn with_alpha(col: Color32, alpha: u8) -> Color32 {
 /// Applies the Obsidian & Emerald theme globally to `egui::Context`.
 pub fn apply_modrinth_theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
+    style.animation_time = 0.14;
 
     style.spacing.item_spacing = Vec2::new(8.0, 7.0);
     style.spacing.button_padding = Vec2::new(11.0, 6.0);
@@ -318,6 +440,7 @@ fn render_button_impl(
         .unwrap_or_else(|| (content_w + pad_x * 2.0).max(height));
     let desired = Vec2::new(desired_w, height);
 
+    let btn_id = ui.make_persistent_id(("btn_base", &id));
     let (rect, resp) = ui.allocate_exact_size(
         desired,
         if enabled { Sense::click() } else { Sense::hover() },
@@ -335,9 +458,31 @@ fn render_button_impl(
     if (hover_t > 0.01 && hover_t < 0.99) || (press_t > 0.01 && press_t < 0.99) {
         ui.ctx().request_repaint();
     }
+    let click_info = track_click_anim(
+        ui.ctx(),
+        btn_id,
+        rect,
+        enabled && resp.clicked(),
+        resp.interact_pointer_pos(),
+        0.42,
+    );
+    let click_t = click_info.map(|(t, _)| t);
+
+    let copy_morph_t = if icon == Some(Icon::Copy) {
+        crate::ui::anim::click_age_secs(ui.ctx(), btn_id).and_then(|age| {
+            if age < 0.75 {
+                ui.ctx().request_repaint();
+                Some(age)
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
 
     if ui.is_rect_visible(rect) {
-        let (base_bg, hover_bg, base_border, hover_border, base_fg, hover_fg, glow_col) =
+        let (base_bg, hover_bg, base_border, hover_border, base_fg, hover_fg) =
             if !enabled {
                 let dis_bg = lerp_color(bg_void(), bg_card(), 0.45);
                 (
@@ -347,7 +492,6 @@ fn render_button_impl(
                     border_subtle(),
                     text_muted(),
                     text_muted(),
-                    Color32::TRANSPARENT,
                 )
             } else {
                 match variant {
@@ -358,7 +502,6 @@ fn render_button_impl(
                         accent_hover(),
                         accent_dark(),
                         accent_dark(),
-                        accent(),
                     ),
                     ButtonVariant::Secondary => (
                         bg_card(),
@@ -367,7 +510,6 @@ fn render_button_impl(
                         border_strong(),
                         text_primary(),
                         text_primary(),
-                        border_strong(),
                     ),
                     ButtonVariant::Subtle => (
                         bg_elevated(),
@@ -376,7 +518,6 @@ fn render_button_impl(
                         border_strong(),
                         text_secondary(),
                         text_primary(),
-                        border_subtle(),
                     ),
                     ButtonVariant::Danger => {
                         if is_light_theme() {
@@ -387,7 +528,6 @@ fn render_button_impl(
                                 DANGER_HOVER,
                                 Color32::from_rgb(178, 30, 38),
                                 PURE_WHITE,
-                                DANGER,
                             )
                         } else {
                             (
@@ -397,7 +537,6 @@ fn render_button_impl(
                                 DANGER_HOVER,
                                 Color32::from_rgb(248, 136, 140),
                                 PURE_WHITE,
-                                DANGER,
                             )
                         }
                     }
@@ -407,24 +546,32 @@ fn render_button_impl(
         let bg = lerp_color(base_bg, hover_bg, hover_t);
         let border = lerp_color(base_border, hover_border, hover_t);
         let fg = lerp_color(base_fg, hover_fg, hover_t);
-        let draw_rect = rect.shrink(press_t * 1.0);
+        let release_pop = click_t.map_or(0.0, |t| ((1.0 - t) * std::f32::consts::PI).sin().max(0.0) * 0.55);
+        let draw_rect = rect.shrink(press_t * 1.1).expand(release_pop);
         let rounding = Rounding::same(7.5);
         let painter = ui.painter();
 
-        if hover_t > 0.02 && matches!(variant, ButtonVariant::Primary | ButtonVariant::Danger) {
-            painter.rect_stroke(
-                draw_rect.expand(1.5 * hover_t),
-                Rounding::same(9.0),
-                Stroke::new(1.3_f32, with_alpha(glow_col, (hover_t * 72.0) as u8)),
+        painter.rect_filled(draw_rect, rounding, bg);
+        if enabled && hover_t > 0.01 && hover_t < 0.99 {
+            let max_a = match variant {
+                ButtonVariant::Primary => 42.0,
+                _ => 22.0,
+            };
+            let sheen_alpha = ((hover_t * std::f32::consts::PI).sin() * max_a).round() as u8;
+            paint_shimmer_sweep(
+                painter,
+                draw_rect,
+                rounding,
+                hover_t,
+                PURE_WHITE,
+                sheen_alpha,
             );
         }
-
-        painter.rect_filled(draw_rect, rounding, bg);
         if enabled && draw_rect.width() > 14.0 {
             let bevel_alpha = match variant {
-                ButtonVariant::Primary => 72,
-                ButtonVariant::Secondary | ButtonVariant::Subtle => (18.0 + hover_t * 24.0) as u8,
-                ButtonVariant::Danger => (20.0 + hover_t * 36.0) as u8,
+                ButtonVariant::Primary => (72.0 + hover_t * 36.0) as u8,
+                ButtonVariant::Secondary | ButtonVariant::Subtle => (18.0 + hover_t * 28.0) as u8,
+                ButtonVariant::Danger => (20.0 + hover_t * 40.0) as u8,
             };
             painter.line_segment(
                 [
@@ -436,6 +583,15 @@ fn render_button_impl(
         }
         painter.rect_stroke(draw_rect, rounding, Stroke::new(1.0_f32, border));
 
+        if let Some((ct, origin)) = click_info {
+            let ripple_col = match variant {
+                ButtonVariant::Primary => accent_dark(),
+                ButtonVariant::Danger => PURE_WHITE,
+                ButtonVariant::Secondary | ButtonVariant::Subtle => accent(),
+            };
+            paint_click_ripple(painter, draw_rect, rounding, origin, ct, ripple_col, true);
+        }
+
         let clipped = painter.with_clip_rect(draw_rect.shrink(3.0));
         let mut cur_x = draw_rect.center().x - content_w * 0.5;
         if let Some(ic) = icon {
@@ -443,7 +599,17 @@ fn render_button_impl(
                 Pos2::new(cur_x + icon_sz * 0.5, draw_rect.center().y),
                 Vec2::splat(icon_sz),
             );
-            draw_icon(&clipped, icon_rect, ic, fg);
+            if let Some(age) = copy_morph_t {
+                let draw_p = (age / 0.22).clamp(0.0, 1.0);
+                let check_col = match variant {
+                    ButtonVariant::Primary | ButtonVariant::Danger => fg,
+                    _ => accent(),
+                };
+                draw_check_animated(&clipped, icon_rect, check_col, draw_p);
+            } else {
+                let ic_anim = compute_icon_anim(ic, hover_t, press_t, click_t);
+                draw_icon_animated(&clipped, icon_rect, ic, fg, ic_anim);
+            }
             cur_x += icon_sz + gap;
         }
         if let Some(g) = galley {
@@ -548,6 +714,24 @@ pub fn ui_wrap_row<R>(
     )
 }
 
+/// Multi-line wrapping horizontal row where controls align vertically on each line
+/// and wrap cleanly onto subsequent lines within `ui.available_width()` without
+/// stretching surrounding cards or clipping buttons.
+pub fn ui_flow_row<R>(
+    ui: &mut egui::Ui,
+    row_h: f32,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let avail_w = ui.available_width().max(60.0);
+    ui.scope(|ui| {
+        ui.set_max_width(avail_w);
+        ui.spacing_mut().interact_size.y = row_h;
+        ui.spacing_mut().button_padding = Vec2::new(10.0, ((row_h - 15.0) * 0.5).max(2.0));
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+        ui.horizontal_wrapped(add_contents).inner
+    })
+}
+
 /// Renders a filter/option pill tab with optional vector icon and animated bottom emerald bar.
 pub fn ui_pill_tab_icon(
     ui: &mut egui::Ui,
@@ -565,6 +749,7 @@ pub fn ui_pill_tab_icon(
     let content_w = (if icon.is_some() { icon_sz } else { 0.0 }) + gap + galley.size().x;
     let row_h = ui.spacing().interact_size.y.max(28.0);
     let desired = Vec2::new((content_w + 22.0).max(46.0), row_h);
+    let pill_id = ui.make_persistent_id(("pill_tab_base", &id));
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
 
     let active_t = ui
@@ -586,6 +771,15 @@ pub fn ui_pill_tab_icon(
     {
         ui.ctx().request_repaint();
     }
+    let click_info = track_click_anim(
+        ui.ctx(),
+        pill_id,
+        rect,
+        resp.clicked(),
+        resp.interact_pointer_pos(),
+        0.38,
+    );
+    let click_t = click_info.map(|(t, _)| t);
 
     if ui.is_rect_visible(rect) {
         let draw_rect = rect.shrink(press_t * 0.9);
@@ -605,21 +799,35 @@ pub fn ui_pill_tab_icon(
         painter.rect_filled(draw_rect, Rounding::same(7.5), bg);
         painter.rect_stroke(draw_rect, Rounding::same(7.5), Stroke::new(1.0_f32, border));
 
+        if let Some((ct, origin)) = click_info {
+            paint_click_ripple(
+                painter,
+                draw_rect,
+                Rounding::same(7.5),
+                origin,
+                ct,
+                accent(),
+                true,
+            );
+        }
+
         if active_t > 0.03 {
-            let bar_w = (draw_rect.width() - 14.0).max(8.0) * active_t;
+            let spring_w = ease_out_back(active_t).min(1.06);
+            let bar_w = ((draw_rect.width() - 14.0).max(8.0) * spring_w).min(draw_rect.width() - 6.0);
             let bar_rect = Rect::from_center_size(
                 Pos2::new(draw_rect.center().x, draw_rect.bottom() - 2.0),
                 Vec2::new(bar_w, 2.0),
             );
-            painter.rect_filled(bar_rect, Rounding::same(1.0), accent());
+            painter.rect_filled(bar_rect, Rounding::same(1.0), with_alpha(accent(), (active_t * 255.0) as u8));
         }
 
         let mut cur_x = draw_rect.center().x - content_w * 0.5;
-        let cy = draw_rect.center().y - active_t * 0.4;
+        let cy = draw_rect.center().y - active_t * 0.5;
         if let Some(ic) = icon {
             let ic_rect =
                 Rect::from_center_size(Pos2::new(cur_x + icon_sz * 0.5, cy), Vec2::splat(icon_sz));
-            draw_icon(painter, ic_rect, ic, fg);
+            let ic_anim = compute_icon_anim(ic, hover_t.max(active_t * 0.35), press_t, click_t);
+            draw_icon_animated(painter, ic_rect, ic, fg, ic_anim);
             cur_x += icon_sz + gap;
         }
         painter.galley(Pos2::new(cur_x, cy - galley.size().y * 0.5), galley, fg);
@@ -657,6 +865,7 @@ pub fn ui_loader_pill(
     let content_w = dot_sz + gap + galley.size().x;
     let row_h = ui.spacing().interact_size.y.max(28.0);
     let desired = Vec2::new((content_w + 22.0).max(54.0), row_h);
+    let lpill_id = ui.make_persistent_id(("loader_pill_base", &id));
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
 
     let active_t = ui
@@ -667,11 +876,28 @@ pub fn ui_loader_pill(
         resp.hovered(),
         0.11,
     );
-    if (active_t > 0.01 && active_t < 0.99) || (hover_t > 0.01 && hover_t < 0.99) {
+    let press_t = ui.ctx().animate_bool_with_time(
+        ui.make_persistent_id(("loader_pill_prs", &id)),
+        resp.is_pointer_button_down_on(),
+        0.07,
+    );
+    if (active_t > 0.01 && active_t < 0.99)
+        || (hover_t > 0.01 && hover_t < 0.99)
+        || (press_t > 0.01 && press_t < 0.99)
+    {
         ui.ctx().request_repaint();
     }
+    let click_info = track_click_anim(
+        ui.ctx(),
+        lpill_id,
+        rect,
+        resp.clicked(),
+        resp.interact_pointer_pos(),
+        0.38,
+    );
 
     if ui.is_rect_visible(rect) {
+        let draw_rect = rect.shrink(press_t * 0.9);
         let idle_bg = lerp_color(bg_elevated(), bg_card_hover(), hover_t);
         let bg = lerp_color(idle_bg, loader_bg, active_t);
         let border = lerp_color(
@@ -686,21 +912,44 @@ pub fn ui_loader_pill(
         );
         let dot_col = lerp_color(loader_border, loader_fg, active_t * 0.45);
         let painter = ui.painter();
-        painter.rect_filled(rect, Rounding::same(7.5), bg);
-        painter.rect_stroke(rect, Rounding::same(7.5), Stroke::new(1.0_f32, border));
+        painter.rect_filled(draw_rect, Rounding::same(7.5), bg);
+        painter.rect_stroke(draw_rect, Rounding::same(7.5), Stroke::new(1.0_f32, border));
 
-        if active_t > 0.03 {
-            let bar_w = (rect.width() - 14.0).max(8.0) * active_t;
-            let bar_rect = Rect::from_center_size(
-                Pos2::new(rect.center().x, rect.bottom() - 2.0),
-                Vec2::new(bar_w, 2.0),
+        if let Some((ct, origin)) = click_info {
+            paint_click_ripple(
+                painter,
+                draw_rect,
+                Rounding::same(7.5),
+                origin,
+                ct,
+                loader_border,
+                true,
             );
-            painter.rect_filled(bar_rect, Rounding::same(1.0), loader_border);
         }
 
-        let start_x = rect.center().x - content_w * 0.5;
-        let cy = rect.center().y - active_t * 0.4;
-        painter.circle_filled(Pos2::new(start_x + dot_sz * 0.5, cy), 3.2, dot_col);
+        if active_t > 0.03 {
+            let spring_w = ease_out_back(active_t).min(1.06);
+            let bar_w = ((draw_rect.width() - 14.0).max(8.0) * spring_w).min(draw_rect.width() - 6.0);
+            let bar_rect = Rect::from_center_size(
+                Pos2::new(draw_rect.center().x, draw_rect.bottom() - 2.0),
+                Vec2::new(bar_w, 2.0),
+            );
+            painter.rect_filled(bar_rect, Rounding::same(1.0), with_alpha(loader_border, (active_t * 255.0) as u8));
+        }
+
+        let start_x = draw_rect.center().x - content_w * 0.5;
+        let cy = draw_rect.center().y - active_t * 0.5;
+        let dot_c = Pos2::new(start_x + dot_sz * 0.5, cy);
+        if active_t > 0.05 && active_t < 0.95 {
+            let ring_r = 3.5 + (1.0 - active_t) * 5.0;
+            painter.circle_stroke(
+                dot_c,
+                ring_r,
+                Stroke::new(1.1_f32, with_alpha(loader_border, (active_t * (1.0 - active_t) * 600.0) as u8)),
+            );
+        }
+        let dot_pop = click_info.map_or(0.0, |(t, _)| (t * std::f32::consts::PI).sin() * 1.1);
+        painter.circle_filled(dot_c, 3.2 + dot_pop, dot_col);
         painter.galley(
             Pos2::new(start_x + dot_sz + gap, cy - galley.size().y * 0.5),
             galley,
@@ -729,6 +978,7 @@ pub fn ui_checkbox(
     let gap = 7.0;
     let row_h = ui.spacing().interact_size.y.max(26.0);
     let desired = Vec2::new(box_sz + gap + galley.size().x + 4.0, row_h);
+    let chk_id = ui.make_persistent_id(("chk_base", &id_salt));
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
     let mut toggled = false;
     if resp.clicked() {
@@ -739,22 +989,40 @@ pub fn ui_checkbox(
     let check_t = ui.ctx().animate_bool_with_time(
         ui.make_persistent_id(("chk_val", &id_salt)),
         *checked,
-        0.13,
+        0.15,
     );
     let hover_t = ui.ctx().animate_bool_with_time(
         ui.make_persistent_id(("chk_hov", &id_salt)),
         resp.hovered(),
         0.11,
     );
-    if (check_t > 0.01 && check_t < 0.99) || (hover_t > 0.01 && hover_t < 0.99) {
+    let press_t = ui.ctx().animate_bool_with_time(
+        ui.make_persistent_id(("chk_prs", &id_salt)),
+        resp.is_pointer_button_down_on(),
+        0.07,
+    );
+    if (check_t > 0.01 && check_t < 0.99)
+        || (hover_t > 0.01 && hover_t < 0.99)
+        || (press_t > 0.01 && press_t < 0.99)
+    {
         ui.ctx().request_repaint();
     }
+    let click_info = track_click_anim(
+        ui.ctx(),
+        chk_id,
+        rect,
+        toggled,
+        resp.interact_pointer_pos(),
+        0.36,
+    );
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
+        let pop = click_info.map_or(0.0, |(t, _)| (t * std::f32::consts::PI).sin() * 0.14);
+        let box_scale = (1.0 - press_t * 0.08 + pop).max(0.8);
         let box_rect = Rect::from_center_size(
             Pos2::new(rect.left() + box_sz * 0.5 + 1.0, rect.center().y),
-            Vec2::splat(box_sz),
+            Vec2::splat(box_sz * box_scale),
         );
         let fill = lerp_color(
             lerp_color(bg_input(), bg_card_hover(), hover_t * 0.6),
@@ -769,18 +1037,31 @@ pub fn ui_checkbox(
         painter.rect_filled(box_rect, Rounding::same(4.5), fill);
         painter.rect_stroke(box_rect, Rounding::same(4.5), Stroke::new(1.1_f32, border));
 
-        if check_t > 0.08 {
-            draw_icon(
+        if let Some((ct, _)) = click_info {
+            let eased = crate::ui::anim::ease_out_quint(ct);
+            let ring_a = ((1.0 - ct) * (1.0 - ct) * 165.0).round() as u8;
+            if ring_a > 1 {
+                let ring_col = if *checked { accent() } else { border_strong() };
+                painter.rect_stroke(
+                    box_rect.expand(eased * 4.5),
+                    Rounding::same(4.5 + eased * 1.5),
+                    Stroke::new(1.3_f32, with_alpha(ring_col, ring_a)),
+                );
+            }
+        }
+
+        if check_t > 0.04 {
+            draw_check_animated(
                 painter,
                 box_rect.shrink(3.0),
-                Icon::Check,
-                with_alpha(accent_dark(), (check_t * 255.0) as u8),
+                with_alpha(accent_dark(), (check_t.clamp(0.0, 1.0) * 255.0) as u8),
+                ease_out_cubic(check_t),
             );
         }
 
         let text_col = lerp_color(text_secondary(), text_primary(), check_t.max(hover_t * 0.8));
         painter.galley(
-            Pos2::new(box_rect.right() + gap, rect.center().y - galley.size().y * 0.5),
+            Pos2::new(rect.left() + box_sz + 1.0 + gap, rect.center().y - galley.size().y * 0.5),
             galley,
             text_col,
         );
@@ -802,6 +1083,7 @@ pub fn ui_text_input(
     password: bool,
 ) -> egui::Response {
     let focus_state_id = ui.make_persistent_id(("txt_foc_state", &id_salt));
+    let type_pulse_id = ui.make_persistent_id(("txt_type_pulse", &id_salt));
     let prev_focused = ui
         .ctx()
         .data(|d| d.get_temp::<bool>(focus_state_id))
@@ -814,8 +1096,21 @@ pub fn ui_text_input(
     if focus_t > 0.01 && focus_t < 0.99 {
         ui.ctx().request_repaint();
     }
+    let last_type_t = ui.ctx().data(|d| d.get_temp::<f64>(type_pulse_id));
+    let type_age = last_type_t.map(|t| (ui.input(|i| i.time) - t) as f32);
+    let type_pulse = type_age
+        .filter(|&age| (0.0..0.22).contains(&age))
+        .map(|age| {
+            ui.ctx().request_repaint();
+            1.0 - (age / 0.22)
+        })
+        .unwrap_or(0.0);
 
-    let border_col = lerp_color(border_subtle(), accent(), focus_t);
+    let border_col = lerp_color(
+        lerp_color(border_subtle(), accent(), focus_t),
+        accent_hover(),
+        type_pulse * 0.65,
+    );
     let total_w = width.max(80.0);
     let row_h = ui.spacing().interact_size.y.max(28.0);
     let mut now_focused = false;
@@ -829,29 +1124,48 @@ pub fn ui_text_input(
             ui.set_max_size(Vec2::new(total_w, row_h));
             let box_rect = ui.max_rect();
             if ui.is_rect_visible(box_rect) {
-                if focus_t > 0.05 {
-                    ui.painter().rect_stroke(
-                        box_rect.expand(1.4 * focus_t),
+                let painter = ui.painter();
+                if focus_t > 0.03 || type_pulse > 0.02 {
+                    let glow_a = ((focus_t * 55.0) + type_pulse * 75.0).clamp(0.0, 140.0) as u8;
+                    painter.rect_stroke(
+                        box_rect.expand(1.5),
                         Rounding::same(9.0),
-                        Stroke::new(1.0_f32, with_alpha(accent(), (focus_t * 50.0) as u8)),
+                        Stroke::new(1.5_f32, with_alpha(accent(), glow_a)),
                     );
                 }
-                ui.painter().rect(
+                painter.rect(
                     box_rect,
                     Rounding::same(7.5),
                     bg_input(),
-                    Stroke::new(1.0_f32 + focus_t * 0.25, border_col),
+                    Stroke::new(1.0_f32 + focus_t * 0.5, border_col),
                 );
+                if focus_t > 0.04 {
+                    let bar_w = (box_rect.width() - 16.0).max(8.0) * ease_out_cubic(focus_t);
+                    let bar_r = Rect::from_center_size(
+                        Pos2::new(box_rect.center().x, box_rect.bottom() - 1.5),
+                        Vec2::new(bar_w, 1.8),
+                    );
+                    painter.rect_filled(
+                        bar_r,
+                        Rounding::same(0.9),
+                        with_alpha(accent(), (focus_t * 215.0) as u8),
+                    );
+                }
             }
             ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add_space(9.0);
+            ui.add_space(8.0);
             let edit = egui::TextEdit::singleline(text)
                 .id_salt(&id_salt)
                 .frame(false)
                 .password(password)
                 .hint_text(hint)
-                .desired_width((total_w - 18.0).max(50.0));
+                .desired_width((total_w - 16.0).max(50.0));
             let r = ui.add(edit);
+            if r.changed() {
+                let now = ui.input(|i| i.time);
+                ui.ctx().data_mut(|d| d.insert_temp(type_pulse_id, now));
+                ui.ctx().request_repaint();
+            }
             now_focused = r.has_focus() || r.hovered();
             inner_resp = Some(r);
         },
@@ -879,6 +1193,8 @@ pub fn ui_search_input(
     let inner_edit_w = (total_w - if has_clear { 58.0 } else { 36.0 }).max(48.0);
 
     let focus_state_id = ui.make_persistent_id(("search_foc_state", &id_salt));
+    let type_pulse_id = ui.make_persistent_id(("search_type_pulse", &id_salt));
+    let submit_pulse_id = ui.make_persistent_id(("search_submit_pulse", &id_salt));
     let prev_focused = ui
         .ctx()
         .data(|d| d.get_temp::<bool>(focus_state_id))
@@ -892,8 +1208,33 @@ pub fn ui_search_input(
         ui.ctx().request_repaint();
     }
 
-    let border_col = lerp_color(border_subtle(), accent(), focus_t);
-    let icon_col = lerp_color(text_muted(), accent(), focus_t);
+    let now = ui.input(|i| i.time);
+    let type_pulse = ui
+        .ctx()
+        .data(|d| d.get_temp::<f64>(type_pulse_id))
+        .map(|t| (now - t) as f32)
+        .filter(|&age| (0.0..0.22).contains(&age))
+        .map(|age| {
+            ui.ctx().request_repaint();
+            1.0 - age / 0.22
+        })
+        .unwrap_or(0.0);
+    let submit_pulse = ui
+        .ctx()
+        .data(|d| d.get_temp::<f64>(submit_pulse_id))
+        .map(|t| (now - t) as f32)
+        .filter(|&age| (0.0..0.32).contains(&age))
+        .map(|age| {
+            ui.ctx().request_repaint();
+            age / 0.32
+        });
+
+    let border_col = lerp_color(
+        lerp_color(border_subtle(), accent(), focus_t),
+        accent_hover(),
+        type_pulse * 0.65,
+    );
+    let icon_col = lerp_color(text_muted(), accent(), focus_t.max(type_pulse));
     let mut now_focused = false;
 
     ui.allocate_ui_with_layout(
@@ -904,24 +1245,50 @@ pub fn ui_search_input(
             ui.set_max_size(Vec2::new(total_w, row_h));
             let box_rect = ui.max_rect();
             if ui.is_rect_visible(box_rect) {
-                if focus_t > 0.05 {
-                    ui.painter().rect_stroke(
-                        box_rect.expand(1.5 * focus_t),
+                let painter = ui.painter();
+                if focus_t > 0.03 || type_pulse > 0.02 {
+                    let glow_a = ((focus_t * 55.0) + type_pulse * 75.0).clamp(0.0, 140.0) as u8;
+                    painter.rect_stroke(
+                        box_rect.expand(1.5),
                         Rounding::same(9.0),
-                        Stroke::new(1.0_f32, with_alpha(accent(), (focus_t * 58.0) as u8)),
+                        Stroke::new(1.5_f32, with_alpha(accent(), glow_a)),
                     );
                 }
-                ui.painter().rect(
+                painter.rect(
                     box_rect,
                     Rounding::same(7.5),
                     bg_input(),
-                    Stroke::new(1.0_f32 + focus_t * 0.3, border_col),
+                    Stroke::new(1.0_f32 + focus_t * 0.5, border_col),
                 );
+                if focus_t > 0.04 {
+                    let bar_w = (box_rect.width() - 16.0).max(8.0) * ease_out_cubic(focus_t);
+                    let bar_r = Rect::from_center_size(
+                        Pos2::new(box_rect.center().x, box_rect.bottom() - 1.5),
+                        Vec2::new(bar_w, 1.8),
+                    );
+                    painter.rect_filled(
+                        bar_r,
+                        Rounding::same(0.9),
+                        with_alpha(accent(), (focus_t * 215.0) as u8),
+                    );
+                }
+                if let Some(sp) = submit_pulse {
+                    paint_click_ripple(
+                        painter,
+                        box_rect,
+                        Rounding::same(7.5),
+                        box_rect.center(),
+                        sp,
+                        accent(),
+                        true,
+                    );
+                }
             }
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.add_space(2.0);
             let (mag_r, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-            draw_icon(ui.painter(), mag_r, Icon::Search, icon_col);
+            let mag_anim = compute_icon_anim(Icon::Search, focus_t * 0.8 + type_pulse * 0.4, 0.0, submit_pulse);
+            draw_icon_animated(ui.painter(), mag_r, Icon::Search, icon_col, mag_anim);
 
             let edit_resp = ui.add(
                 egui::TextEdit::singleline(text)
@@ -930,25 +1297,39 @@ pub fn ui_search_input(
                     .hint_text(hint)
                     .desired_width(inner_edit_w),
             );
+            if edit_resp.changed() {
+                ui.ctx().data_mut(|d| d.insert_temp(type_pulse_id, now));
+                ui.ctx().request_repaint();
+            }
             now_focused = edit_resp.has_focus() || edit_resp.hovered();
             if edit_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 submitted = true;
+                ui.ctx().data_mut(|d| d.insert_temp(submit_pulse_id, now));
+                ui.ctx().request_repaint();
             }
             if has_clear {
+                let clr_id = ui.make_persistent_id(("search_clr_btn", &id_salt));
                 let (clr_r, clr_resp) =
                     ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
-                let clr_col = if clr_resp.hovered() {
-                    PURE_WHITE
-                } else {
-                    text_secondary()
-                };
-                draw_icon(ui.painter(), clr_r.shrink(2.5), Icon::Close, clr_col);
+                let clr_hov = ui.ctx().animate_bool_with_time(
+                    clr_id.with("hov"),
+                    clr_resp.hovered(),
+                    0.10,
+                );
+                if clr_hov > 0.01 && clr_hov < 0.99 {
+                    ui.ctx().request_repaint();
+                }
+                let clr_col = lerp_color(text_secondary(), PURE_WHITE, clr_hov);
+                let clr_anim = compute_icon_anim(Icon::Close, clr_hov, 0.0, None);
+                draw_icon_animated(ui.painter(), clr_r.shrink(2.5), Icon::Close, clr_col, clr_anim);
                 if clr_resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 if clr_resp.on_hover_text("Clear search").clicked() {
                     text.clear();
                     submitted = true;
+                    ui.ctx().data_mut(|d| d.insert_temp(submit_pulse_id, now));
+                    ui.ctx().request_repaint();
                 }
             }
         },
@@ -968,8 +1349,24 @@ pub enum AlertKind {
     Error,
 }
 
-/// Renders an inline semantic alert banner with a leading vector icon.
+/// Renders an inline semantic alert banner with entrance slide and leading vector icon.
 pub fn ui_alert_banner(ui: &mut egui::Ui, kind: AlertKind, text: &str, width: f32) {
+    let enter_id = ui.make_persistent_id(("alert_banner_enter", kind as u8, text));
+    let now = ui.input(|i| i.time);
+    let enter_start = ui.ctx().data_mut(|d| {
+        if let Some(t0) = d.get_temp::<f64>(enter_id) {
+            t0
+        } else {
+            d.insert_temp(enter_id, now);
+            now
+        }
+    });
+    let enter_raw = ((now - enter_start) as f32 / 0.24).clamp(0.0, 1.0);
+    let enter_eased = ease_out_cubic(enter_raw);
+    if enter_raw < 1.0 {
+        ui.ctx().request_repaint();
+    }
+
     let light = is_light_theme();
     let (bg, border, fg, icon) = match kind {
         AlertKind::Info => (
@@ -998,9 +1395,11 @@ pub fn ui_alert_banner(ui: &mut egui::Ui, kind: AlertKind, text: &str, width: f3
         ),
     };
     let inner_w = (width - 24.0).max(80.0);
-    egui::Frame::none()
-        .fill(bg)
-        .stroke(Stroke::new(1.0_f32, with_alpha(border, 180)))
+    let alpha_scale = (0.35 + enter_eased * 0.65).clamp(0.0, 1.0);
+    let border_alpha = ((180.0 + (1.0 - enter_eased) * 75.0) * alpha_scale) as u8;
+    let frame_resp = egui::Frame::none()
+        .fill(with_alpha(bg, (255.0 * alpha_scale) as u8))
+        .stroke(Stroke::new(1.0_f32 + (1.0 - enter_eased) * 0.8, with_alpha(border, border_alpha)))
         .rounding(Rounding::same(8.5))
         .inner_margin(Margin::symmetric(11.0, 8.0))
         .show(ui, |ui| {
@@ -1009,10 +1408,34 @@ pub fn ui_alert_banner(ui: &mut egui::Ui, kind: AlertKind, text: &str, width: f3
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let (ic_r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                draw_icon(ui.painter(), ic_r, icon, border);
-                ui.add(egui::Label::new(egui::RichText::new(text).small().color(fg)).wrap());
+                let ic_scale = 0.85 + 0.15 * ease_out_back(enter_raw).min(1.15);
+                let slide_y = (1.0 - enter_eased) * -4.0;
+                draw_icon_animated(
+                    ui.painter(),
+                    ic_r,
+                    icon,
+                    with_alpha(border, (255.0 * alpha_scale) as u8),
+                    crate::ui::anim::IconAnim {
+                        offset: Vec2::new(0.0, slide_y),
+                        scale: ic_scale,
+                        rotation: 0.0,
+                    },
+                );
+                ui.add(egui::Label::new(egui::RichText::new(text).small().color(with_alpha(fg, (255.0 * alpha_scale) as u8))).wrap());
             });
         });
+    if enter_raw < 0.99 {
+        let r = frame_resp.response.rect;
+        let pulse_r = Rect::from_min_size(
+            r.min + Vec2::new(3.0, 5.0),
+            Vec2::new(3.0, (r.height() - 10.0).max(6.0)),
+        );
+        ui.painter().rect_filled(
+            pulse_r,
+            Rounding::same(1.5),
+            with_alpha(border, ((1.0 - enter_raw) * 230.0) as u8),
+        );
+    }
 }
 
 /// Draws a section header label with subtle uppercase tracking inside settings/forms.
@@ -1034,6 +1457,19 @@ pub fn animated_card<R>(
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
     let prev_hover = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let prev_sel_id = id.with("prev_sel");
+    let flash_id = id.with("sel_flash_t");
+    let prev_selected = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(prev_sel_id))
+        .unwrap_or(selected);
+    let now = ui.input(|i| i.time);
+    if !prev_selected && selected {
+        ui.ctx().data_mut(|d| d.insert_temp(flash_id, now));
+        ui.ctx().request_repaint();
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(prev_sel_id, selected));
+
     let hover_t = ui.ctx().animate_bool_with_time(id, prev_hover, 0.14);
     let select_t = ui
         .ctx()
@@ -1041,6 +1477,17 @@ pub fn animated_card<R>(
     if (hover_t > 0.01 && hover_t < 0.99) || (select_t > 0.01 && select_t < 0.99) {
         ui.ctx().request_repaint();
     }
+
+    let flash_t = ui
+        .ctx()
+        .data(|d| d.get_temp::<f64>(flash_id))
+        .map(|t0| (now - t0) as f32)
+        .filter(|&age| (0.0..0.36).contains(&age))
+        .map(|age| {
+            ui.ctx().request_repaint();
+            age / 0.36
+        });
+
     let resp = card_frame(selected, hover_t).show(ui, add_contents);
     let rect = resp.response.rect;
     let hovered_now = resp.response.hovered() || ui.rect_contains_pointer(rect);
@@ -1048,17 +1495,17 @@ pub fn animated_card<R>(
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let rim_alpha = (14.0 + hover_t * 24.0 + select_t * 28.0) as u8;
-        if rect.width() > 20.0 {
+        if hover_t > 0.03 && rect.width() > 28.0 {
+            let rim_a = (hover_t * if is_light_theme() { 45.0 } else { 32.0 }) as u8;
             painter.line_segment(
                 [
                     Pos2::new(rect.left() + 10.0, rect.top() + 1.0),
                     Pos2::new(rect.right() - 10.0, rect.top() + 1.0),
                 ],
-                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, rim_alpha)),
+                Stroke::new(1.0_f32, with_alpha(PURE_WHITE, rim_a)),
             );
         }
-        let bar_strength = select_t.max(hover_t * 0.55);
+        let bar_strength = ease_out_cubic(select_t.max(hover_t * 0.55));
         if bar_strength > 0.04 && rect.height() >= 28.0 {
             let max_bar_h = (rect.height() - 14.0).clamp(10.0, 38.0);
             let bar_h = max_bar_h * bar_strength;
@@ -1068,6 +1515,25 @@ pub fn animated_card<R>(
                 Vec2::new(3.0, bar_h),
             );
             painter.rect_filled(bar_rect, Rounding::same(1.5), bar_col);
+        }
+        if let Some(ft) = flash_t {
+            let inv = 1.0 - ft;
+            let flash_a = (inv * inv * 135.0) as u8;
+            if flash_a > 1 {
+                painter.rect_stroke(
+                    rect.expand(ease_out_cubic(ft) * 3.0),
+                    Rounding::same(11.0),
+                    Stroke::new(1.4_f32, with_alpha(accent(), flash_a)),
+                );
+                paint_shimmer_sweep(
+                    painter,
+                    rect,
+                    Rounding::same(10.0),
+                    ft,
+                    accent(),
+                    (inv * 28.0) as u8,
+                );
+            }
         }
     }
     resp
@@ -1101,30 +1567,14 @@ pub fn hero_spotlight_card<R>(
     let hovered_now = resp.response.hovered() || ui.rect_contains_pointer(rect);
     ui.ctx().data_mut(|d| d.insert_temp(id, hovered_now));
 
-    if ui.is_rect_visible(rect) {
+    if ui.is_rect_visible(rect) && rect.height() > 28.0 {
         let painter = ui.painter();
-        painter.rect_stroke(
-            rect.expand(1.5),
-            Rounding::same(13.5),
-            Stroke::new(1.5_f32, with_alpha(loader_accent, 28)),
+        let bar_h = (rect.height() - 22.0).max(16.0);
+        let bar_rect = Rect::from_center_size(
+            Pos2::new(rect.left() + 3.0, rect.center().y),
+            Vec2::new(3.5, bar_h),
         );
-        if rect.width() > 28.0 {
-            painter.line_segment(
-                [
-                    Pos2::new(rect.left() + 14.0, rect.top() + 1.2),
-                    Pos2::new(rect.right() - 14.0, rect.top() + 1.2),
-                ],
-                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 58)),
-            );
-        }
-        if rect.height() > 28.0 {
-            let bar_h = (rect.height() - 22.0).max(16.0);
-            let bar_rect = Rect::from_center_size(
-                Pos2::new(rect.left() + 3.0, rect.center().y),
-                Vec2::new(3.5, bar_h),
-            );
-            painter.rect_filled(bar_rect, Rounding::same(1.75), loader_accent);
-        }
+        painter.rect_filled(bar_rect, Rounding::same(1.75), loader_accent);
     }
     resp
 }
@@ -1134,7 +1584,7 @@ pub fn badge(ui: &mut egui::Ui, text: &str, highlighted: bool) {
     let (fill, border, fg) = if highlighted {
         (accent_dim(), accent(), accent_text())
     } else {
-        (bg_elevated(), border_strong(), text_secondary())
+        (bg_elevated(), border_subtle(), text_secondary())
     };
     egui::Frame::none()
         .fill(fill)
@@ -1157,7 +1607,7 @@ pub fn badge_sized(
     let (fill, border, fg) = if highlighted {
         (accent_dim(), accent(), accent_text())
     } else {
-        (bg_elevated(), border_strong(), text_secondary())
+        (bg_elevated(), border_subtle(), text_secondary())
     };
     draw_sized_pill_badge(ui, text, fill, border, fg, height, max_width)
 }
@@ -1304,12 +1754,6 @@ pub fn draw_instance_avatar(
     };
     let rounding = Rounding::same((rect.width() * 0.22).clamp(6.0, 12.0));
     painter.rect_filled(rect, rounding, bg);
-
-    let top_strip = Rect::from_min_size(
-        Pos2::new(rect.left() + 3.0, rect.top() + 2.0),
-        Vec2::new((rect.width() - 6.0).max(4.0), 2.0),
-    );
-    painter.rect_filled(top_strip, Rounding::same(1.0), with_alpha(loader_fg, 65));
     painter.rect_stroke(rect, rounding, Stroke::new(1.2_f32, border));
 
     let initial = name
@@ -1327,14 +1771,10 @@ pub fn draw_instance_avatar(
         if selected { accent_text() } else { loader_fg },
     );
 
-    if rect.width() >= 28.0 {
+    if is_running && rect.width() >= 28.0 {
         let dot_center = Pos2::new(rect.right() - 5.5, rect.bottom() - 5.5);
         painter.circle_filled(dot_center, 4.6, bg_card());
-        painter.circle_filled(
-            dot_center,
-            3.1,
-            if is_running { accent() } else { loader_border },
-        );
+        painter.circle_filled(dot_center, 3.1, accent());
     }
 }
 
@@ -1465,21 +1905,21 @@ pub fn animated_progress_bar(
         let fill_rect =
             Rect::from_min_size(rect.min, Vec2::new(fill_w.min(rect.width()), rect.height()));
         painter.rect_filled(fill_rect, Rounding::same(6.5), accent());
-
-        if active {
-            let t = (ui.input(|i| i.time) as f32 * 1.4).fract();
-            let sweep_x = fill_rect.left() + t * (fill_rect.width() + 60.0) - 30.0;
-            let stripe = Rect::from_min_max(
-                Pos2::new(sweep_x.max(fill_rect.left()), fill_rect.top()),
-                Pos2::new((sweep_x + 28.0).min(fill_rect.right()), fill_rect.bottom()),
+        if active && fill_rect.width() > 10.0 {
+            let phase = (ui.input(|i| i.time) as f32 * 0.95).fract();
+            paint_shimmer_sweep(painter, fill_rect, Rounding::same(6.5), phase, PURE_WHITE, 72);
+            let tip_rect = Rect::from_min_max(
+                Pos2::new((fill_rect.right() - 3.5).max(fill_rect.left()), fill_rect.top() + 1.5),
+                Pos2::new(fill_rect.right(), fill_rect.bottom() - 1.5),
             );
-            if stripe.width() > 1.0 {
-                painter.rect_filled(
-                    stripe,
-                    Rounding::same(5.0),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 80),
-                );
-            }
+            painter.rect_filled(tip_rect, Rounding::same(2.0), with_alpha(PURE_WHITE, 145));
+        } else if !active && smooth >= 0.985 {
+            let p = pulse_01(ui.input(|i| i.time), 5.0);
+            painter.rect_stroke(
+                rect,
+                Rounding::same(6.5),
+                Stroke::new(1.2_f32, with_alpha(accent_hover(), (110.0 + p * 85.0) as u8)),
+            );
         }
     }
 
@@ -1509,6 +1949,7 @@ pub fn animated_progress_bar(
 }
 
 /// Draws a compact animated horizontal ratio/gauge bar.
+#[allow(dead_code)]
 pub fn draw_mini_gauge(
     ui: &mut egui::Ui,
     id_salt: &str,
@@ -1536,17 +1977,28 @@ pub fn draw_mini_gauge(
     if fill_w > 1.0 {
         let fill_rect = Rect::from_min_size(rect.min, Vec2::new(fill_w, rect.height()));
         painter.rect_filled(fill_rect, r, accent());
+        if (smooth - fraction.clamp(0.0, 1.0)).abs() > 0.005 {
+            let cap = Rect::from_min_max(
+                Pos2::new((fill_rect.right() - 3.0).max(fill_rect.left()), fill_rect.top()),
+                Pos2::new(fill_rect.right(), fill_rect.bottom()),
+            );
+            painter.rect_filled(cap, r, with_alpha(PURE_WHITE, 165));
+        }
     }
 }
 
-/// Visual RAM allocation meter showing Min (-Xms) and Max (-Xmx) out of 16 GB.
+/// Visual RAM allocation meter showing Min (-Xms) and Max (-Xmx) up to 16 GB or 32 GB.
 pub fn draw_ram_allocation_bar(
     ui: &mut egui::Ui,
     min_mb: u32,
     max_mb: u32,
     width: f32,
 ) {
-    let cap = 16384.0_f32;
+    let cap = if max_mb > 16384 {
+        32768.0_f32
+    } else {
+        16384.0_f32
+    };
     let min_f = (min_mb as f32 / cap).clamp(0.0, 1.0);
     let max_f = (max_mb as f32 / cap).clamp(min_f, 1.0);
     let smooth_min = ui.ctx().animate_value_with_time(
@@ -1572,8 +2024,8 @@ pub fn draw_ram_allocation_bar(
     painter.rect_filled(rect, r, Color32::from_rgb(24, 28, 35));
     painter.rect_stroke(rect, r, Stroke::new(1.0_f32, border_strong()));
 
-    for gb in [4.0_f32, 8.0, 12.0] {
-        let x = rect.left() + rect.width() * (gb / 16.0);
+    for frac in [0.25_f32, 0.5, 0.75] {
+        let x = rect.left() + rect.width() * frac;
         painter.line_segment(
             [Pos2::new(x, rect.top() + 1.5), Pos2::new(x, rect.bottom() - 1.5)],
             Stroke::new(1.0_f32, border_strong()),
@@ -1585,12 +2037,77 @@ pub fn draw_ram_allocation_bar(
         let max_col = if max_mb >= 12288 { WARNING } else { accent_dim() };
         let max_rect = Rect::from_min_size(rect.min, Vec2::new(max_w, rect.height()));
         painter.rect_filled(max_rect, r, with_alpha(max_col, 220));
+        if (smooth_max - max_f).abs() > 0.005 {
+            let cap = Rect::from_min_max(
+                Pos2::new((max_rect.right() - 3.0).max(max_rect.left()), max_rect.top()),
+                Pos2::new(max_rect.right(), max_rect.bottom()),
+            );
+            painter.rect_filled(cap, r, with_alpha(PURE_WHITE, 140));
+        }
     }
     let min_w = (rect.width() * smooth_min).clamp(0.0, rect.width());
     if min_w > 2.0 {
         let min_rect = Rect::from_min_size(rect.min, Vec2::new(min_w, rect.height()));
         painter.rect_filled(min_rect, r, accent());
+        if (smooth_min - min_f).abs() > 0.005 {
+            let cap = Rect::from_min_max(
+                Pos2::new((min_rect.right() - 3.0).max(min_rect.left()), min_rect.top()),
+                Pos2::new(min_rect.right(), min_rect.bottom()),
+            );
+            painter.rect_filled(cap, r, with_alpha(PURE_WHITE, 175));
+        }
     }
+}
+
+/// Renders a high-contrast integer slider with customizable step, suffix, and change glow.
+pub fn ui_int_slider(
+    ui: &mut egui::Ui,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+    step: f64,
+    suffix: &str,
+    slider_width: f32,
+) -> egui::Response {
+    let resp = ui
+        .scope(|ui| {
+            ui.style_mut().spacing.slider_width = slider_width;
+            ui.style_mut().spacing.slider_rail_height = 8.0;
+            let visuals = ui.visuals_mut();
+            visuals.slider_trailing_fill = true;
+            visuals.widgets.inactive.bg_fill = border_subtle();
+            visuals.widgets.inactive.fg_stroke = Stroke::new(1.5_f32, accent());
+            visuals.widgets.inactive.rounding = Rounding::same(4.0);
+            visuals.widgets.hovered.bg_fill = border_strong();
+            visuals.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, text_primary());
+            visuals.widgets.active.bg_fill = accent();
+            visuals.selection.bg_fill = accent();
+            let mut slider = egui::Slider::new(value, range).step_by(step);
+            if !suffix.is_empty() {
+                slider = slider.suffix(suffix);
+            }
+            ui.add(slider)
+        })
+        .inner;
+    let pulse_id = resp.id.with("slider_change_t");
+    let now = ui.input(|i| i.time);
+    if resp.changed() {
+        ui.ctx().data_mut(|d| d.insert_temp(pulse_id, now));
+        ui.ctx().request_repaint();
+    }
+    if let Some(t0) = ui.ctx().data(|d| d.get_temp::<f64>(pulse_id)) {
+        let age = (now - t0) as f32;
+        if (0.0..0.32).contains(&age) {
+            ui.ctx().request_repaint();
+            let frac = age / 0.32;
+            let alpha = ((1.0 - frac) * 140.0) as u8;
+            ui.painter().rect_stroke(
+                resp.rect.expand(ease_out_cubic(frac) * 2.5),
+                Rounding::same(6.0),
+                Stroke::new(1.2_f32, with_alpha(accent(), alpha)),
+            );
+        }
+    }
+    resp
 }
 
 /// Renders a high-contrast slider where the full track bar remains clearly visible on card surfaces.
@@ -1600,25 +2117,7 @@ pub fn ui_ram_slider(
     range: std::ops::RangeInclusive<u32>,
     slider_width: f32,
 ) -> egui::Response {
-    ui.scope(|ui| {
-        ui.style_mut().spacing.slider_width = slider_width;
-        ui.style_mut().spacing.slider_rail_height = 8.0;
-        let visuals = ui.visuals_mut();
-        visuals.slider_trailing_fill = true;
-        visuals.widgets.inactive.bg_fill = border_subtle();
-        visuals.widgets.inactive.fg_stroke = Stroke::new(1.5_f32, accent());
-        visuals.widgets.inactive.rounding = Rounding::same(4.0);
-        visuals.widgets.hovered.bg_fill = border_strong();
-        visuals.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, text_primary());
-        visuals.widgets.active.bg_fill = accent();
-        visuals.selection.bg_fill = accent();
-        ui.add(
-            egui::Slider::new(value, range)
-                .step_by(256.0)
-                .suffix(" MB"),
-        )
-    })
-    .inner
+    ui_int_slider(ui, value, range, 256.0, " MB", slider_width)
 }
 
 /// Draws an animated skeleton shimmer card while Modrinth search results are loading.
@@ -1689,6 +2188,7 @@ pub fn primary_action_button(
     pulsing: bool,
     size: Vec2,
 ) -> egui::Response {
+    let btn_id = ui.make_persistent_id(("primary_cta", id_salt));
     let (rect, resp) = ui.allocate_exact_size(
         size,
         if enabled { Sense::click() } else { Sense::hover() },
@@ -1703,44 +2203,88 @@ pub fn primary_action_button(
         enabled && resp.is_pointer_button_down_on(),
         0.07,
     );
-    if (hover_t > 0.01 && hover_t < 0.99) || (press_t > 0.01 && press_t < 0.99) {
+    if (hover_t > 0.01 && hover_t < 0.99) || (press_t > 0.01 && press_t < 0.99) || pulsing {
         ui.ctx().request_repaint();
     }
+    let click_info = track_click_anim(
+        ui.ctx(),
+        btn_id,
+        rect,
+        enabled && resp.clicked(),
+        resp.interact_pointer_pos(),
+        0.48,
+    );
+    let click_t = click_info.map(|(t, _)| t);
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let time = ui.input(|i| i.time) as f32;
+        let time = ui.input(|i| i.time);
 
-        let (bg, border, fg, halo_color) = if !enabled {
-            (bg_card(), border_subtle(), text_muted(), accent())
+        let (bg, border, fg) = if !enabled {
+            if pulsing {
+                (
+                    lerp_color(bg_card(), accent_dim(), 0.35 + pulse_01(time, 3.6) * 0.25),
+                    with_alpha(accent(), 145),
+                    text_primary(),
+                )
+            } else {
+                (bg_card(), border_subtle(), text_muted())
+            }
         } else if is_stop_style {
             let bg = lerp_color(DANGER, DANGER_HOVER, hover_t);
-            (bg, DANGER_HOVER, PURE_WHITE, DANGER)
+            (bg, DANGER_HOVER, PURE_WHITE)
         } else {
             let bg = lerp_color(accent(), accent_hover(), hover_t);
-            (bg, accent_hover(), accent_dark(), accent())
+            (bg, accent_hover(), accent_dark())
         };
 
+        let pop = click_t.map_or(0.0, |t| ((1.0 - t) * std::f32::consts::PI).sin().max(0.0) * 0.8);
+        let draw_rect = rect.shrink(press_t * 1.1).expand(pop);
+        let rounding = Rounding::same(8.5);
+
         if pulsing {
-            let pulse = (time * 3.5).sin() * 0.5 + 0.5;
-            let halo_alpha = (45.0 + 75.0 * pulse) as u8;
+            let wave = (time as f32 * 0.95).fract();
+            let halo_col = if is_stop_style { DANGER } else { accent() };
+            let expand = wave * 7.0;
+            let halo_alpha = ((1.0 - wave) * (1.0 - wave) * 125.0).round() as u8;
+            if halo_alpha > 1 {
+                painter.rect_stroke(
+                    draw_rect.expand(expand),
+                    Rounding::same(8.5 + expand * 0.4),
+                    Stroke::new(1.5_f32, with_alpha(halo_col, halo_alpha)),
+                );
+            }
+        } else if enabled && hover_t > 0.05 {
+            let glow_col = if is_stop_style { DANGER } else { accent() };
             painter.rect_stroke(
-                rect.expand(2.2 + pulse * 1.4),
-                Rounding::same(10.5),
-                Stroke::new(1.5_f32, with_alpha(halo_color, halo_alpha)),
-            );
-            ui.ctx().request_repaint();
-        } else if hover_t > 0.02 {
-            let halo_alpha = (hover_t * 105.0) as u8;
-            painter.rect_stroke(
-                rect.expand(2.2 * hover_t),
-                Rounding::same(10.5),
-                Stroke::new(1.5_f32, with_alpha(halo_color, halo_alpha)),
+                draw_rect.expand(hover_t * 2.5),
+                Rounding::same(10.0),
+                Stroke::new(1.3_f32, with_alpha(glow_col, (hover_t * 95.0) as u8)),
             );
         }
 
-        let draw_rect = rect.shrink(press_t * 1.1);
-        painter.rect_filled(draw_rect, Rounding::same(8.5), bg);
+        painter.rect_filled(draw_rect, rounding, bg);
+        if !enabled && pulsing {
+            paint_shimmer_sweep(
+                painter,
+                draw_rect,
+                rounding,
+                (time as f32 * 1.1).fract(),
+                PURE_WHITE,
+                52,
+            );
+        } else if enabled && hover_t > 0.01 && hover_t < 0.99 {
+            let sheen_alpha = ((hover_t * std::f32::consts::PI).sin() * 48.0).round() as u8;
+            paint_shimmer_sweep(
+                painter,
+                draw_rect,
+                rounding,
+                hover_t,
+                PURE_WHITE,
+                sheen_alpha,
+            );
+        }
+
         if enabled && draw_rect.width() > 20.0 {
             painter.line_segment(
                 [
@@ -1750,24 +2294,53 @@ pub fn primary_action_button(
                 Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 90)),
             );
         }
-        painter.rect_stroke(draw_rect, Rounding::same(8.5), Stroke::new(1.2_f32, border));
+        painter.rect_stroke(draw_rect, rounding, Stroke::new(1.2_f32, border));
+
+        if let Some((ct, origin)) = click_info {
+            let ripple_col = if is_stop_style { PURE_WHITE } else { accent_dark() };
+            paint_click_ripple(painter, draw_rect, rounding, origin, ct, ripple_col, true);
+        }
 
         let galley = painter.layout_no_wrap(
             label.to_string(),
             FontId::new(14.0, FontFamily::Proportional),
             fg,
         );
+        let show_loading_dots = !enabled && pulsing && icon.is_none();
         let icon_sz = 13.0;
-        let gap = if icon.is_some() { 7.0 } else { 0.0 };
-        let total_w = (if icon.is_some() { icon_sz } else { 0.0 }) + gap + galley.size().x;
+        let dots_w = 18.0;
+        let gap = if icon.is_some() || show_loading_dots { 7.0 } else { 0.0 };
+        let lead_w = if icon.is_some() {
+            icon_sz
+        } else if show_loading_dots {
+            dots_w
+        } else {
+            0.0
+        };
+        let total_w = lead_w + gap + galley.size().x;
         let mut x = draw_rect.center().x - total_w * 0.5;
         if let Some(ic) = icon {
             let ic_rect = Rect::from_center_size(
                 Pos2::new(x + icon_sz * 0.5, draw_rect.center().y),
                 Vec2::splat(icon_sz),
             );
-            draw_icon(painter, ic_rect, ic, fg);
+            let ic_anim = compute_icon_anim(ic, hover_t, press_t, click_t);
+            draw_icon_animated(painter, ic_rect, ic, fg, ic_anim);
             x += icon_sz + gap;
+        } else if show_loading_dots {
+            for d_idx in 0..3 {
+                let phase = (time as f32 * 5.2 - d_idx as f32 * 0.7).sin() * 0.5 + 0.5;
+                let dot_pos = Pos2::new(
+                    x + 3.0 + d_idx as f32 * 6.0,
+                    draw_rect.center().y - phase * 2.5 + 1.0,
+                );
+                painter.circle_filled(
+                    dot_pos,
+                    1.8 + phase * 0.6,
+                    with_alpha(accent(), (140.0 + phase * 115.0) as u8),
+                );
+            }
+            x += dots_w + gap;
         }
         painter.galley(
             Pos2::new(x, draw_rect.center().y - galley.size().y * 0.5),
@@ -1784,57 +2357,108 @@ pub fn primary_action_button(
 
 /// Animated Modrinth-style pill switch for enabling/disabling installed mods & packs.
 pub fn mod_toggle_switch(ui: &mut egui::Ui, id_salt: &str, on: bool) -> egui::Response {
+    let sw_id = ui.make_persistent_id(("switch_base", id_salt));
     let desired = Vec2::new(38.0, 20.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
     let anim_t = ui.ctx().animate_bool_with_time(
         ui.make_persistent_id(("switch", id_salt)),
         on,
-        0.15,
+        0.16,
     );
     let hover_t = ui.ctx().animate_bool_with_time(
         ui.make_persistent_id(("switch_hov", id_salt)),
         resp.hovered(),
         0.11,
     );
-    if (anim_t > 0.01 && anim_t < 0.99) || (hover_t > 0.01 && hover_t < 0.99) {
+    let press_t = ui.ctx().animate_bool_with_time(
+        ui.make_persistent_id(("switch_prs", id_salt)),
+        resp.is_pointer_button_down_on(),
+        0.07,
+    );
+    if (anim_t > 0.01 && anim_t < 0.99)
+        || (hover_t > 0.01 && hover_t < 0.99)
+        || (press_t > 0.01 && press_t < 0.99)
+    {
         ui.ctx().request_repaint();
     }
+    let click_info = track_click_anim(
+        ui.ctx(),
+        sw_id,
+        rect,
+        resp.clicked(),
+        resp.interact_pointer_pos(),
+        0.38,
+    );
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
+        let draw_rect = rect.shrink(press_t * 0.7);
+        let eased_t = ease_out_cubic(anim_t);
         let bg = lerp_color(
             lerp_color(bg_input(), bg_card_hover(), hover_t * 0.5),
             lerp_color(accent(), accent_hover(), hover_t),
-            anim_t,
+            eased_t,
         );
-        let border = lerp_color(border_strong(), accent_hover(), anim_t.max(hover_t * 0.4));
-        let rounding = Rounding::same(rect.height() * 0.5);
-        if anim_t > 0.05 && hover_t > 0.05 {
-            painter.rect_stroke(
-                rect.expand(1.2 * hover_t),
-                Rounding::same(rect.height() * 0.5 + 1.2),
-                Stroke::new(1.0_f32, with_alpha(accent(), (hover_t * 65.0) as u8)),
-            );
-        }
-        painter.rect_filled(rect, rounding, bg);
-        painter.rect_stroke(rect, rounding, Stroke::new(1.0_f32, border));
+        let border = lerp_color(border_strong(), accent_hover(), eased_t.max(hover_t * 0.4));
+        let rounding = Rounding::same(draw_rect.height() * 0.5);
+        painter.rect_filled(draw_rect, rounding, bg);
+        painter.rect_stroke(draw_rect, rounding, Stroke::new(1.0_f32, border));
 
-        let r = rect.height() * (0.36 + hover_t * 0.03);
-        let left_x = rect.left() + r + 3.0;
-        let right_x = rect.right() - r - 3.0;
-        let knob_x = left_x + (right_x - left_x) * anim_t;
+        if let Some((ct, _)) = click_info {
+            let eased_c = crate::ui::anim::ease_out_quint(ct);
+            let ring_a = ((1.0 - ct) * (1.0 - ct) * 165.0).round() as u8;
+            if ring_a > 1 {
+                let ring_col = if on { accent() } else { border_strong() };
+                painter.rect_stroke(
+                    draw_rect.expand(eased_c * 4.5),
+                    Rounding::same((draw_rect.height() + eased_c * 9.0) * 0.5),
+                    Stroke::new(1.3_f32, with_alpha(ring_col, ring_a)),
+                );
+            }
+        }
+
+        let r = draw_rect.height() * (0.36 + hover_t * 0.03);
+        let left_x = draw_rect.left() + r + 3.0;
+        let right_x = draw_rect.right() - r - 3.0;
+        let knob_x = left_x + (right_x - left_x) * eased_t;
+        let stretch = (anim_t * std::f32::consts::PI).sin().max(0.0) * 4.2;
         let knob_col = lerp_color(
             lerp_color(text_secondary(), text_primary(), hover_t),
             accent_dark(),
-            anim_t,
+            eased_t,
         );
-        painter.circle_filled(Pos2::new(knob_x, rect.center().y), r, knob_col);
+        let knob_rect = Rect::from_center_size(
+            Pos2::new(knob_x, draw_rect.center().y),
+            Vec2::new(r * 2.0 + stretch, (r * 2.0 - stretch * 0.22).max(4.0)),
+        );
+        painter.rect_filled(knob_rect, Rounding::same(knob_rect.height() * 0.5), knob_col);
     }
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
+}
+
+/// Draws a live breathing radar pulse indicator dot for active instances/servers/status.
+pub fn draw_running_pulse_dot(
+    ui: &egui::Ui,
+    center: Pos2,
+    radius: f32,
+    color: Color32,
+    bg: Color32,
+) {
+    let time = ui.input(|i| i.time);
+    let wave = (time as f32 * 0.95).fract();
+    let painter = ui.painter();
+    let ring_r = radius + wave * (radius * 1.45);
+    let ring_a = ((1.0 - wave) * (1.0 - wave) * 185.0).round() as u8;
+    if ring_a > 2 {
+        painter.circle_stroke(center, ring_r, Stroke::new(1.2_f32, with_alpha(color, ring_a)));
+    }
+    painter.circle_filled(center, radius + 1.4, bg);
+    painter.circle_filled(center, radius, color);
+    ui.ctx().request_repaint();
 }
 
 /// Draws a custom image avatar for an instance with rounded corners, border, and running indicator.
@@ -1983,4 +2607,293 @@ pub fn apply_ui_font(ctx: &egui::Context, font_path: &str) {
         }
     }
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::Language;
+    use crate::models::{CustomPalette, ThemePreset};
+
+    #[test]
+    fn palette_lerp_and_roundtrip_work() {
+        let a = ThemePreset::Sunset.palette();
+        let b = ThemePreset::Emerald.palette();
+        set_theme_palette(&a);
+        assert_eq!(current_theme_palette(), a);
+
+        let mid = lerp_palette(&a, &b, 0.5);
+        assert_ne!(mid.accent, a.accent);
+        assert_ne!(mid.accent, b.accent);
+        assert_eq!(lerp_palette(&a, &b, 0.0), a);
+        assert_eq!(lerp_palette(&a, &b, 1.0), b);
+
+        // Restore default Sunset palette for other tests
+        set_theme_palette(&CustomPalette::default());
+    }
+
+    #[test]
+    fn flow_row_wraps_presets_inside_card_without_overflow() {
+        let ctx = egui::Context::default();
+        set_theme_palette(&CustomPalette::default());
+
+        let mut last_metrics: Option<(Rect, f32, Vec<Rect>, Rect, f32, Vec<Rect>, Rect, f32, Vec<Rect>)> =
+            None;
+
+        for _ in 0..2 {
+            let mut raw_input = egui::RawInput::default();
+            raw_input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 900.0)));
+            let mut m = None;
+            let _ = ctx.run(raw_input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // Case 1: 760px card (wide settings window where 10 presets + Reset > 760px)
+                    let mut p1_rects = Vec::new();
+                    let mut inner_l1 = 0.0;
+                    let card1 = card_frame(false, 0.0).show(ui, |ui| {
+                        let card_w = 760.0;
+                        ui.set_min_width(card_w);
+                        ui.set_max_width(card_w);
+                        inner_l1 = ui.max_rect().left();
+                        ui_flow_row(ui, 30.0, |ui| {
+                            for preset in ThemePreset::ALL {
+                                let r = ui_pill_tab(
+                                    ui,
+                                    ("t1", preset.label()),
+                                    preset.label(),
+                                    preset == ThemePreset::Sunset,
+                                );
+                                p1_rects.push(r.rect);
+                            }
+                            let reset_r = ui_button_icon(
+                                ui,
+                                "t1_reset",
+                                Some(Icon::Refresh),
+                                "Reset Palette",
+                                ButtonVariant::Subtle,
+                                true,
+                                28.0,
+                            );
+                            p1_rects.push(reset_r.rect);
+                        });
+                    });
+
+                    // Case 2: 420px narrow card
+                    let mut p2_rects = Vec::new();
+                    let mut inner_l2 = 0.0;
+                    let card2 = card_frame(false, 0.0).show(ui, |ui| {
+                        let card_w = 420.0;
+                        ui.set_min_width(card_w);
+                        ui.set_max_width(card_w);
+                        inner_l2 = ui.max_rect().left();
+                        ui_flow_row(ui, 30.0, |ui| {
+                            for preset in ThemePreset::ALL {
+                                let r = ui_pill_tab(
+                                    ui,
+                                    ("t2", preset.label()),
+                                    preset.label(),
+                                    preset == ThemePreset::Sunset,
+                                );
+                                p2_rects.push(r.rect);
+                            }
+                            let reset_r = ui_button_icon(
+                                ui,
+                                "t2_reset",
+                                Some(Icon::Refresh),
+                                "Reset Palette",
+                                ButtonVariant::Subtle,
+                                true,
+                                28.0,
+                            );
+                            p2_rects.push(reset_r.rect);
+                        });
+                    });
+
+                    // Case 3: 500px card with 9 Language::ALL pills
+                    let mut p3_rects = Vec::new();
+                    let mut inner_l3 = 0.0;
+                    let card3 = card_frame(false, 0.0).show(ui, |ui| {
+                        let card_w = 500.0;
+                        ui.set_min_width(card_w);
+                        ui.set_max_width(card_w);
+                        inner_l3 = ui.max_rect().left();
+                        ui_flow_row(ui, 30.0, |ui| {
+                            for opt in Language::ALL {
+                                let r = ui_pill_tab(
+                                    ui,
+                                    ("t3", opt.code()),
+                                    opt.label(),
+                                    opt == Language::En,
+                                );
+                                p3_rects.push(r.rect);
+                            }
+                        });
+                    });
+
+                    m = Some((
+                        card1.response.rect,
+                        inner_l1,
+                        p1_rects,
+                        card2.response.rect,
+                        inner_l2,
+                        p2_rects,
+                        card3.response.rect,
+                        inner_l3,
+                        p3_rects,
+                    ));
+                });
+            });
+            last_metrics = m;
+        }
+
+        let (c1, l1, r1, c2, l2, r2, c3, l3, r3) = last_metrics.expect("layout frame ran");
+
+        for (name, card_rect, card_w, inner_left, rects) in [
+            ("presets_760", c1, 760.0_f32, l1, r1),
+            ("presets_420", c2, 420.0_f32, l2, r2),
+            ("langs_500", c3, 500.0_f32, l3, r3),
+        ] {
+            assert!(
+                card_rect.width() <= card_w + 22.0 + 1.0,
+                "{name}: card stretched to {}, expected <= {}",
+                card_rect.width(),
+                card_w + 23.0
+            );
+            assert!(
+                card_rect.height() >= 30.0 * 2.0 + 6.0 + 22.0 - 1.0,
+                "{name}: card height {} indicates row did not wrap",
+                card_rect.height()
+            );
+            let first_row_bottom = rects[0].bottom();
+            let mut wrapped_count = 0usize;
+            for r in &rects {
+                assert!(
+                    r.right() <= inner_left + card_w + 1.0,
+                    "{name}: child rect right {} exceeds inner right {}",
+                    r.right(),
+                    inner_left + card_w + 1.0
+                );
+                if r.top() > rects[0].top() + 5.0 {
+                    wrapped_count += 1;
+                    assert!(
+                        r.top() >= first_row_bottom + 4.0,
+                        "{name}: wrapped item top {} overlaps first row bottom {}",
+                        r.top(),
+                        first_row_bottom
+                    );
+                }
+            }
+            assert!(wrapped_count >= 1, "{name}: expected at least 1 wrapped item");
+        }
+    }
+
+    #[test]
+    fn palette_grid_and_modal_row_stay_within_width() {
+        let ctx = egui::Context::default();
+        set_theme_palette(&CustomPalette::default());
+
+        let mut raw_input = egui::RawInput::default();
+        raw_input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 900.0)));
+
+        let mut grid_card_rect = Rect::NOTHING;
+        let mut cmd_row_rect = Rect::NOTHING;
+        let mut cmd_label_rect = Rect::NOTHING;
+
+        for _ in 0..2 {
+            let _ = ctx.run(raw_input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // 1. 760px card with 3-col full_palette_grid using Russian long labels
+                    let mut dummy = [255_u8, 128, 66];
+                    let card_w = 760.0_f32;
+                    let card = card_frame(false, 0.0).show(ui, |ui| {
+                        ui.set_min_width(card_w);
+                        ui.set_max_width(card_w);
+                        let cols = 3usize;
+                        let cell_w = ((card_w - 4.0 - 12.0 * (cols.saturating_sub(1) as f32))
+                            / cols as f32)
+                            .clamp(140.0, card_w);
+                        egui::Grid::new("test_palette_grid")
+                            .num_columns(cols)
+                            .spacing([12.0, 8.0])
+                            .show(ui, |ui| {
+                                for idx in 0..3 {
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(cell_w, 26.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.set_max_width(cell_w);
+                                            let _ = ui.color_edit_button_srgb(&mut dummy);
+                                            ui.add_space(4.0);
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(
+                                                        egui::RichText::new("#FF8042")
+                                                            .monospace()
+                                                            .size(10.5),
+                                                    );
+                                                    ui.with_layout(
+                                                        egui::Layout::left_to_right(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            ui.add(
+                                                                egui::Label::new(
+                                                                    egui::RichText::new(
+                                                                        "Очень длинная русская подпись карточки (навед.)",
+                                                                    )
+                                                                    .small(),
+                                                                )
+                                                                .truncate(),
+                                                            );
+                                                        },
+                                                    );
+                                                },
+                                            );
+                                        },
+                                    );
+                                    if (idx + 1) % cols == 0 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    });
+                    grid_card_rect = card.response.rect;
+
+                    // 2. Command palette category row at 540px with 4 pills + right_to_left label
+                    let scope_resp = ui.scope(|ui| {
+                        ui.set_max_width(540.0);
+                        ui_flow_row(ui, 26.0, |ui| {
+                            for cat in ["All", "Menus", "Instances", "Actions"] {
+                                let _ = ui_pill_tab(ui, ("cmd", cat), cat, cat == "All");
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    cmd_label_rect = ui.label("24 found").rect;
+                                },
+                            );
+                        });
+                    });
+                    cmd_row_rect = scope_resp.response.rect;
+                });
+            });
+        }
+
+        assert!(
+            grid_card_rect.width() <= 760.0 + 22.0 + 1.0,
+            "palette grid stretched card to {}",
+            grid_card_rect.width()
+        );
+        assert!(
+            cmd_row_rect.width() <= 541.0,
+            "cmd row exceeded 540px: {}",
+            cmd_row_rect.width()
+        );
+        assert!(
+            cmd_label_rect.right() <= cmd_row_rect.right() + 1.0,
+            "cmd label clipped: {} > {}",
+            cmd_label_rect.right(),
+            cmd_row_rect.right()
+        );
+    }
 }

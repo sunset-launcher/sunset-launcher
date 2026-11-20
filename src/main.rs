@@ -8,6 +8,7 @@ mod launcher;
 mod models;
 mod modrinth;
 mod mojang;
+mod servers;
 mod storage;
 mod theme;
 mod ui;

@@ -1,6 +1,468 @@
-use crate::models::{Account, AccountStore, LauncherPaths, LauncherSettings, ModLoader, Profile};
+use crate::models::{
+    Account, AccountKind, AccountStore, DedicatedServer, LauncherPaths, LauncherSettings,
+    ModLoader, Profile,
+};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const KEYRING_SENTINEL: &str = "__os_keyring__";
+
+/// Writes `contents` atomically via a temporary sibling file + `sync_all` + `rename`.
+pub fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), String> {
+    atomic_write_inner(path, contents.as_ref(), false)
+}
+
+/// Writes sensitive `contents` atomically and restricts permissions to owner-only (`0600` on Unix).
+pub fn atomic_write_restricted(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), String> {
+    atomic_write_inner(path, contents.as_ref(), true)
+}
+
+fn atomic_write_inner(path: &Path, bytes: &[u8], restrict_perms: bool) -> Result<(), String> {
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
+        }
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "data".to_string());
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_file_name(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
+
+    let write_res = (|| -> Result<(), std::io::Error> {
+        let mut opts = fs::OpenOptions::new();
+        opts.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        if restrict_perms {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = restrict_perms;
+
+        let mut file = opts.open(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Failed to write {}: {e}", path.display()));
+    }
+
+    if let Err(rename_err) = fs::rename(&tmp_path, path) {
+        #[cfg(windows)]
+        {
+            let _ = fs::remove_file(path);
+            if fs::rename(&tmp_path, path).is_ok() {
+                return Ok(());
+            }
+        }
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to finalize atomic write {}: {rename_err}",
+            path.display()
+        ));
+    }
+
+    #[cfg(unix)]
+    if restrict_perms {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct StoredAccountSecret {
+    access_token: String,
+    secondary_token: String,
+}
+
+trait SecretBackend {
+    fn put(&self, account_id: &str, secret_json: &str) -> bool;
+    fn get(&self, account_id: &str) -> Option<String>;
+    fn delete(&self, account_id: &str);
+}
+
+struct OsKeyringBackend;
+
+impl SecretBackend for OsKeyringBackend {
+    fn put(&self, account_id: &str, secret_json: &str) -> bool {
+        #[cfg(test)]
+        {
+            let _ = (account_id, secret_json);
+            return false;
+        }
+        #[cfg(all(not(test), target_os = "linux"))]
+        {
+            if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+                return false;
+            }
+            use std::process::{Command, Stdio};
+            let Ok(mut child) = Command::new("secret-tool")
+                .args([
+                    "store",
+                    "--label=Sunset Launcher Account",
+                    "service",
+                    "sunset-launcher",
+                    "account",
+                    account_id,
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            else {
+                return false;
+            };
+            if let Some(mut stdin) = child.stdin.take() {
+                if stdin.write_all(secret_json.as_bytes()).is_err() {
+                    let _ = child.kill();
+                    return false;
+                }
+            }
+            child.wait().map(|s| s.success()).unwrap_or(false)
+        }
+        #[cfg(all(not(test), target_os = "macos"))]
+        {
+            std::process::Command::new("/usr/bin/security")
+                .args([
+                    "add-generic-password",
+                    "-U",
+                    "-s",
+                    "sunset-launcher",
+                    "-a",
+                    account_id,
+                    "-w",
+                    secret_json,
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+        #[cfg(all(not(test), target_os = "windows"))]
+        {
+            win32_cred::write(&format!("sunset-launcher:{account_id}"), secret_json)
+        }
+        #[cfg(all(
+            not(test),
+            not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+        ))]
+        {
+            let _ = (account_id, secret_json);
+            false
+        }
+    }
+
+    fn get(&self, account_id: &str) -> Option<String> {
+        #[cfg(test)]
+        {
+            let _ = account_id;
+            return None;
+        }
+        #[cfg(all(not(test), target_os = "linux"))]
+        {
+            if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+                return None;
+            }
+            let out = std::process::Command::new("secret-tool")
+                .args([
+                    "lookup",
+                    "service",
+                    "sunset-launcher",
+                    "account",
+                    account_id,
+                ])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let val = String::from_utf8(out.stdout).ok()?;
+            let trimmed = val.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        }
+        #[cfg(all(not(test), target_os = "macos"))]
+        {
+            let out = std::process::Command::new("/usr/bin/security")
+                .args([
+                    "find-generic-password",
+                    "-s",
+                    "sunset-launcher",
+                    "-a",
+                    account_id,
+                    "-w",
+                ])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let val = String::from_utf8(out.stdout).ok()?;
+            let trimmed = val.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        }
+        #[cfg(all(not(test), target_os = "windows"))]
+        {
+            win32_cred::read(&format!("sunset-launcher:{account_id}"))
+        }
+        #[cfg(all(
+            not(test),
+            not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+        ))]
+        {
+            let _ = account_id;
+            None
+        }
+    }
+
+    fn delete(&self, account_id: &str) {
+        #[cfg(test)]
+        {
+            let _ = account_id;
+        }
+        #[cfg(all(not(test), target_os = "linux"))]
+        {
+            if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() {
+                let _ = std::process::Command::new("secret-tool")
+                    .args([
+                        "clear",
+                        "service",
+                        "sunset-launcher",
+                        "account",
+                        account_id,
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+        #[cfg(all(not(test), target_os = "macos"))]
+        {
+            let _ = std::process::Command::new("/usr/bin/security")
+                .args([
+                    "delete-generic-password",
+                    "-s",
+                    "sunset-launcher",
+                    "-a",
+                    account_id,
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        #[cfg(all(not(test), target_os = "windows"))]
+        {
+            win32_cred::delete(&format!("sunset-launcher:{account_id}"));
+        }
+    }
+}
+
+#[cfg(all(not(test), target_os = "windows"))]
+mod win32_cred {
+    use std::ptr;
+
+    const CRED_TYPE_GENERIC: u32 = 1;
+    const CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
+
+    #[repr(C)]
+    struct FileTime {
+        dw_low_date_time: u32,
+        dw_high_date_time: u32,
+    }
+
+    #[repr(C)]
+    struct CredentialW {
+        flags: u32,
+        cred_type: u32,
+        target_name: *mut u16,
+        comment: *mut u16,
+        last_written: FileTime,
+        credential_blob_size: u32,
+        credential_blob: *mut u8,
+        persist: u32,
+        attribute_count: u32,
+        attributes: *mut core::ffi::c_void,
+        target_alias: *mut u16,
+        user_name: *mut u16,
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn CredWriteW(credential: *const CredentialW, flags: u32) -> i32;
+        fn CredReadW(
+            target_name: *const u16,
+            cred_type: u32,
+            flags: u32,
+            credential: *mut *mut CredentialW,
+        ) -> i32;
+        fn CredDeleteW(target_name: *const u16, cred_type: u32, flags: u32) -> i32;
+        fn CredFree(buffer: *mut core::ffi::c_void);
+    }
+
+    fn wide_nul(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn write(target: &str, secret: &str) -> bool {
+        let mut target_w = wide_nul(target);
+        let bytes = secret.as_bytes();
+        let cred = CredentialW {
+            flags: 0,
+            cred_type: CRED_TYPE_GENERIC,
+            target_name: target_w.as_mut_ptr(),
+            comment: ptr::null_mut(),
+            last_written: FileTime {
+                dw_low_date_time: 0,
+                dw_high_date_time: 0,
+            },
+            credential_blob_size: bytes.len() as u32,
+            credential_blob: bytes.as_ptr() as *mut u8,
+            persist: CRED_PERSIST_LOCAL_MACHINE,
+            attribute_count: 0,
+            attributes: ptr::null_mut(),
+            target_alias: ptr::null_mut(),
+            user_name: ptr::null_mut(),
+        };
+        unsafe { CredWriteW(&cred, 0) != 0 }
+    }
+
+    pub fn read(target: &str) -> Option<String> {
+        let target_w = wide_nul(target);
+        let mut pcred: *mut CredentialW = ptr::null_mut();
+        let ok = unsafe { CredReadW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0, &mut pcred) };
+        if ok == 0 || pcred.is_null() {
+            return None;
+        }
+        let result = unsafe {
+            let cred = &*pcred;
+            if cred.credential_blob.is_null() || cred.credential_blob_size == 0 {
+                None
+            } else {
+                let slice = std::slice::from_raw_parts(
+                    cred.credential_blob,
+                    cred.credential_blob_size as usize,
+                );
+                String::from_utf8(slice.to_vec()).ok()
+            }
+        };
+        unsafe { CredFree(pcred as *mut core::ffi::c_void) };
+        result
+    }
+
+    pub fn delete(target: &str) {
+        let target_w = wide_nul(target);
+        unsafe {
+            let _ = CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0);
+        }
+    }
+}
+
+fn prepare_store_for_disk(store: &AccountStore, backend: &dyn SecretBackend) -> AccountStore {
+    let mut disk_store = store.clone();
+    for acc in &mut disk_store.accounts {
+        match &mut acc.kind {
+            AccountKind::Offline => {}
+            AccountKind::Microsoft {
+                access_token,
+                refresh_token,
+                ..
+            } => {
+                if access_token == KEYRING_SENTINEL || refresh_token == KEYRING_SENTINEL {
+                    continue;
+                }
+                let payload = StoredAccountSecret {
+                    access_token: access_token.clone(),
+                    secondary_token: refresh_token.clone(),
+                };
+                if let Ok(secret_json) = serde_json::to_string(&payload) {
+                    if backend.put(&acc.id, &secret_json) {
+                        *access_token = KEYRING_SENTINEL.to_string();
+                        *refresh_token = KEYRING_SENTINEL.to_string();
+                    }
+                }
+            }
+            AccountKind::ElyBy {
+                access_token,
+                client_token,
+                ..
+            } => {
+                if access_token == KEYRING_SENTINEL || client_token == KEYRING_SENTINEL {
+                    continue;
+                }
+                let payload = StoredAccountSecret {
+                    access_token: access_token.clone(),
+                    secondary_token: client_token.clone(),
+                };
+                if let Ok(secret_json) = serde_json::to_string(&payload) {
+                    if backend.put(&acc.id, &secret_json) {
+                        *access_token = KEYRING_SENTINEL.to_string();
+                        *client_token = KEYRING_SENTINEL.to_string();
+                    }
+                }
+            }
+        }
+    }
+    disk_store
+}
+
+fn hydrate_store_from_keyring(store: &mut AccountStore, backend: &dyn SecretBackend) -> bool {
+    let mut had_plaintext = false;
+    for acc in &mut store.accounts {
+        match &mut acc.kind {
+            AccountKind::Offline => {}
+            AccountKind::Microsoft {
+                access_token,
+                refresh_token,
+                ..
+            } => {
+                if access_token == KEYRING_SENTINEL || refresh_token == KEYRING_SENTINEL {
+                    if let Some(raw) = backend.get(&acc.id) {
+                        if let Ok(sec) = serde_json::from_str::<StoredAccountSecret>(&raw) {
+                            *access_token = sec.access_token;
+                            *refresh_token = sec.secondary_token;
+                        }
+                    }
+                } else if !access_token.is_empty() || !refresh_token.is_empty() {
+                    had_plaintext = true;
+                }
+            }
+            AccountKind::ElyBy {
+                access_token,
+                client_token,
+                ..
+            } => {
+                if access_token == KEYRING_SENTINEL || client_token == KEYRING_SENTINEL {
+                    if let Some(raw) = backend.get(&acc.id) {
+                        if let Ok(sec) = serde_json::from_str::<StoredAccountSecret>(&raw) {
+                            *access_token = sec.access_token;
+                            *client_token = sec.secondary_token;
+                        }
+                    }
+                } else if !access_token.is_empty() || !client_token.is_empty() {
+                    had_plaintext = true;
+                }
+            }
+        }
+    }
+    had_plaintext
+}
+
+/// Removes an account's stored credentials from the OS keyring when deleted.
+pub fn delete_account_secret(account_id: &str) {
+    OsKeyringBackend.delete(account_id);
+}
 
 /// Returns standard launcher data directories (e.g. ~/.local/share/sunset-launcher on Linux).
 pub fn get_launcher_paths() -> Result<LauncherPaths, String> {
@@ -17,7 +479,9 @@ pub fn get_launcher_paths() -> Result<LauncherPaths, String> {
         libraries_dir: root.join("libraries"),
         assets_dir: root.join("assets"),
         instances_dir: root.join("instances"),
+        servers_dir: root.join("servers"),
         profiles_file: root.join("profiles.json"),
+        servers_file: root.join("servers.json"),
         accounts_file: root.join("accounts.json"),
         root,
     };
@@ -30,6 +494,7 @@ pub fn get_launcher_paths() -> Result<LauncherPaths, String> {
         &paths.assets_dir.join("indexes"),
         &paths.assets_dir.join("objects"),
         &paths.instances_dir,
+        &paths.servers_dir,
     ] {
         fs::create_dir_all(dir)
             .map_err(|e| format!("Failed to create directory {}: {e}", dir.display()))?;
@@ -266,8 +731,7 @@ pub fn load_profiles(paths: &LauncherPaths) -> Vec<Profile> {
 pub fn save_profiles(paths: &LauncherPaths, profiles: &[Profile]) -> Result<(), String> {
     let json = serde_json::to_string_pretty(profiles)
         .map_err(|e| format!("Failed to serialize profiles: {e}"))?;
-    fs::write(&paths.profiles_file, json)
-        .map_err(|e| format!("Failed to write {}: {e}", paths.profiles_file.display()))
+    atomic_write(&paths.profiles_file, json)
 }
 
 /// Returns the game directory for a specific profile instance.
@@ -288,6 +752,63 @@ pub fn instance_dir(paths: &LauncherPaths, profile: &Profile) -> PathBuf {
     dir
 }
 
+/// Picks a unique, human-readable folder name inside `servers/` for a dedicated server.
+pub fn unique_server_dir_name(
+    paths: &LauncherPaths,
+    name: &str,
+    existing: &[DedicatedServer],
+) -> String {
+    let base = sanitize_instance_dir_name(name);
+    let is_taken = |candidate: &str| {
+        existing
+            .iter()
+            .any(|s| !s.dir_name.is_empty() && s.dir_name.eq_ignore_ascii_case(candidate))
+            || paths.servers_dir.join(candidate).exists()
+    };
+    if !is_taken(&base) {
+        return base;
+    }
+    for n in 2.. {
+        let candidate = format!("{base} ({n})");
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+/// Loads dedicated servers from servers.json, returning an empty list if none exist yet.
+pub fn load_servers(paths: &LauncherPaths) -> Vec<DedicatedServer> {
+    if paths.servers_file.exists() {
+        if let Ok(raw) = fs::read_to_string(&paths.servers_file) {
+            if let Ok(servers) = serde_json::from_str::<Vec<DedicatedServer>>(&raw) {
+                return servers;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Persists dedicated servers to servers.json.
+pub fn save_servers(paths: &LauncherPaths, servers: &[DedicatedServer]) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(servers)
+        .map_err(|e| format!("Failed to serialize servers: {e}"))?;
+    atomic_write(&paths.servers_file, json)
+}
+
+/// Returns the working directory for a dedicated server.
+pub fn server_dir(paths: &LauncherPaths, server: &DedicatedServer) -> PathBuf {
+    let dir = if !server.dir_name.is_empty() {
+        paths.servers_dir.join(&server.dir_name)
+    } else {
+        paths
+            .servers_dir
+            .join(sanitize_instance_dir_name(&server.name))
+    };
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
 /// Checks whether a version's client JAR and JSON are already present locally.
 #[allow(dead_code)]
 pub fn is_version_installed(paths: &LauncherPaths, version_id: &str) -> bool {
@@ -297,6 +818,7 @@ pub fn is_version_installed(paths: &LauncherPaths, version_id: &str) -> bool {
 }
 
 /// Loads saved accounts from accounts.json, creating a default offline account if empty.
+/// Automatically hydrates tokens stored in the OS keyring and migrates legacy plaintext files.
 pub fn load_accounts(paths: &LauncherPaths) -> AccountStore {
     if !paths.accounts_file.exists() {
         let default_acc = Account::offline("Player".to_string());
@@ -308,18 +830,24 @@ pub fn load_accounts(paths: &LauncherPaths) -> AccountStore {
         return store;
     }
 
-    match fs::read_to_string(&paths.accounts_file) {
+    let mut store: AccountStore = match fs::read_to_string(&paths.accounts_file) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => AccountStore::default(),
+    };
+    if hydrate_store_from_keyring(&mut store, &OsKeyringBackend) {
+        // Attempt transparent migration of plaintext tokens into OS keyring + 0600 permissions.
+        let _ = save_accounts(paths, &store);
     }
+    store
 }
 
-/// Persists accounts to accounts.json.
+/// Persists accounts to accounts.json using OS keyring token offloading (when available)
+/// and atomic restricted-permission (`0600`) writes.
 pub fn save_accounts(paths: &LauncherPaths, store: &AccountStore) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(store)
+    let disk_store = prepare_store_for_disk(store, &OsKeyringBackend);
+    let json = serde_json::to_string_pretty(&disk_store)
         .map_err(|e| format!("Failed to serialize accounts: {e}"))?;
-    fs::write(&paths.accounts_file, json)
-        .map_err(|e| format!("Failed to write {}: {e}", paths.accounts_file.display()))
+    atomic_write_restricted(&paths.accounts_file, json)
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -351,7 +879,7 @@ pub fn save_selected_profile_id(
     };
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize launcher state: {e}"))?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    atomic_write(&path, json)
 }
 
 /// Resolves the initial profile index from a persisted profile ID, falling back to 0.
@@ -422,7 +950,7 @@ pub fn save_launcher_settings(
     let path = paths.root.join("settings.json");
     let json = serde_json::to_string_pretty(settings)
         .map_err(|e| format!("Failed to serialize settings: {e}"))?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    atomic_write(&path, json)
 }
 
 /// Ensures the multi-size Windows `.ico` icon file exists in the launcher root directory.
@@ -594,7 +1122,9 @@ mod tests {
             libraries_dir: root.join("libraries"),
             assets_dir: root.join("assets"),
             instances_dir: root.join("instances"),
+            servers_dir: root.join("servers"),
             profiles_file: root.join("profiles.json"),
+            servers_file: root.join("servers.json"),
             accounts_file: root.join("accounts.json"),
             root,
         }
@@ -716,6 +1246,82 @@ mod tests {
             loaded[0].icon_path,
             paths.instances_dir.join("Better Fabric").join("icon.png").to_string_lossy()
         );
+
+        let _ = fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn atomic_write_and_keyring_redaction_roundtrip() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct MockKeyring {
+            map: Mutex<HashMap<String, String>>,
+        }
+        impl SecretBackend for MockKeyring {
+            fn put(&self, account_id: &str, secret_json: &str) -> bool {
+                self.map
+                    .lock()
+                    .unwrap()
+                    .insert(account_id.to_string(), secret_json.to_string());
+                true
+            }
+            fn get(&self, account_id: &str) -> Option<String> {
+                self.map.lock().unwrap().get(account_id).cloned()
+            }
+            fn delete(&self, account_id: &str) {
+                self.map.lock().unwrap().remove(account_id);
+            }
+        }
+
+        let paths = test_paths("keyring_atomic");
+        let keyring = MockKeyring::default();
+        let store = AccountStore {
+            active_id: Some("ms-1".into()),
+            accounts: vec![
+                Account {
+                    id: "ms-1".into(),
+                    username: "Steve".into(),
+                    kind: AccountKind::Microsoft {
+                        uuid: "abcd".into(),
+                        access_token: "super_secret_access".into(),
+                        refresh_token: "super_secret_refresh".into(),
+                        expires_at: 999999,
+                    },
+                },
+                Account {
+                    id: "ely-1".into(),
+                    username: "Alex".into(),
+                    kind: AccountKind::ElyBy {
+                        uuid: "efgh".into(),
+                        access_token: "ely_access_tok".into(),
+                        client_token: "ely_client_tok".into(),
+                    },
+                },
+            ],
+        };
+
+        let redacted = prepare_store_for_disk(&store, &keyring);
+        let serialized = serde_json::to_string_pretty(&redacted).unwrap();
+        assert!(!serialized.contains("super_secret_access"));
+        assert!(!serialized.contains("super_secret_refresh"));
+        assert!(!serialized.contains("ely_access_tok"));
+        assert!(serialized.contains(KEYRING_SENTINEL));
+
+        atomic_write_restricted(&paths.accounts_file, &serialized).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&paths.accounts_file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let mut loaded: AccountStore =
+            serde_json::from_str(&fs::read_to_string(&paths.accounts_file).unwrap()).unwrap();
+        assert!(!hydrate_store_from_keyring(&mut loaded, &keyring));
+        assert_eq!(loaded.accounts[0].kind, store.accounts[0].kind);
+        assert_eq!(loaded.accounts[1].kind, store.accounts[1].kind);
 
         let _ = fs::remove_dir_all(&paths.root);
     }

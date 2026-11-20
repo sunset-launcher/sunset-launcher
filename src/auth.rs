@@ -3,6 +3,7 @@ use crate::models::{
 };
 use crate::mojang::{build_http_client, download_file};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -722,13 +723,7 @@ pub fn fetch_account_skin(
         AccountKind::ElyBy { .. } => download_skin_bytes(
             &client,
             &format!("https://skinsystem.ely.by/skins/{}.png", account.username),
-        )
-        .or_else(|| {
-            download_skin_bytes(
-                &client,
-                &format!("http://skinsystem.ely.by/skins/{}.png", account.username),
-            )
-        }),
+        ),
         AccountKind::Offline => download_skin_bytes(
             &client,
             &format!("https://minotar.net/skin/{}", account.username),
@@ -786,10 +781,13 @@ fn select_release_asset<'a>(
 ) -> Option<&'a GithubAsset> {
     let preferred_names: &[&str] = match (os, arch) {
         ("linux", "x86_64") => &["sunset-launcher-linux-x64", "svarka-launcher-linux-x64"],
+        ("linux", "aarch64") => &["sunset-launcher-linux-arm64"],
         ("windows", "x86_64") => &[
             "sunset-launcher-windows-x64.exe",
             "svarka-launcher-windows-x64.exe",
         ],
+        ("macos", "aarch64") => &["sunset-launcher-macos-arm64"],
+        ("macos", "x86_64") => &["sunset-launcher-macos-x64"],
         _ => &[],
     };
     for exact in preferred_names {
@@ -815,7 +813,7 @@ fn select_release_asset<'a>(
         let lower = a.name.to_ascii_lowercase();
         if [
             ".sha256", ".sha512", ".sig", ".asc", ".txt", ".json", ".deb", ".rpm", ".dmg",
-            ".appimage",
+            ".msi", ".appimage",
         ]
         .iter()
         .any(|ext| lower.ends_with(ext))
@@ -885,9 +883,11 @@ fn extract_binary_from_zip(zip_path: &Path, dest_path: &Path, os: &str) -> Resul
             if !name.ends_with(".exe") {
                 continue;
             }
-        } else if [".txt", ".md", ".sha256", ".json", ".desktop", ".png", ".svg"]
-            .iter()
-            .any(|ext| name.ends_with(ext))
+        } else if [
+            ".txt", ".md", ".sha256", ".json", ".desktop", ".png", ".svg", ".icns", ".plist",
+        ]
+        .iter()
+        .any(|ext| name.ends_with(ext))
         {
             continue;
         }
@@ -1039,6 +1039,29 @@ pub fn cleanup_stale_update_files() {
     let _ = remaining;
 }
 
+fn find_sha256_asset_url(assets: &[GithubAsset], binary_name: &str) -> Option<String> {
+    let expected = format!("{binary_name}.sha256").to_ascii_lowercase();
+    assets
+        .iter()
+        .find(|a| a.name.to_ascii_lowercase() == expected)
+        .map(|a| a.browser_download_url.clone())
+}
+
+/// Extracts a 64-hex-char SHA-256 digest from standard `sha256sum` output (`<hex>  <file>` or `<hex>`).
+pub fn parse_sha256_digest(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let token = trimmed.split_whitespace().next()?;
+        if token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(token.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
 /// Checks GitHub Releases (`sunset-launcher/sunset-launcher`) for a newer version than `current_version`.
 pub fn check_github_latest_release(current_version: &str) -> Result<Option<LauncherUpdateInfo>, String> {
     let client = build_http_client()?;
@@ -1061,11 +1084,13 @@ pub fn check_github_latest_release(current_version: &str) -> Result<Option<Launc
             std::env::consts::OS,
             std::env::consts::ARCH,
         );
+        let sha256_url = asset.and_then(|a| find_sha256_asset_url(&rel.assets, &a.name));
         Ok(Some(LauncherUpdateInfo {
             version: rel.tag_name,
             html_url: rel.html_url,
             notes: rel.body,
             download_url: asset.map(|a| a.browser_download_url.clone()),
+            sha256_url,
             asset_name: asset.map(|a| a.name.clone()),
             asset_size: asset.and_then(|a| (a.size > 0).then_some(a.size)),
         }))
@@ -1113,6 +1138,23 @@ pub fn download_and_apply_update(
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
+    let expected_sha256 = if let Some(sha_url) = info.sha256_url.as_deref() {
+        let sha_text = client
+            .get(sha_url)
+            .send()
+            .map_err(|e| format!("Failed to download update SHA-256 checksum: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("Update SHA-256 checksum HTTP error: {e}"))?
+            .text()
+            .map_err(|e| format!("Invalid SHA-256 checksum text: {e}"))?;
+        Some(
+            parse_sha256_digest(&sha_text)
+                .ok_or_else(|| "Malformed SHA-256 checksum file in release".to_string())?,
+        )
+    } else {
+        None
+    };
+
     let mut resp = client
         .get(download_url)
         .send()
@@ -1126,6 +1168,7 @@ pub fn download_and_apply_update(
     let mut buf = [0_u8; 65_536];
     let mut downloaded: u64 = 0;
     let mut head = Vec::with_capacity(8);
+    let mut hasher = Sha256::new();
     let mut last_pct: u8 = 0;
 
     loop {
@@ -1139,6 +1182,7 @@ pub fn download_and_apply_update(
             let take = (8 - head.len()).min(n);
             head.extend_from_slice(&buf[..take]);
         }
+        hasher.update(&buf[..n]);
         out_file
             .write_all(&buf[..n])
             .map_err(|e| format!("Failed to write update file: {e}"))?;
@@ -1170,6 +1214,15 @@ pub fn download_and_apply_update(
             let _ = std::fs::remove_file(&dl_path);
             return Err(format!(
                 "Incomplete update download ({downloaded} of {expected} bytes)"
+            ));
+        }
+    }
+    if let Some(expected_hex) = expected_sha256 {
+        let actual_hex = hex::encode(hasher.finalize());
+        if !actual_hex.eq_ignore_ascii_case(&expected_hex) {
+            let _ = std::fs::remove_file(&dl_path);
+            return Err(format!(
+                "Update SHA-256 mismatch (expected {expected_hex}, got {actual_hex})"
             ));
         }
     }
@@ -1391,6 +1444,41 @@ mod tests {
         assert!(keep.exists());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_parse_sha256_and_multiarch_assets() {
+        let raw = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  sunset-launcher-linux-x64\n";
+        assert_eq!(
+            parse_sha256_digest(raw).as_deref(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+
+        let assets = vec![
+            GithubAsset {
+                name: "sunset-launcher-macos-arm64".into(),
+                browser_download_url: "https://example.invalid/macos-arm64".into(),
+                size: 10_000_000,
+            },
+            GithubAsset {
+                name: "sunset-launcher-macos-arm64.sha256".into(),
+                browser_download_url: "https://example.invalid/macos-arm64.sha256".into(),
+                size: 96,
+            },
+            GithubAsset {
+                name: "sunset-launcher-linux-arm64".into(),
+                browser_download_url: "https://example.invalid/linux-arm64".into(),
+                size: 11_000_000,
+            },
+        ];
+        let mac = select_release_asset(&assets, "macos", "aarch64").unwrap();
+        assert_eq!(mac.name, "sunset-launcher-macos-arm64");
+        assert_eq!(
+            find_sha256_asset_url(&assets, &mac.name).as_deref(),
+            Some("https://example.invalid/macos-arm64.sha256")
+        );
+        let linux_arm = select_release_asset(&assets, "linux", "aarch64").unwrap();
+        assert_eq!(linux_arm.name, "sunset-launcher-linux-arm64");
     }
 }
 

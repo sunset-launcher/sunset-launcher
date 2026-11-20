@@ -249,6 +249,31 @@ pub struct VersionDetails {
     pub minecraft_arguments: Option<String>,
     #[serde(rename = "javaVersion")]
     pub java_version: Option<JavaVersionInfo>,
+    #[serde(default)]
+    pub logging: Option<VersionLogging>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionLogging {
+    #[serde(default)]
+    pub client: Option<LoggingClientConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingClientConfig {
+    pub argument: String,
+    pub file: LoggingFileArtifact,
+    #[serde(rename = "type", default)]
+    pub logging_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingFileArtifact {
+    pub id: String,
+    pub sha1: String,
+    #[serde(default)]
+    pub size: Option<u64>,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +285,8 @@ pub struct JavaVersionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionDownloads {
     pub client: Option<DownloadArtifact>,
+    #[serde(default)]
+    pub server: Option<DownloadArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +336,10 @@ pub struct AssetIndexInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetIndex {
     pub objects: HashMap<String, AssetObject>,
+    #[serde(rename = "virtual", default)]
+    pub is_virtual: bool,
+    #[serde(default)]
+    pub map_to_resources: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -358,6 +389,19 @@ pub struct LoaderProfileOverlay {
     pub libraries: Vec<Library>,
 }
 
+/// Purpose tag for non-blocking OS file selection dialogs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilePickPurpose {
+    ModpackImport,
+    InstanceContentImport,
+    WorldDatapackImport { world_folder: String },
+    InstanceIcon,
+    ServerIcon,
+    JavaBinary,
+    ServerJavaBinary,
+    CustomUiFont,
+}
+
 /// Messages sent from background worker threads to the UI.
 #[derive(Debug, Clone)]
 pub enum WorkerEvent {
@@ -399,11 +443,225 @@ pub enum WorkerEvent {
         head: Result<IconImage, String>,
         body: Result<IconImage, String>,
     },
+    FilePicked {
+        purpose: FilePickPurpose,
+        path: Option<PathBuf>,
+    },
     WorldBackupFinished(Result<PathBuf, String>),
     WorldRestoreFinished(Result<String, String>),
     LauncherUpdateChecked(Result<Option<LauncherUpdateInfo>, String>),
     LauncherUpdateInstalled(Result<PathBuf, String>),
     JavaDetected(Vec<JavaInstall>),
+    ServerProvisioned(Result<DedicatedServer, String>),
+    ServerStarted(Result<ServerHandle, String>),
+    ServerLog(String),
+    ServerTunnelAddress(String),
+    ServerTunnelFailed(String),
+    ServerExited(Option<i32>),
+    ServerProjectInstalled(Result<ModrinthInstallOutcome, String>),
+}
+
+/// Supported dedicated server software.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerSoftware {
+    #[default]
+    Vanilla,
+    Paper,
+    Purpur,
+    Folia,
+    Fabric,
+    Quilt,
+    Forge,
+    NeoForge,
+    Arclight,
+}
+
+impl ServerSoftware {
+    pub const ALL: [ServerSoftware; 9] = [
+        ServerSoftware::Vanilla,
+        ServerSoftware::Paper,
+        ServerSoftware::Purpur,
+        ServerSoftware::Folia,
+        ServerSoftware::Fabric,
+        ServerSoftware::Quilt,
+        ServerSoftware::Forge,
+        ServerSoftware::NeoForge,
+        ServerSoftware::Arclight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ServerSoftware::Vanilla => "Vanilla",
+            ServerSoftware::Paper => "Paper",
+            ServerSoftware::Purpur => "Purpur",
+            ServerSoftware::Folia => "Folia",
+            ServerSoftware::Fabric => "Fabric",
+            ServerSoftware::Quilt => "Quilt",
+            ServerSoftware::Forge => "Forge",
+            ServerSoftware::NeoForge => "NeoForge",
+            ServerSoftware::Arclight => "Arclight",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn supports_plugins(self) -> bool {
+        matches!(
+            self,
+            ServerSoftware::Paper
+                | ServerSoftware::Purpur
+                | ServerSoftware::Folia
+                | ServerSoftware::Arclight
+        )
+    }
+
+    #[allow(dead_code)]
+    pub fn supports_mods(self) -> bool {
+        matches!(
+            self,
+            ServerSoftware::Fabric
+                | ServerSoftware::Quilt
+                | ServerSoftware::Forge
+                | ServerSoftware::NeoForge
+                | ServerSoftware::Arclight
+        )
+    }
+
+    pub fn modrinth_mod_loader(self) -> Option<LoaderKind> {
+        match self {
+            ServerSoftware::Fabric => Some(LoaderKind::Fabric),
+            ServerSoftware::Quilt => Some(LoaderKind::Quilt),
+            ServerSoftware::Forge => Some(LoaderKind::Forge),
+            ServerSoftware::NeoForge => Some(LoaderKind::NeoForge),
+            ServerSoftware::Arclight => Some(LoaderKind::Forge),
+            _ => None,
+        }
+    }
+
+    pub fn modrinth_plugin_loaders(self) -> &'static [&'static str] {
+        match self {
+            ServerSoftware::Folia => &["folia", "paper"],
+            ServerSoftware::Purpur => &["purpur", "paper", "spigot", "bukkit"],
+            _ => &["paper", "purpur", "spigot", "bukkit"],
+        }
+    }
+}
+
+/// A user-configured dedicated Minecraft server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DedicatedServer {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub dir_name: String,
+    #[serde(default)]
+    pub software: ServerSoftware,
+    pub mc_version: String,
+    #[serde(default)]
+    pub loader_version: String,
+    #[serde(default = "default_server_min_ram")]
+    pub min_ram_mb: u32,
+    #[serde(default = "default_server_max_ram")]
+    pub max_ram_mb: u32,
+    #[serde(default = "default_server_port")]
+    pub port: u16,
+    #[serde(default = "default_server_motd")]
+    pub motd: String,
+    #[serde(default = "default_server_max_players")]
+    pub max_players: u32,
+    #[serde(default = "default_true")]
+    pub online_mode: bool,
+    #[serde(default = "default_true")]
+    pub public_upnp: bool,
+    #[serde(default)]
+    pub use_tunnel: bool,
+    #[serde(default)]
+    pub eula_accepted: bool,
+    #[serde(default)]
+    pub java_path: String,
+    #[serde(default)]
+    pub jvm_args: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub last_started: Option<String>,
+}
+
+fn default_server_min_ram() -> u32 {
+    1024
+}
+
+fn default_server_max_ram() -> u32 {
+    2048
+}
+
+fn default_server_port() -> u16 {
+    25565
+}
+
+fn default_server_motd() -> String {
+    "A Minecraft Server".to_string()
+}
+
+fn default_server_max_players() -> u32 {
+    20
+}
+
+impl DedicatedServer {
+    pub fn new(
+        name: String,
+        software: ServerSoftware,
+        mc_version: String,
+        port: u16,
+        max_ram_mb: u32,
+        online_mode: bool,
+        motd: String,
+        eula_accepted: bool,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            dir_name: String::new(),
+            software,
+            mc_version,
+            loader_version: String::new(),
+            min_ram_mb: (max_ram_mb / 2).clamp(512, 2048),
+            max_ram_mb: max_ram_mb.max(512),
+            port,
+            motd: if motd.trim().is_empty() {
+                default_server_motd()
+            } else {
+                motd.trim().to_string()
+            },
+            max_players: 20,
+            online_mode,
+            public_upnp: true,
+            use_tunnel: false,
+            eula_accepted,
+            java_path: String::new(),
+            jvm_args: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_started: None,
+        }
+    }
+}
+
+/// Active UPnP IGD port mapping created when starting a public server.
+#[derive(Debug, Clone)]
+pub struct UpnpMapping {
+    pub control_url: String,
+    pub service_type: String,
+    pub port: u16,
+    pub public_ip: Option<String>,
+}
+
+/// Shared handle to a running dedicated server process and its stdin pipe.
+#[derive(Debug, Clone)]
+pub struct ServerHandle {
+    pub server_id: String,
+    pub child: std::sync::Arc<std::sync::Mutex<std::process::Child>>,
+    pub stdin: std::sync::Arc<std::sync::Mutex<Option<std::process::ChildStdin>>>,
+    pub upnp_mapping: Option<UpnpMapping>,
+    pub tunnel_child: Option<std::sync::Arc<std::sync::Mutex<std::process::Child>>>,
 }
 
 /// Information about a newer release on GitHub.
@@ -413,6 +671,7 @@ pub struct LauncherUpdateInfo {
     pub html_url: String,
     pub notes: String,
     pub download_url: Option<String>,
+    pub sha256_url: Option<String>,
     pub asset_name: Option<String>,
     pub asset_size: Option<u64>,
 }
@@ -465,8 +724,10 @@ impl ModrinthSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModrinthProjectType {
     Mod,
+    Plugin,
     Resourcepack,
     Shader,
+    Datapack,
     Modpack,
 }
 
@@ -474,8 +735,10 @@ impl ModrinthProjectType {
     pub fn api_str(self) -> &'static str {
         match self {
             ModrinthProjectType::Mod => "mod",
+            ModrinthProjectType::Plugin => "plugin",
             ModrinthProjectType::Resourcepack => "resourcepack",
             ModrinthProjectType::Shader => "shader",
+            ModrinthProjectType::Datapack => "datapack",
             ModrinthProjectType::Modpack => "modpack",
         }
     }
@@ -483,8 +746,10 @@ impl ModrinthProjectType {
     pub fn label(self) -> &'static str {
         match self {
             ModrinthProjectType::Mod => "Mods",
+            ModrinthProjectType::Plugin => "Plugins",
             ModrinthProjectType::Resourcepack => "Resourcepacks",
             ModrinthProjectType::Shader => "Shaders",
+            ModrinthProjectType::Datapack => "Datapacks",
             ModrinthProjectType::Modpack => "Modpacks",
         }
     }
@@ -551,29 +816,54 @@ pub struct InstalledProject {
     pub icon_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModrinthHashes {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sha1: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha512: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MrpackIndex {
+    #[serde(rename = "formatVersion", default = "default_mrpack_format_version")]
+    pub format_version: u32,
+    #[serde(default = "default_mrpack_game")]
+    pub game: String,
+    #[serde(rename = "versionId", default)]
+    pub version_id: String,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub files: Vec<MrpackFile>,
     pub dependencies: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+fn default_mrpack_format_version() -> u32 {
+    1
+}
+
+fn default_mrpack_game() -> String {
+    "minecraft".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MrpackFile {
     pub path: String,
     pub hashes: ModrinthHashes,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<MrpackEnv>,
     pub downloads: Vec<String>,
+    #[serde(rename = "fileSize", skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MrpackEnv {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -655,7 +945,9 @@ pub struct LauncherPaths {
     pub libraries_dir: PathBuf,
     pub assets_dir: PathBuf,
     pub instances_dir: PathBuf,
+    pub servers_dir: PathBuf,
     pub profiles_file: PathBuf,
+    pub servers_file: PathBuf,
     pub accounts_file: PathBuf,
 }
 
@@ -881,6 +1173,8 @@ pub struct LauncherSettings {
     pub check_updates_on_startup: bool,
     #[serde(default)]
     pub auto_update: bool,
+    #[serde(default)]
+    pub curseforge_api_key: String,
 }
 
 impl Default for LauncherSettings {
@@ -897,6 +1191,7 @@ impl Default for LauncherSettings {
             open_console_on_crash: true,
             check_updates_on_startup: true,
             auto_update: false,
+            curseforge_api_key: String::new(),
         }
     }
 }
