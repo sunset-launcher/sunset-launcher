@@ -1042,11 +1042,37 @@ pub struct SingleInstanceGuard {
     _file: fs::File,
 }
 
+#[cfg(unix)]
+fn single_instance_socket_path(root: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::ffi::OsStrExt;
+
+    // Darwin/macOS limits `sockaddr_un.sun_path` to 104 bytes (103 + NUL); keep headroom.
+    const MAX_UNIX_SOCK_BYTES: usize = 96;
+
+    let direct = root.join("instance.sock");
+    if direct.as_os_str().as_bytes().len() <= MAX_UNIX_SOCK_BYTES {
+        return direct;
+    }
+
+    let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let digest = Sha256::digest(canonical.as_os_str().as_bytes());
+    let short_hex = hex::encode(&digest[..8]);
+    let file_name = format!("sunset-launcher-{short_hex}.sock");
+
+    let temp_candidate = std::env::temp_dir().join(&file_name);
+    if temp_candidate.as_os_str().as_bytes().len() <= MAX_UNIX_SOCK_BYTES {
+        temp_candidate
+    } else {
+        PathBuf::from("/tmp").join(file_name)
+    }
+}
+
 fn try_acquire_single_instance_lock(paths: &LauncherPaths) -> Option<SingleInstanceGuard> {
     let _ = fs::create_dir_all(&paths.root);
     #[cfg(unix)]
     {
-        let sock_path = paths.root.join("instance.sock");
+        let sock_path = single_instance_socket_path(&paths.root);
         match std::os::unix::net::UnixListener::bind(&sock_path) {
             Ok(listener) => Some(SingleInstanceGuard {
                 _listener: listener,
@@ -1193,6 +1219,34 @@ mod tests {
         drop(guard2);
 
         let _ = fs::remove_dir_all(&paths.root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn single_instance_lock_handles_long_root_paths_over_sun_len() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let base = test_paths("long_lock");
+        let deep_root = base
+            .root
+            .join("very_long_username_directory_exceeding_darwin_sun_path_104_bytes_limit")
+            .join("nested_application_support_sunset_launcher_data");
+        fs::create_dir_all(&deep_root).unwrap();
+        let sock = single_instance_socket_path(&deep_root);
+        assert!(sock.as_os_str().as_bytes().len() <= 96);
+
+        let mut paths = base.clone();
+        paths.root = deep_root;
+        let guard = acquire_single_instance_lock(&paths, false)
+            .expect("long-path lock acquisition should succeed");
+        assert!(acquire_single_instance_lock(&paths, false).is_none());
+        drop(guard);
+
+        let guard2 = acquire_single_instance_lock(&paths, false)
+            .expect("long-path lock should be re-acquirable after drop");
+        drop(guard2);
+
+        let _ = fs::remove_dir_all(&base.root);
     }
 
     #[test]
