@@ -1097,7 +1097,7 @@ pub fn start_dedicated_server(
     };
 
     if effective.use_tunnel {
-        match start_public_tunnel(effective.port, tx) {
+        match start_public_tunnel(paths, effective.port, tx) {
             Ok(t_handle) => {
                 handle.tunnel = Some(t_handle);
             }
@@ -1246,6 +1246,7 @@ pub fn kill_dedicated_server(handle: &ServerHandle) {
 }
 
 /// Parses `listening at bore.pub:12345` from `bore` output (stripping any ANSI codes).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_bore_listening_address(line: &str) -> Option<String> {
     let clean = strip_ansi_codes(line);
     let idx = clean.find("listening at ")?;
@@ -1463,15 +1464,208 @@ fn start_bore_tunnel(
         }
     });
 
-    Ok(Arc::new(TunnelHandle(stop_flag)))
+    Ok(Arc::new(TunnelHandle::Builtin(stop_flag)))
 }
 
-fn start_public_tunnel(
+/// Parses `tcp://host.pinggy-free.link:12345` from Pinggy SSH output.
+pub fn parse_pinggy_tcp_address(line: &str) -> Option<String> {
+    let idx = line.find("tcp://")?;
+    let rest = &line[idx + "tcp://".len()..];
+    let addr = rest.split_whitespace().next()?;
+    if addr.contains(':') {
+        Some(addr.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_bore_reachable() -> bool {
+    let Ok(addrs_iter) = "bore.pub:7835".to_socket_addrs() else {
+        return false;
+    };
+    let mut addrs: Vec<_> = addrs_iter.collect();
+    addrs.sort_by_key(|a| a.is_ipv6());
+    for addr in addrs.into_iter().take(4) {
+        if TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+fn spawn_tunnel_readers(
+    mut child: std::process::Child,
+    tx: Option<&Sender<WorkerEvent>>,
+    parser: fn(&str) -> Option<String>,
+) -> Arc<Mutex<std::process::Child>> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let found_addr = Arc::new(AtomicBool::new(false));
+    let last_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+    if let (Some(out), Some(tx_out)) = (stdout, tx.cloned()) {
+        let found = Arc::clone(&found_addr);
+        thread::spawn(move || {
+            let reader = BufReader::new(out);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(addr) = parser(&line) {
+                    found.store(true, Ordering::Relaxed);
+                    let _ = tx_out.send(WorkerEvent::ServerTunnelAddress(addr.clone()));
+                    let _ = tx_out.send(WorkerEvent::ServerLog(format!(
+                        "[Network] Public tunnel active -> {addr} (works behind gray/CGNAT IP)"
+                    )));
+                }
+            }
+        });
+    }
+    if let (Some(err), Some(tx_err)) = (stderr, tx.cloned()) {
+        let found = Arc::clone(&found_addr);
+        let err_slot = Arc::clone(&last_err);
+        thread::spawn(move || {
+            let reader = BufReader::new(err);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Some(addr) = parser(&line) {
+                    found.store(true, Ordering::Relaxed);
+                    let _ = tx_err.send(WorkerEvent::ServerTunnelAddress(addr.clone()));
+                    let _ = tx_err.send(WorkerEvent::ServerLog(format!(
+                        "[Network] Public tunnel active -> {addr} (works behind gray/CGNAT IP)"
+                    )));
+                } else {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        if let Ok(mut g) = err_slot.lock() {
+                            *g = Some(trimmed.to_string());
+                        }
+                        let _ = tx_err.send(WorkerEvent::ServerLog(format!("[Tunnel] {line}")));
+                    }
+                }
+            }
+        });
+    }
+
+    let child_arc = Arc::new(Mutex::new(child));
+    if let Some(tx_wait) = tx.cloned() {
+        let watch = Arc::clone(&child_arc);
+        let found = Arc::clone(&found_addr);
+        let err_slot = Arc::clone(&last_err);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(400));
+            let exited = match watch.lock() {
+                Ok(mut g) => g.try_wait(),
+                Err(_) => break,
+            };
+            match exited {
+                Ok(Some(status)) => {
+                    if !found.load(Ordering::Relaxed) {
+                        let detail = err_slot.lock().ok().and_then(|g| g.clone());
+                        let msg = match detail {
+                            Some(d) => format!("Tunnel exited ({status}): {d}"),
+                            None => format!("Tunnel exited ({status})"),
+                        };
+                        let _ = tx_wait.send(WorkerEvent::ServerTunnelFailed(msg));
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        });
+    }
+    child_arc
+}
+
+fn ensure_pinggy_ssh_key(paths: &LauncherPaths) -> Option<PathBuf> {
+    let tools_dir = paths.root.join("tools");
+    let _ = fs::create_dir_all(&tools_dir);
+    let key_path = tools_dir.join("tunnel_ed25519");
+    if key_path.is_file() {
+        return Some(key_path);
+    }
+    let mut cmd = Command::new("ssh-keygen");
+    cmd.arg("-t")
+        .arg("ed25519")
+        .arg("-N")
+        .arg("")
+        .arg("-q")
+        .arg("-f")
+        .arg(&key_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_background_command(&mut cmd);
+    match cmd.status() {
+        Ok(st) if st.success() && key_path.is_file() => Some(key_path),
+        _ => None,
+    }
+}
+
+fn start_pinggy_tunnel(
+    paths: &LauncherPaths,
     port: u16,
     tx: Option<&Sender<WorkerEvent>>,
 ) -> Result<Arc<TunnelHandle>, String> {
-    emit_server_log(tx, "[Network] Connecting built-in bore.pub tunnel...");
-    start_bore_tunnel(port, tx)
+    let tools_dir = paths.root.join("tools");
+    let known_hosts_arg = if fs::create_dir_all(&tools_dir).is_ok() {
+        format!(
+            "UserKnownHostsFile=\"{}\"",
+            tools_dir.join("known_hosts").display()
+        )
+    } else if cfg!(windows) {
+        "UserKnownHostsFile=NUL".to_string()
+    } else {
+        "UserKnownHostsFile=/dev/null".to_string()
+    };
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-T")
+        .arg("-p")
+        .arg("443")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg(&known_hosts_arg);
+    if let Some(key_path) = ensure_pinggy_ssh_key(paths) {
+        cmd.arg("-i")
+            .arg(key_path)
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg("-o")
+            .arg("BatchMode=yes");
+    }
+    cmd.arg("-o")
+        .arg("ServerAliveInterval=30")
+        .arg("-o")
+        .arg("ConnectTimeout=8")
+        .arg(format!("-R0:127.0.0.1:{port}"))
+        .arg("tcp@a.pinggy.io")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_background_command(&mut cmd);
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start SSH tunnel (ssh): {e}"))?;
+    Ok(Arc::new(TunnelHandle::External(spawn_tunnel_readers(
+        child,
+        tx,
+        parse_pinggy_tcp_address,
+    ))))
+}
+
+fn start_public_tunnel(
+    paths: &LauncherPaths,
+    port: u16,
+    tx: Option<&Sender<WorkerEvent>>,
+) -> Result<Arc<TunnelHandle>, String> {
+    if is_bore_reachable() {
+        emit_server_log(tx, "[Network] Connecting built-in bore.pub tunnel...");
+        return start_bore_tunnel(port, tx);
+    }
+    emit_server_log(
+        tx,
+        "[Network] bore.pub:7835 unreachable, connecting Pinggy tunnel (port 443)...",
+    );
+    start_pinggy_tunnel(paths, port, tx)
 }
 
 /// Detects the primary local LAN IPv4 address without sending network traffic.
@@ -1807,6 +2001,11 @@ online-mode=true
             parse_bore_listening_address("2026-11-19T20:20:00Z INFO bore_cli::client: listening at bore.pub:41923")
                 .as_deref(),
             Some("bore.pub:41923")
+        );
+        assert_eq!(
+            parse_pinggy_tcp_address("tcp://nfhbw-146-120-164-243.run.pinggy-free.link:32845")
+                .as_deref(),
+            Some("nfhbw-146-120-164-243.run.pinggy-free.link:32845")
         );
         let ssdp = "HTTP/1.1 200 OK\r\nLOCATION: http://192.168.1.1:5000/rootDesc.xml\r\n";
         assert_eq!(

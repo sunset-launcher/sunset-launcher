@@ -699,13 +699,25 @@ pub struct UpnpMapping {
     pub public_ip: Option<String>,
 }
 
-/// Handle to an active built-in `bore` public tunnel.
-#[derive(Debug, Clone)]
-pub struct TunnelHandle(pub std::sync::Arc<std::sync::atomic::AtomicBool>);
+/// Handle to an active public tunnel (built-in `bore` client or Pinggy SSH fallback).
+#[derive(Debug)]
+pub enum TunnelHandle {
+    Builtin(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    External(std::sync::Arc<std::sync::Mutex<std::process::Child>>),
+}
 
 impl TunnelHandle {
     pub fn stop(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        match self {
+            Self::Builtin(stop_flag) => {
+                stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Self::External(child) => {
+                if let Ok(mut guard) = child.lock() {
+                    let _ = guard.kill();
+                }
+            }
+        }
     }
 }
 
