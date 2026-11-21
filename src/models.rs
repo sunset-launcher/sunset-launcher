@@ -699,6 +699,16 @@ pub struct UpnpMapping {
     pub public_ip: Option<String>,
 }
 
+/// Handle to an active built-in `bore` public tunnel.
+#[derive(Debug, Clone)]
+pub struct TunnelHandle(pub std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl TunnelHandle {
+    pub fn stop(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Shared handle to a running dedicated server process and its stdin pipe.
 #[derive(Debug, Clone)]
 pub struct ServerHandle {
@@ -706,7 +716,7 @@ pub struct ServerHandle {
     pub child: std::sync::Arc<std::sync::Mutex<std::process::Child>>,
     pub stdin: std::sync::Arc<std::sync::Mutex<Option<std::process::ChildStdin>>>,
     pub upnp_mapping: Option<UpnpMapping>,
-    pub tunnel_child: Option<std::sync::Arc<std::sync::Mutex<std::process::Child>>>,
+    pub tunnel: Option<std::sync::Arc<TunnelHandle>>,
 }
 
 /// Information about a newer release on GitHub.

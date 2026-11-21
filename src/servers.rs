@@ -1,17 +1,18 @@
 use crate::launcher::{configure_background_command, ensure_java_runtime, split_jvm_args};
 use crate::models::{
     DedicatedServer, LauncherPaths, LoaderKind, ModLoader, Profile, ServerHandle, ServerSoftware,
-    UpnpMapping, VersionDetails, VersionManifest, WorkerEvent,
+    TunnelHandle, UpnpMapping, VersionDetails, VersionManifest, WorkerEvent,
 };
 use crate::mojang::{
     build_http_client, download_file, fetch_loader_versions, fetch_version_manifest,
 };
 use crate::storage::server_dir;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -1092,13 +1093,13 @@ pub fn start_dedicated_server(
         child: Arc::new(Mutex::new(child)),
         stdin: Arc::new(Mutex::new(stdin)),
         upnp_mapping: None,
-        tunnel_child: None,
+        tunnel: None,
     };
 
     if effective.use_tunnel {
-        match start_public_tunnel(paths, effective.port, tx) {
-            Ok(t_child) => {
-                handle.tunnel_child = Some(t_child);
+        match start_public_tunnel(effective.port, tx) {
+            Ok(t_handle) => {
+                handle.tunnel = Some(t_handle);
             }
             Err(err) => {
                 emit_server_log(tx, format!("[Network] Tunnel failed: {err}"));
@@ -1168,7 +1169,7 @@ pub fn start_dedicated_server(
     if let Some(tx_wait) = tx.cloned() {
         let child_arc = Arc::clone(&handle.child);
         let mapping_cleanup = handle.upnp_mapping.clone();
-        let tunnel_cleanup = handle.tunnel_child.clone();
+        let tunnel_cleanup = handle.tunnel.clone();
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(350));
             let status = {
@@ -1181,9 +1182,7 @@ pub fn start_dedicated_server(
             match status {
                 Ok(Some(code)) => {
                     if let Some(tc) = tunnel_cleanup {
-                        if let Ok(mut g) = tc.lock() {
-                            let _ = g.kill();
-                        }
+                        tc.stop();
                     }
                     if let Some(m) = mapping_cleanup {
                         close_upnp_port(&m);
@@ -1194,9 +1193,7 @@ pub fn start_dedicated_server(
                 Ok(None) => {}
                 Err(_) => {
                     if let Some(tc) = tunnel_cleanup {
-                        if let Ok(mut g) = tc.lock() {
-                            let _ = g.kill();
-                        }
+                        tc.stop();
                     }
                     if let Some(m) = mapping_cleanup {
                         close_upnp_port(&m);
@@ -1237,10 +1234,8 @@ pub fn stop_dedicated_server(handle: &ServerHandle) -> Result<(), String> {
 
 /// Forcefully terminates the dedicated server process (and any active tunnel/UPnP).
 pub fn kill_dedicated_server(handle: &ServerHandle) {
-    if let Some(tc) = &handle.tunnel_child {
-        if let Ok(mut guard) = tc.lock() {
-            let _ = guard.kill();
-        }
+    if let Some(tc) = &handle.tunnel {
+        tc.stop();
     }
     if let Some(m) = &handle.upnp_mapping {
         close_upnp_port(m);
@@ -1263,281 +1258,220 @@ pub fn parse_bore_listening_address(line: &str) -> Option<String> {
     }
 }
 
-fn ensure_bore_binary(
-    paths: &LauncherPaths,
-    tx: Option<&Sender<WorkerEvent>>,
-) -> Result<PathBuf, String> {
-    let bin_name = if cfg!(windows) { "bore.exe" } else { "bore" };
-    let tools_dir = paths.root.join("tools");
-    let target_bin = tools_dir.join(bin_name);
-    if target_bin.is_file() {
-        return Ok(target_bin);
-    }
+const BORE_CONTROL_HOST: &str = "bore.pub";
+const BORE_CONTROL_PORT: u16 = 7835;
 
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(bin_name);
-            if candidate.is_file() {
-                return Ok(candidate);
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+enum BoreClientMsg {
+    #[allow(dead_code)]
+    Authenticate(String),
+    Hello(u16),
+    Accept(String),
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+enum BoreServerMsg {
+    Challenge(String),
+    Hello(u16),
+    Heartbeat,
+    Connection(String),
+    Error(String),
+}
+
+fn send_bore_msg(stream: &mut TcpStream, msg: &BoreClientMsg) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec(msg).map_err(|e| format!("bore encode error: {e}"))?;
+    bytes.push(0);
+    stream
+        .write_all(&bytes)
+        .and_then(|_| stream.flush())
+        .map_err(|e| format!("bore write error: {e}"))
+}
+
+enum BoreReadState {
+    Msg(BoreServerMsg),
+    Timeout,
+    Eof,
+}
+
+fn read_bore_msg(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Result<BoreReadState, String> {
+    loop {
+        if let Some(pos) = buf.iter().position(|&b| b == 0) {
+            let frame: Vec<u8> = buf.drain(..=pos).collect();
+            let json_slice = &frame[..frame.len() - 1];
+            let msg: BoreServerMsg = serde_json::from_slice(json_slice)
+                .map_err(|e| format!("bore decode error: {e}"))?;
+            return Ok(BoreReadState::Msg(msg));
+        }
+        if buf.len() > 64 * 1024 {
+            return Err("bore control frame too large".to_string());
+        }
+        let mut chunk = [0u8; 1024];
+        match stream.read(&mut chunk) {
+            Ok(0) => return Ok(BoreReadState::Eof),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                return Ok(BoreReadState::Timeout);
             }
+            Err(e) => return Err(format!("bore read error: {e}")),
         }
     }
+}
 
-    fs::create_dir_all(&tools_dir)
-        .map_err(|e| format!("Failed to create tools dir {}: {e}", tools_dir.display()))?;
-
-    let target_triple = if cfg!(target_os = "windows") {
-        "x86_64-pc-windows-msvc.zip"
-    } else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") {
-            "aarch64-apple-darwin.tar.gz"
-        } else {
-            "x86_64-apple-darwin.tar.gz"
+fn connect_bore_control() -> Result<(TcpStream, SocketAddr), String> {
+    let addrs_iter = (BORE_CONTROL_HOST, BORE_CONTROL_PORT)
+        .to_socket_addrs()
+        .map_err(|e| format!("Failed to resolve {BORE_CONTROL_HOST}: {e}"))?;
+    let mut addrs: Vec<_> = addrs_iter.collect();
+    addrs.sort_by_key(|a| a.is_ipv6());
+    let mut last_err = "no addresses resolved".to_string();
+    for addr in addrs.into_iter().take(4) {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(4)) {
+            Ok(s) => {
+                let _ = s.set_nodelay(true);
+                return Ok((s, addr));
+            }
+            Err(e) => last_err = e.to_string(),
         }
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64-unknown-linux-musl.tar.gz"
-    } else {
-        "x86_64-unknown-linux-musl.tar.gz"
+    }
+    Err(format!("Failed to connect {BORE_CONTROL_HOST}:{BORE_CONTROL_PORT}: {last_err}"))
+}
+
+fn forward_bore_connection(server_addr: SocketAddr, conn_id: String, local_port: u16) {
+    let Ok(mut remote) = TcpStream::connect_timeout(&server_addr, Duration::from_secs(5)) else {
+        return;
     };
-
-    emit_progress(tx, "Downloading bore tunnel...", 0.96);
-    emit_server_log(tx, "[Network] Downloading bore tunnel client...");
-    let client = build_http_client()?;
-    let release: GitHubRelease = client
-        .get("https://api.github.com/repos/ekzhang/bore/releases/latest")
-        .send()
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("Failed to fetch bore release: {e}"))?
-        .json()
-        .map_err(|e| format!("Failed to parse bore release: {e}"))?;
-
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name.ends_with(target_triple))
-        .ok_or_else(|| format!("No bore binary release found for {target_triple}"))?;
-
-    let archive_path = tools_dir.join(&asset.name);
-    download_file(&client, &asset.browser_download_url, &archive_path, None)?;
-
-    if asset.name.ends_with(".zip") {
-        let file = fs::File::open(&archive_path)
-            .map_err(|e| format!("Failed to open {}: {e}", archive_path.display()))?;
-        let mut archive =
-            zip::ZipArchive::new(file).map_err(|e| format!("Invalid bore zip: {e}"))?;
-        let mut found = false;
-        for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-            if entry.name().ends_with(bin_name) {
-                let mut out = fs::File::create(&target_bin)
-                    .map_err(|e| format!("Failed to write {}: {e}", target_bin.display()))?;
-                std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            return Err("bore.exe not found inside archive".to_string());
-        }
-    } else {
-        let mut cmd = Command::new("tar");
-        cmd.arg("-xzf")
-            .arg(&archive_path)
-            .arg("-C")
-            .arg(&tools_dir);
-        configure_background_command(&mut cmd);
-        let status = cmd
-            .status()
-            .map_err(|e| format!("Failed to extract bore archive: {e}"))?;
-        if !status.success() {
-            return Err(format!("tar extraction failed with {status}"));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = fs::metadata(&target_bin) {
-                let mut perms = meta.permissions();
-                perms.set_mode(0o755);
-                let _ = fs::set_permissions(&target_bin, perms);
-            }
-        }
+    let _ = remote.set_nodelay(true);
+    if send_bore_msg(&mut remote, &BoreClientMsg::Accept(conn_id)).is_err() {
+        return;
     }
-    let _ = fs::remove_file(&archive_path);
-    if !target_bin.is_file() {
-        return Err("bore binary missing after extraction".to_string());
-    }
-    Ok(target_bin)
-}
-
-/// Parses `tcp://host.pinggy-free.link:12345` from Pinggy SSH output.
-pub fn parse_pinggy_tcp_address(line: &str) -> Option<String> {
-    let idx = line.find("tcp://")?;
-    let rest = &line[idx + "tcp://".len()..];
-    let addr = rest.split_whitespace().next()?;
-    if addr.contains(':') {
-        Some(addr.to_string())
-    } else {
-        None
-    }
-}
-
-fn is_bore_reachable() -> bool {
-    let Ok(addrs) = "bore.pub:7835".to_socket_addrs() else {
-        return false;
+    let local_addr = SocketAddr::from(([127, 0, 0, 1], local_port));
+    let Ok(mut local) = TcpStream::connect_timeout(&local_addr, Duration::from_secs(5)) else {
+        return;
     };
-    for addr in addrs.take(3) {
-        if TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok() {
-            return true;
-        }
-    }
-    false
+    let _ = local.set_nodelay(true);
+
+    let (Ok(mut r_read), Ok(mut l_write)) = (remote.try_clone(), local.try_clone()) else {
+        return;
+    };
+    let t = thread::spawn(move || {
+        let _ = std::io::copy(&mut r_read, &mut l_write);
+        let _ = l_write.shutdown(Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut local, &mut remote);
+    let _ = remote.shutdown(Shutdown::Write);
+    let _ = t.join();
 }
 
-fn spawn_tunnel_readers(
-    mut child: std::process::Child,
+/// Starts the built-in Rust `bore` client (zero external binaries required).
+fn start_bore_tunnel(
+    port: u16,
     tx: Option<&Sender<WorkerEvent>>,
-    parser: fn(&str) -> Option<String>,
-) -> Arc<Mutex<std::process::Child>> {
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let found_addr = Arc::new(std::sync::atomic::AtomicBool::new(false));
+) -> Result<Arc<TunnelHandle>, String> {
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_worker = Arc::clone(&stop_flag);
+    let tx_owned = tx.cloned();
 
-    if let (Some(out), Some(tx_out)) = (stdout, tx.cloned()) {
-        let found = Arc::clone(&found_addr);
-        thread::spawn(move || {
-            let reader = BufReader::new(out);
-            for line in reader.lines().map_while(Result::ok) {
-                if let Some(addr) = parser(&line) {
-                    found.store(true, std::sync::atomic::Ordering::Relaxed);
-                    let _ = tx_out.send(WorkerEvent::ServerTunnelAddress(addr.clone()));
-                    let _ = tx_out.send(WorkerEvent::ServerLog(format!(
-                        "[Network] Public tunnel active -> {addr} (works behind gray/CGNAT IP)"
-                    )));
+    thread::spawn(move || {
+        let (mut stream, server_addr) = match connect_bore_control() {
+            Ok(res) => res,
+            Err(err) => {
+                if let Some(tx) = &tx_owned {
+                    let _ = tx.send(WorkerEvent::ServerTunnelFailed(err));
                 }
+                return;
             }
-        });
-    }
-    if let (Some(err), Some(tx_err)) = (stderr, tx.cloned()) {
-        let found = Arc::clone(&found_addr);
-        thread::spawn(move || {
-            let reader = BufReader::new(err);
-            for line in reader.lines().map_while(Result::ok) {
-                if let Some(addr) = parser(&line) {
-                    found.store(true, std::sync::atomic::Ordering::Relaxed);
-                    let _ = tx_err.send(WorkerEvent::ServerTunnelAddress(addr.clone()));
-                    let _ = tx_err.send(WorkerEvent::ServerLog(format!(
-                        "[Network] Public tunnel active -> {addr} (works behind gray/CGNAT IP)"
-                    )));
-                } else if !line.trim().is_empty() {
-                    let _ = tx_err.send(WorkerEvent::ServerLog(format!("[Tunnel] {line}")));
-                }
-            }
-        });
-    }
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
 
-    let child_arc = Arc::new(Mutex::new(child));
-    if let Some(tx_wait) = tx.cloned() {
-        let watch = Arc::clone(&child_arc);
-        let found = Arc::clone(&found_addr);
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_millis(400));
-            let exited = match watch.lock() {
-                Ok(mut g) => g.try_wait(),
-                Err(_) => break,
-            };
-            match exited {
-                Ok(Some(status)) => {
-                    if !found.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = tx_wait.send(WorkerEvent::ServerTunnelFailed(format!(
-                            "Tunnel exited ({status})"
-                        )));
+        if let Err(err) = send_bore_msg(&mut stream, &BoreClientMsg::Hello(0)) {
+            if let Some(tx) = &tx_owned {
+                let _ = tx.send(WorkerEvent::ServerTunnelFailed(err));
+            }
+            return;
+        }
+
+        let mut buf = Vec::with_capacity(2048);
+        let mut assigned_port: Option<u16> = None;
+
+        while !stop_worker.load(Ordering::Relaxed) {
+            match read_bore_msg(&mut stream, &mut buf) {
+                Ok(BoreReadState::Timeout) => continue,
+                Ok(BoreReadState::Eof) => {
+                    if assigned_port.is_none() {
+                        if let Some(tx) = &tx_owned {
+                            let _ = tx.send(WorkerEvent::ServerTunnelFailed(
+                                "bore server closed connection".to_string(),
+                            ));
+                        }
                     }
                     break;
                 }
-                Ok(None) => {}
-                Err(_) => break,
+                Ok(BoreReadState::Msg(msg)) => match msg {
+                    BoreServerMsg::Hello(remote_port) => {
+                        assigned_port = Some(remote_port);
+                        let addr = format!("{BORE_CONTROL_HOST}:{remote_port}");
+                        if let Some(tx) = &tx_owned {
+                            let _ = tx.send(WorkerEvent::ServerTunnelAddress(addr.clone()));
+                            let _ = tx.send(WorkerEvent::ServerLog(format!(
+                                "[Network] Public tunnel active -> {addr} (built-in bore, works behind gray/CGNAT IP)"
+                            )));
+                        }
+                    }
+                    BoreServerMsg::Connection(conn_id) => {
+                        thread::spawn(move || {
+                            forward_bore_connection(server_addr, conn_id, port);
+                        });
+                    }
+                    BoreServerMsg::Heartbeat => {}
+                    BoreServerMsg::Challenge(_) => {
+                        if assigned_port.is_none() {
+                            if let Some(tx) = &tx_owned {
+                                let _ = tx.send(WorkerEvent::ServerTunnelFailed(
+                                    "bore server requested authentication challenge".to_string(),
+                                ));
+                            }
+                        }
+                        break;
+                    }
+                    BoreServerMsg::Error(e) => {
+                        if assigned_port.is_none() {
+                            if let Some(tx) = &tx_owned {
+                                let _ = tx.send(WorkerEvent::ServerTunnelFailed(format!(
+                                    "bore error: {e}"
+                                )));
+                            }
+                        } else if let Some(tx) = &tx_owned {
+                            let _ = tx.send(WorkerEvent::ServerLog(format!(
+                                "[Tunnel] bore error: {e}"
+                            )));
+                        }
+                        break;
+                    }
+                },
+                Err(err) => {
+                    if assigned_port.is_none() {
+                        if let Some(tx) = &tx_owned {
+                            let _ = tx.send(WorkerEvent::ServerTunnelFailed(err));
+                        }
+                    }
+                    break;
+                }
             }
-        });
-    }
-    child_arc
-}
+        }
+    });
 
-fn start_bore_tunnel(
-    paths: &LauncherPaths,
-    port: u16,
-    tx: Option<&Sender<WorkerEvent>>,
-) -> Result<Arc<Mutex<std::process::Child>>, String> {
-    let bore_bin = ensure_bore_binary(paths, tx)?;
-    let mut cmd = Command::new(&bore_bin);
-    cmd.env("NO_COLOR", "1")
-        .arg("local")
-        .arg(port.to_string())
-        .arg("--to")
-        .arg("bore.pub")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    configure_background_command(&mut cmd);
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start bore tunnel: {e}"))?;
-    Ok(spawn_tunnel_readers(
-        child,
-        tx,
-        parse_bore_listening_address,
-    ))
-}
-
-fn start_pinggy_tunnel(
-    port: u16,
-    tx: Option<&Sender<WorkerEvent>>,
-) -> Result<Arc<Mutex<std::process::Child>>, String> {
-    let null_hosts = if cfg!(windows) {
-        "UserKnownHostsFile=NUL"
-    } else {
-        "UserKnownHostsFile=/dev/null"
-    };
-    let mut cmd = Command::new("ssh");
-    cmd.arg("-T")
-        .arg("-p")
-        .arg("443")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg(null_hosts)
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ServerAliveInterval=30")
-        .arg("-o")
-        .arg("ConnectTimeout=8")
-        .arg(format!("-R0:127.0.0.1:{port}"))
-        .arg("tcp@a.pinggy.io")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    configure_background_command(&mut cmd);
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start SSH tunnel (ssh): {e}"))?;
-    Ok(spawn_tunnel_readers(child, tx, parse_pinggy_tcp_address))
+    Ok(Arc::new(TunnelHandle(stop_flag)))
 }
 
 fn start_public_tunnel(
-    paths: &LauncherPaths,
     port: u16,
     tx: Option<&Sender<WorkerEvent>>,
-) -> Result<Arc<Mutex<std::process::Child>>, String> {
-    if is_bore_reachable() {
-        emit_server_log(tx, "[Network] Connecting bore.pub tunnel...");
-        return start_bore_tunnel(paths, port, tx);
-    }
-    emit_server_log(
-        tx,
-        "[Network] bore.pub:7835 unreachable, connecting Pinggy tunnel (port 443)...",
-    );
-    start_pinggy_tunnel(port, tx)
+) -> Result<Arc<TunnelHandle>, String> {
+    emit_server_log(tx, "[Network] Connecting built-in bore.pub tunnel...");
+    start_bore_tunnel(port, tx)
 }
 
 /// Detects the primary local LAN IPv4 address without sending network traffic.
@@ -1843,16 +1777,36 @@ online-mode=true
     }
 
     #[test]
+    fn bore_protocol_json_framing_roundtrip() {
+        let hello = serde_json::to_string(&BoreClientMsg::Hello(0)).unwrap();
+        assert_eq!(hello, "{\"Hello\":0}");
+        let accept = serde_json::to_string(&BoreClientMsg::Accept(
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        ))
+        .unwrap();
+        assert_eq!(
+            accept,
+            "{\"Accept\":\"550e8400-e29b-41d4-a716-446655440000\"}"
+        );
+        let srv_hello: BoreServerMsg = serde_json::from_str("{\"Hello\":41923}").unwrap();
+        assert_eq!(srv_hello, BoreServerMsg::Hello(41923));
+        let srv_conn: BoreServerMsg =
+            serde_json::from_str("{\"Connection\":\"550e8400-e29b-41d4-a716-446655440000\"}")
+                .unwrap();
+        assert_eq!(
+            srv_conn,
+            BoreServerMsg::Connection("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+        let hb: BoreServerMsg = serde_json::from_str("\"Heartbeat\"").unwrap();
+        assert_eq!(hb, BoreServerMsg::Heartbeat);
+    }
+
+    #[test]
     fn parse_bore_and_upnp_helpers_work() {
         assert_eq!(
             parse_bore_listening_address("2026-11-19T20:20:00Z INFO bore_cli::client: listening at bore.pub:41923")
                 .as_deref(),
             Some("bore.pub:41923")
-        );
-        assert_eq!(
-            parse_pinggy_tcp_address("tcp://nfhbw-146-120-164-243.run.pinggy-free.link:32845")
-                .as_deref(),
-            Some("nfhbw-146-120-164-243.run.pinggy-free.link:32845")
         );
         let ssdp = "HTTP/1.1 200 OK\r\nLOCATION: http://192.168.1.1:5000/rootDesc.xml\r\n";
         assert_eq!(

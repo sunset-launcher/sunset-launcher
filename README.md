@@ -25,7 +25,7 @@
 ## Features
 - **Instances & Profiles**: create, duplicate, edit, and delete instances with isolated `instances/<instance_name>` game directories.
 - **Mod Loaders**: supports **Vanilla**, **Fabric**, **Quilt**, **Forge**, and **NeoForge** via official Mojang, Fabric/Quilt Meta, and Forge/NeoForge Maven APIs (including Forge/NeoForge installer processors).
-- **Dedicated Servers & Public Access**: create and run dedicated **Vanilla**, **Paper**, **Purpur**, **Folia**, **Fabric**, **Quilt**, **Forge**, **NeoForge**, and **Arclight** servers with a live interactive console, `server.properties` editor, automatic UPnP port forwarding, and an optional public TCP tunnel (**`bore`** via `bore.pub`) that works behind CGNAT / gray IPs (downloads the official [`ekzhang/bore`](https://github.com/ekzhang/bore) binary on demand into `tools/` when enabled).
+- **Dedicated Servers & Public Access**: create and run dedicated **Vanilla**, **Paper**, **Purpur**, **Folia**, **Fabric**, **Quilt**, **Forge**, **NeoForge**, and **Arclight** servers with a live interactive console, `server.properties` editor, automatic UPnP port forwarding, and a built-in TCP tunnel client compatible with [`ekzhang/bore`](https://github.com/ekzhang/bore) (`bore.pub` relay) that works behind CGNAT / gray IPs without external binaries.
 - **Modrinth Integration & `.mrpack`**: search and install mods, modpacks (`.mrpack`), resource packs, and shaders; import/export `.mrpack` archives and toggle enabled content files.
 - **Worlds, Quick-Play & Backups**: browse instance worlds, launch directly into a world (`--quickPlaySingleplayer`), and create, restore, or delete `.zip` world backups.
 - **High-Speed Parallel Downloads**: pooled async downloads (up to 64 concurrent transfers) with streaming SHA-1 verification and automatic extraction of native libraries (`natives`).
@@ -100,14 +100,14 @@ Inside this folder:
 - `assets/` — asset indexes and resource objects
 - `instances/` — isolated game directories per instance
 - `servers.json` & `servers/` — dedicated server configurations and server working directories
-- `tools/` — optional on-demand tools (such as the `bore` binary downloaded when using the public server tunnel)
 - `java/` — optional launcher-local Java runtimes
 
 ## Privacy
-- **Privacy Policy**: Sunset Launcher does **not** collect telemetry, analytics, or crash tracking, and does not send any personal data to developer-controlled servers. All credentials (Microsoft / Ely.by tokens, accounts, and profiles) are stored locally in the launcher data directory. Network requests occur only to third-party services explicitly required by user features (Mojang/Minecraft, Fabric/Quilt/Forge/NeoForge, PaperMC/Purpur/Arclight, Modrinth, Adoptium Java, Microsoft OAuth / Ely.by authentication, GitHub Releases for update checks and optional `bore` tunnel binary downloads, `bore.pub` when the public server tunnel is enabled, and local Discord RPC IPC when enabled).
+- **Privacy Policy**: Sunset Launcher does **not** collect telemetry, analytics, or crash tracking, and does not send any personal data to developer-controlled servers. All credentials (Microsoft / Ely.by tokens, accounts, and profiles) are stored locally in the launcher data directory. Network requests occur only to third-party services explicitly required by user features (Mojang/Minecraft, Fabric/Quilt/Forge/NeoForge, PaperMC/Purpur/Arclight, Modrinth, Adoptium Java, Microsoft OAuth / Ely.by authentication, GitHub Releases for update checks, `bore.pub` when the public server tunnel is enabled, and local Discord RPC IPC when enabled).
 
 ## Credits & License
 - **Author**: `svarka` ([@sunset-launcher](https://github.com/sunset-launcher))
 - **Co-Author / AI Contributor**: **Antigravity (Gemini)**
+- **Public Tunnel Relay**: [`ekzhang/bore`](https://github.com/ekzhang/bore) (`bore.pub`, MIT)
 - **License**: [MIT](LICENSE)
 
