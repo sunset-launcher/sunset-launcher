@@ -38,6 +38,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_app_id("sunset-launcher")
             .with_inner_size([1060.0, 680.0])
             .with_min_inner_size([440.0, 380.0])
             .with_icon(std::sync::Arc::new(icons::build_window_icon()))

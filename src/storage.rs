@@ -894,8 +894,11 @@ pub fn resolve_selected_profile_index(profiles: &[Profile], saved_id: Option<&st
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn ensure_linux_desktop_entry(paths: &LauncherPaths) -> Result<PathBuf, String> {
     const LOGO_PNG: &[u8] = include_bytes!("../logo.png");
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to locate current executable: {e}"))?;
+    let exe_path = match std::env::var_os("APPIMAGE").filter(|v| !v.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_exe()
+            .map_err(|e| format!("Failed to locate current executable: {e}"))?,
+    };
     let exe_escaped = exe_path.to_string_lossy().replace('"', "\\\"");
 
     let icon_path = paths.root.join("sunset-launcher.png");
@@ -927,7 +930,7 @@ Icon={}\n\
 Terminal=false\n\
 Categories=Game;\n\
 StartupNotify=true\n\
-StartupWMClass=Sunset Launcher\n",
+StartupWMClass=sunset-launcher\n",
         icon_path.display()
     );
     fs::write(&desktop_path, desktop_contents)

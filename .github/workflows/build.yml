@@ -171,6 +171,7 @@ jobs:
           Icon=sunset-launcher
           Terminal=false
           Categories=Game;
+          StartupWMClass=sunset-launcher
           EOF
           sed -i 's/^          //' "$PKG_DIR/usr/share/applications/sunset-launcher.desktop"
           cat > "$PKG_DIR/DEBIAN/control" <<EOF
@@ -206,6 +207,7 @@ jobs:
           Icon=sunset-launcher
           Terminal=false
           Categories=Game;
+          StartupWMClass=sunset-launcher
           EOF
           sed -i 's/^          //' "$RPM_TOP/SOURCES/sunset-launcher.desktop"
           cat > "$RPM_TOP/SPECS/sunset-launcher.spec" <<EOF
@@ -261,6 +263,7 @@ jobs:
           Icon=sunset-launcher
           Terminal=false
           Categories=Game;
+          StartupWMClass=sunset-launcher
           EOF
           sed -i 's/^          //' "$APP_DIR/sunset-launcher.desktop"
           cp "$APP_DIR/sunset-launcher.desktop" "$APP_DIR/usr/share/applications/sunset-launcher.desktop"
