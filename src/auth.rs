@@ -336,8 +336,20 @@ pub fn start_microsoft_device_login(client_id: String, tx: Sender<WorkerEvent>) 
     });
 }
 
-/// Refreshes a Microsoft account's Minecraft access token if it is expired or close to expiring.
+/// Refreshes a Microsoft/Ely.by account's access token if expired, or skips network validation in offline mode.
+#[allow(dead_code)]
 pub fn ensure_valid_account(account: &mut Account, ms_client_id: &str) -> Result<(), String> {
+    ensure_valid_account_with_mode(account, ms_client_id, false)
+}
+
+pub fn ensure_valid_account_with_mode(
+    account: &mut Account,
+    ms_client_id: &str,
+    offline_mode: bool,
+) -> Result<(), String> {
+    if offline_mode {
+        return Ok(());
+    }
     match &mut account.kind {
         AccountKind::Offline => Ok(()),
         AccountKind::Microsoft {
@@ -813,7 +825,7 @@ fn select_release_asset<'a>(
         let lower = a.name.to_ascii_lowercase();
         if [
             ".sha256", ".sha512", ".sig", ".asc", ".txt", ".json", ".deb", ".rpm", ".dmg",
-            ".msi", ".appimage",
+            ".msi", ".appimage", "-setup.exe", "installer.exe",
         ]
         .iter()
         .any(|ext| lower.ends_with(ext))
@@ -1352,9 +1364,29 @@ mod tests {
                 size: 64,
             },
             GithubAsset {
+                name: "sunset-launcher-0.1.8-1.x86_64.rpm".to_string(),
+                browser_download_url: "https://example.invalid/sunset-linux.rpm".to_string(),
+                size: 12_200_000,
+            },
+            GithubAsset {
+                name: "sunset-launcher-0.1.8-x86_64.AppImage".to_string(),
+                browser_download_url: "https://example.invalid/sunset-linux.AppImage".to_string(),
+                size: 14_000_000,
+            },
+            GithubAsset {
+                name: "sunset-launcher-macos-arm64.dmg".to_string(),
+                browser_download_url: "https://example.invalid/sunset-macos.dmg".to_string(),
+                size: 13_500_000,
+            },
+            GithubAsset {
                 name: "sunset-launcher-linux-x64".to_string(),
                 browser_download_url: "https://example.invalid/sunset-linux".to_string(),
                 size: 12_000_000,
+            },
+            GithubAsset {
+                name: "sunset-launcher-windows-x64-setup.exe".to_string(),
+                browser_download_url: "https://example.invalid/sunset-win-setup".to_string(),
+                size: 13_800_000,
             },
             GithubAsset {
                 name: "sunset-launcher-windows-x64.exe".to_string(),
@@ -1375,6 +1407,13 @@ mod tests {
             "sunset-launcher-windows-x64.exe"
         );
         assert!(select_release_asset(&sunset_assets, "macos", "aarch64").is_none());
+
+        let setup_only = vec![GithubAsset {
+            name: "sunset-launcher-windows-x64-setup.exe".to_string(),
+            browser_download_url: "https://example.invalid/sunset-win-setup".to_string(),
+            size: 13_800_000,
+        }];
+        assert!(select_release_asset(&setup_only, "windows", "x86_64").is_none());
     }
 
     #[test]

@@ -182,36 +182,29 @@ impl McLauncherApp {
                     .iter()
                     .filter(|s| s.software == ServerSoftware::Vanilla)
                     .count();
+                let filter_label = |f: ServerFilter| match f {
+                    ServerFilter::All => format!("{} ({total_cnt})", tr(lang, "lib.all")),
+                    ServerFilter::Plugins => format!("{} ({plugins_cnt})", tr(lang, "mr.plugins")),
+                    ServerFilter::Mods => format!("{} ({mods_cnt})", tr(lang, "lib.modded")),
+                    ServerFilter::Vanilla => format!("{} ({vanilla_cnt})", tr(lang, "lib.vanilla")),
+                };
                 ui_wrap_row(ui, 30.0, |ui| {
-                    for (f, key, lbl) in [
-                        (
-                            ServerFilter::All,
-                            "all",
-                            format!("{} ({total_cnt})", tr(lang, "lib.all")),
-                        ),
-                        (
-                            ServerFilter::Plugins,
-                            "plugins",
-                            format!("{} ({plugins_cnt})", tr(lang, "mr.plugins")),
-                        ),
-                        (
-                            ServerFilter::Mods,
-                            "mods",
-                            format!("{} ({mods_cnt})", tr(lang, "lib.modded")),
-                        ),
-                        (
-                            ServerFilter::Vanilla,
-                            "vanilla",
-                            format!("{} ({vanilla_cnt})", tr(lang, "lib.vanilla")),
-                        ),
-                    ] {
-                        if ui_pill_tab(ui, ("srv_filter", key), &lbl, self.server_filter == f)
-                            .clicked()
-                            && self.server_filter != f
-                        {
-                            self.server_filter = f;
-                            self.mark_subtab_switch(ctx);
-                        }
+                    let prev_filter = self.server_filter;
+                    egui::ComboBox::from_id_salt("srv_filter_combo")
+                        .selected_text(filter_label(self.server_filter))
+                        .width(136.0)
+                        .show_ui(ui, |ui| {
+                            for f in [
+                                ServerFilter::All,
+                                ServerFilter::Plugins,
+                                ServerFilter::Mods,
+                                ServerFilter::Vanilla,
+                            ] {
+                                ui.selectable_value(&mut self.server_filter, f, filter_label(f));
+                            }
+                        });
+                    if self.server_filter != prev_filter {
+                        self.mark_subtab_switch(ctx);
                     }
                     let prev_sort = self.server_sort;
                     egui::ComboBox::from_id_salt("srv_sort_combo")
@@ -297,9 +290,9 @@ impl McLauncherApp {
             Self::apply_subtab_transition(ui, subtab_t, |ui| {
                 bounded_scroll(ui, "servers_page_scroll", |ui| {
                     let usable_w = (ui.available_width() - 12.0).max(160.0);
-                    let cols = if usable_w >= 960.0 {
+                    let cols = if usable_w >= 980.0 {
                         3
-                    } else if usable_w >= 540.0 {
+                    } else if usable_w >= 560.0 {
                         2
                     } else {
                         1
@@ -417,6 +410,12 @@ impl McLauncherApp {
                             animated_card(ui, row_id, selected, |ui| {
                                 ui.set_min_width(list_inner_w);
                                 ui.set_max_width(list_inner_w);
+                                let wide_srv_list = list_inner_w >= 460.0;
+                                let mid_w = if wide_srv_list {
+                                    (list_inner_w - 230.0).max(90.0)
+                                } else {
+                                    (list_inner_w - 46.0).max(90.0)
+                                };
                                 ui_toolbar_row(ui, 38.0, |ui| {
                                     ui.spacing_mut().item_spacing.x = 8.0;
                                     let (av_r, _) =
@@ -439,7 +438,6 @@ impl McLauncherApp {
                                         );
                                     }
 
-                                    let mid_w = (list_inner_w - 220.0).max(90.0);
                                     let info_resp = ui
                                         .allocate_ui_with_layout(
                                             Vec2::new(mid_w, 36.0),
@@ -492,81 +490,156 @@ impl McLauncherApp {
                                         action_open = Some(*idx);
                                     }
 
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.spacing_mut().item_spacing.x = 5.0;
-                                            if !is_running
-                                                && ui_icon_button(
+                                    if wide_srv_list {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.x = 5.0;
+                                                if !is_running
+                                                    && ui_icon_button(
+                                                        ui,
+                                                        ("srv_list_del", &item.id),
+                                                        Icon::Trash,
+                                                        tr(lang, "srv.delete"),
+                                                        ButtonVariant::Danger,
+                                                        !self.server_busy,
+                                                        28.0,
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    action_delete = Some(*idx);
+                                                }
+                                                if ui_icon_button(
                                                     ui,
-                                                    ("srv_list_del", &item.id),
-                                                    Icon::Trash,
-                                                    tr(lang, "srv.delete"),
-                                                    ButtonVariant::Danger,
-                                                    !self.server_busy,
-                                                    28.0,
-                                                )
-                                                .clicked()
-                                            {
-                                                action_delete = Some(*idx);
-                                            }
-                                            if ui_icon_button(
-                                                ui,
-                                                ("srv_list_cfg", &item.id),
-                                                Icon::Sliders,
-                                                tr(lang, "srv.settings"),
-                                                ButtonVariant::Secondary,
-                                                true,
-                                                28.0,
-                                            )
-                                            .clicked()
-                                            {
-                                                action_settings = Some(*idx);
-                                            }
-                                            if is_running {
-                                                if ui_button_icon(
-                                                    ui,
-                                                    ("srv_list_stop", &item.id),
-                                                    Some(Icon::Stop),
-                                                    tr(lang, "srv.stop"),
-                                                    ButtonVariant::Danger,
+                                                    ("srv_list_cfg", &item.id),
+                                                    Icon::Sliders,
+                                                    tr(lang, "srv.settings"),
+                                                    ButtonVariant::Secondary,
                                                     true,
                                                     28.0,
                                                 )
                                                 .clicked()
                                                 {
-                                                    action_stop = true;
+                                                    action_settings = Some(*idx);
                                                 }
-                                            } else {
-                                                let can_start = !self.server_busy
-                                                    && self.server_handle.is_none()
-                                                    && item.eula_accepted;
-                                                let start_resp = ui_button_icon(
-                                                    ui,
-                                                    ("srv_list_start", &item.id),
-                                                    Some(Icon::Play),
-                                                    tr(lang, "srv.start"),
-                                                    if selected {
-                                                        ButtonVariant::Primary
-                                                    } else {
-                                                        ButtonVariant::Secondary
-                                                    },
-                                                    can_start,
-                                                    28.0,
-                                                );
-                                                let start_resp = if !item.eula_accepted {
-                                                    start_resp
-                                                        .on_disabled_hover_text(tr(lang, "srv.eula"))
+                                                if is_running {
+                                                    if ui_button_icon(
+                                                        ui,
+                                                        ("srv_list_stop", &item.id),
+                                                        Some(Icon::Stop),
+                                                        tr(lang, "srv.stop"),
+                                                        ButtonVariant::Danger,
+                                                        true,
+                                                        28.0,
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        action_stop = true;
+                                                    }
                                                 } else {
-                                                    start_resp
-                                                };
-                                                if start_resp.clicked() {
-                                                    action_start = Some((*idx, item.clone()));
+                                                    let can_start = !self.server_busy
+                                                        && self.server_handle.is_none()
+                                                        && item.eula_accepted;
+                                                    let start_resp = ui_button_icon(
+                                                        ui,
+                                                        ("srv_list_start", &item.id),
+                                                        Some(Icon::Play),
+                                                        tr(lang, "srv.start"),
+                                                        if selected {
+                                                            ButtonVariant::Primary
+                                                        } else {
+                                                            ButtonVariant::Secondary
+                                                        },
+                                                        can_start,
+                                                        28.0,
+                                                    );
+                                                    let start_resp = if !item.eula_accepted {
+                                                        start_resp
+                                                            .on_disabled_hover_text(tr(lang, "srv.eula"))
+                                                    } else {
+                                                        start_resp
+                                                    };
+                                                    if start_resp.clicked() {
+                                                        action_start = Some((*idx, item.clone()));
+                                                    }
                                                 }
-                                            }
-                                        },
-                                    );
+                                            },
+                                        );
+                                    }
                                 });
+                                if !wide_srv_list {
+                                    ui.add_space(6.0);
+                                    ui_wrap_row(ui, 28.0, |ui| {
+                                        if is_running {
+                                            if ui_button_icon(
+                                                ui,
+                                                ("srv_list_stop", &item.id),
+                                                Some(Icon::Stop),
+                                                tr(lang, "srv.stop"),
+                                                ButtonVariant::Danger,
+                                                true,
+                                                28.0,
+                                            )
+                                            .clicked()
+                                            {
+                                                action_stop = true;
+                                            }
+                                        } else {
+                                            let can_start = !self.server_busy
+                                                && self.server_handle.is_none()
+                                                && item.eula_accepted;
+                                            let start_resp = ui_button_icon(
+                                                ui,
+                                                ("srv_list_start", &item.id),
+                                                Some(Icon::Play),
+                                                tr(lang, "srv.start"),
+                                                if selected {
+                                                    ButtonVariant::Primary
+                                                } else {
+                                                    ButtonVariant::Secondary
+                                                },
+                                                can_start,
+                                                28.0,
+                                            );
+                                            let start_resp = if !item.eula_accepted {
+                                                start_resp
+                                                    .on_disabled_hover_text(tr(lang, "srv.eula"))
+                                            } else {
+                                                start_resp
+                                            };
+                                            if start_resp.clicked() {
+                                                action_start = Some((*idx, item.clone()));
+                                            }
+                                        }
+                                        if ui_icon_button(
+                                            ui,
+                                            ("srv_list_cfg", &item.id),
+                                            Icon::Sliders,
+                                            tr(lang, "srv.settings"),
+                                            ButtonVariant::Secondary,
+                                            true,
+                                            28.0,
+                                        )
+                                        .clicked()
+                                        {
+                                            action_settings = Some(*idx);
+                                        }
+                                        if !is_running
+                                            && ui_icon_button(
+                                                ui,
+                                                ("srv_list_del", &item.id),
+                                                Icon::Trash,
+                                                tr(lang, "srv.delete"),
+                                                ButtonVariant::Danger,
+                                                !self.server_busy,
+                                                28.0,
+                                            )
+                                            .clicked()
+                                        {
+                                            action_delete = Some(*idx);
+                                        }
+                                    });
+                                }
                             });
                             ui.add_space(6.0);
                         }
@@ -1076,28 +1149,60 @@ impl McLauncherApp {
 
             ui.add_space(12.0);
 
-            ui_flow_row(ui, 30.0, |ui| {
-                for (tab, ic, lbl) in [
-                    (ServerSubTab::Console, Icon::Terminal, tr(lang, "nav.console")),
-                    (ServerSubTab::Content, Icon::Layers, tr(lang, "srv.tab_content")),
-                    (ServerSubTab::Settings, Icon::Sliders, tr(lang, "inst.settings")),
-                ] {
-                    let is_act = self.server_tab == tab;
-                    if ui_pill_tab_icon(
-                        ui,
-                        ("srv_subtab", lbl),
-                        Some(ic),
-                        lbl,
-                        is_act,
-                    )
-                    .clicked()
-                        && !is_act
-                    {
-                        self.server_tab = tab;
-                        self.mark_subtab_switch(ctx);
-                    }
+            if ui.available_width() < 460.0 {
+                let cur_lbl = match self.server_tab {
+                    ServerSubTab::Console => tr(lang, "nav.console"),
+                    ServerSubTab::Content => tr(lang, "srv.tab_content"),
+                    ServerSubTab::Settings => tr(lang, "inst.settings"),
+                };
+                let prev_tab = self.server_tab;
+                egui::ComboBox::from_id_salt("srv_subtab_combo")
+                    .selected_text(cur_lbl)
+                    .width((ui.available_width() - 24.0).clamp(150.0, 240.0))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.server_tab,
+                            ServerSubTab::Console,
+                            tr(lang, "nav.console"),
+                        );
+                        ui.selectable_value(
+                            &mut self.server_tab,
+                            ServerSubTab::Content,
+                            tr(lang, "srv.tab_content"),
+                        );
+                        ui.selectable_value(
+                            &mut self.server_tab,
+                            ServerSubTab::Settings,
+                            tr(lang, "inst.settings"),
+                        );
+                    });
+                if self.server_tab != prev_tab {
+                    self.mark_subtab_switch(ctx);
                 }
-            });
+            } else {
+                ui_wrap_row(ui, 30.0, |ui| {
+                    for (tab, ic, lbl) in [
+                        (ServerSubTab::Console, Icon::Terminal, tr(lang, "nav.console")),
+                        (ServerSubTab::Content, Icon::Layers, tr(lang, "srv.tab_content")),
+                        (ServerSubTab::Settings, Icon::Sliders, tr(lang, "inst.settings")),
+                    ] {
+                        let is_act = self.server_tab == tab;
+                        if ui_pill_tab_icon(
+                            ui,
+                            ("srv_subtab", lbl),
+                            Some(ic),
+                            lbl,
+                            is_act,
+                        )
+                        .clicked()
+                            && !is_act
+                        {
+                            self.server_tab = tab;
+                            self.mark_subtab_switch(ctx);
+                        }
+                    }
+                });
+            }
             ui.add_space(12.0);
             let subtab_t = self.subtab_switch_time;
             Self::apply_subtab_transition(ui, subtab_t, |ui| {
@@ -1134,40 +1239,78 @@ impl McLauncherApp {
                 let enabled_count = items.iter().filter(|i| i.enabled).count();
                 let disabled_count = total_count.saturating_sub(enabled_count);
 
-                // Folder switcher (identical to Instance -> Content)
+                // Folder, Filter & Actions bar (matches Instance -> Content)
+                let avail_w = ui.available_width();
+                let srv_state_label = |s: ContentStateFilter| match s {
+                    ContentStateFilter::All => format!("{} ({total_count})", tr(lang, "lib.all")),
+                    ContentStateFilter::Enabled => {
+                        format!("{} ({enabled_count})", tr(lang, "content.enabled"))
+                    }
+                    ContentStateFilter::Disabled => {
+                        format!("{} ({disabled_count})", tr(lang, "content.disabled"))
+                    }
+                };
+                let srv_folder_label = |is_plugins: bool| {
+                    if is_plugins {
+                        format!("{} ({plugins_count})", tr(lang, "mr.plugins"))
+                    } else {
+                        format!("{} ({mods_count})", tr(lang, "content.mods"))
+                    }
+                };
                 ui_wrap_row(ui, 30.0, |ui| {
-                    if supports_plugins {
-                        let lbl = format!("{} ({plugins_count})", tr(lang, "mr.plugins"));
-                        if ui_pill_tab_icon(
-                            ui,
-                            "srv_cnt_plugins",
-                            Some(Icon::Server),
-                            &lbl,
-                            self.server_content_is_plugins,
-                        )
-                        .clicked()
-                            && !self.server_content_is_plugins
-                        {
-                            self.server_content_is_plugins = true;
+                    if supports_plugins && supports_mods {
+                        let prev_plug = self.server_content_is_plugins;
+                        egui::ComboBox::from_id_salt("srv_content_folder_combo")
+                            .selected_text(srv_folder_label(self.server_content_is_plugins))
+                            .width(150.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.server_content_is_plugins,
+                                    true,
+                                    srv_folder_label(true),
+                                );
+                                ui.selectable_value(
+                                    &mut self.server_content_is_plugins,
+                                    false,
+                                    srv_folder_label(false),
+                                );
+                            });
+                        if self.server_content_is_plugins != prev_plug {
                             self.mark_subtab_switch(ctx);
                         }
+                    } else if supports_plugins || supports_mods {
+                        badge(ui, &srv_folder_label(self.server_content_is_plugins), true);
                     }
-                    if supports_mods {
-                        let lbl = format!("{} ({mods_count})", tr(lang, "content.mods"));
-                        if ui_pill_tab_icon(
-                            ui,
-                            "srv_cnt_mods",
-                            Some(Icon::Layers),
-                            &lbl,
-                            !self.server_content_is_plugins,
-                        )
-                        .clicked()
-                            && self.server_content_is_plugins
-                        {
-                            self.server_content_is_plugins = false;
-                            self.mark_subtab_switch(ctx);
-                        }
+
+                    let prev_state = self.content_state_filter;
+                    egui::ComboBox::from_id_salt("srv_content_state_combo")
+                        .selected_text(srv_state_label(self.content_state_filter))
+                        .width(140.0)
+                        .show_ui(ui, |ui| {
+                            for s in [
+                                ContentStateFilter::All,
+                                ContentStateFilter::Enabled,
+                                ContentStateFilter::Disabled,
+                            ] {
+                                ui.selectable_value(
+                                    &mut self.content_state_filter,
+                                    s,
+                                    srv_state_label(s),
+                                );
+                            }
+                        });
+                    if self.content_state_filter != prev_state {
+                        self.mark_subtab_switch(ctx);
                     }
+
+                    ui_search_input(
+                        ui,
+                        "srv_content_search_input",
+                        &mut self.content_search,
+                        tr(lang, "content.filter"),
+                        (avail_w * 0.30).clamp(115.0, 230.0),
+                    );
+
                     let can_browse = (self.server_content_is_plugins && supports_plugins)
                         || (!self.server_content_is_plugins && supports_mods);
                     if can_browse
@@ -1191,80 +1334,33 @@ impl McLauncherApp {
                         self.trigger_modrinth_search(false);
                         self.switch_page(ctx, NavPage::Discover);
                     }
-                    if ui_button_icon(
-                        ui,
-                        "srv_cnt_open_folder",
-                        Some(Icon::Folder),
-                        tr(lang, "btn.open_folder"),
-                        ButtonVariant::Secondary,
-                        true,
-                        28.0,
-                    )
-                    .clicked()
-                    {
+
+                    let mut act_open_folder = false;
+                    let mut act_enable_all = false;
+                    let mut act_disable_all = false;
+                    egui::ComboBox::from_id_salt("srv_content_actions_combo")
+                        .selected_text(tr(lang, "btn.actions"))
+                        .width(124.0)
+                        .show_ui(ui, |ui| {
+                            if ui.button(tr(lang, "btn.open_folder")).clicked() {
+                                act_open_folder = true;
+                                ui.close_menu();
+                            }
+                            if disabled_count > 0 && ui.button(tr(lang, "btn.enable_all")).clicked() {
+                                act_enable_all = true;
+                                ui.close_menu();
+                            }
+                            if enabled_count > 0 && ui.button(tr(lang, "btn.disable_all")).clicked() {
+                                act_disable_all = true;
+                                ui.close_menu();
+                            }
+                        });
+                    if act_open_folder {
                         let _ = std::fs::create_dir_all(&content_dir);
                         anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 28.0);
                         open_in_file_manager(&content_dir);
                     }
-                });
-
-                ui.add_space(6.0);
-                let avail_w = ui.available_width();
-                ui_wrap_row(ui, 30.0, |ui| {
-                    ui_search_input(
-                        ui,
-                        "srv_content_search_input",
-                        &mut self.content_search,
-                        tr(lang, "content.filter"),
-                        (avail_w * 0.36).clamp(115.0, 230.0),
-                    );
-                    if ui_pill_tab(
-                        ui,
-                        "srv_state_all",
-                        &format!("{} ({total_count})", tr(lang, "lib.all")),
-                        self.content_state_filter == ContentStateFilter::All,
-                    )
-                    .clicked()
-                        && self.content_state_filter != ContentStateFilter::All
-                    {
-                        self.content_state_filter = ContentStateFilter::All;
-                        self.mark_subtab_switch(ctx);
-                    }
-                    if ui_pill_tab(
-                        ui,
-                        "srv_state_on",
-                        &format!("{} ({enabled_count})", tr(lang, "content.enabled")),
-                        self.content_state_filter == ContentStateFilter::Enabled,
-                    )
-                    .clicked()
-                        && self.content_state_filter != ContentStateFilter::Enabled
-                    {
-                        self.content_state_filter = ContentStateFilter::Enabled;
-                        self.mark_subtab_switch(ctx);
-                    }
-                    if ui_pill_tab(
-                        ui,
-                        "srv_state_off",
-                        &format!("{} ({disabled_count})", tr(lang, "content.disabled")),
-                        self.content_state_filter == ContentStateFilter::Disabled,
-                    )
-                    .clicked()
-                        && self.content_state_filter != ContentStateFilter::Disabled
-                    {
-                        self.content_state_filter = ContentStateFilter::Disabled;
-                        self.mark_subtab_switch(ctx);
-                    }
-                    if disabled_count > 0
-                        && ui_button(
-                            ui,
-                            "srv_bulk_enable_btn",
-                            tr(lang, "btn.enable_all"),
-                            ButtonVariant::Secondary,
-                            true,
-                            30.0,
-                        )
-                        .clicked()
-                    {
+                    if act_enable_all {
                         if let Ok(n) = set_all_content_enabled(&content_dir, true) {
                             let pos = anim::pointer_or_center(ctx);
                             anim::emit_burst(ctx, pos, accent(), 8);
@@ -1275,17 +1371,7 @@ impl McLauncherApp {
                             );
                         }
                     }
-                    if enabled_count > 0
-                        && ui_button(
-                            ui,
-                            "srv_bulk_disable_btn",
-                            tr(lang, "btn.disable_all"),
-                            ButtonVariant::Subtle,
-                            true,
-                            30.0,
-                        )
-                        .clicked()
-                    {
+                    if act_disable_all {
                         if let Ok(n) = set_all_content_enabled(&content_dir, false) {
                             let pos = anim::pointer_or_center(ctx);
                             anim::emit_ring(ctx, pos, text_secondary(), 30.0);
@@ -1364,124 +1450,71 @@ impl McLauncherApp {
                         animated_card(ui, card_id, false, |ui| {
                             ui.set_min_width(card_inner_w);
                             ui.set_max_width(card_inner_w);
-                            ui_toolbar_row(ui, 36.0, |ui| {
-                                let toggle_id =
-                                    format!("{}_{}_{}", srv.id, folder_name, item.base_name);
-                                if mod_toggle_switch(ui, &toggle_id, item.enabled).clicked() {
-                                    if let Ok(now_on) = toggle_content_file(&content_dir, &item.disk_name) {
-                                        let pos = anim::pointer_or_center(ctx);
-                                        let col = if now_on { accent() } else { text_secondary() };
-                                        anim::emit_ring(ctx, pos, col, 26.0);
-                                        anim::emit_floating_badge(
-                                            ctx,
-                                            pos,
-                                            if now_on { Some(Icon::Check) } else { None },
-                                            if now_on { "" } else { "-" },
-                                            col,
-                                        );
-                                    }
-                                }
-                                let icon_size = Vec2::splat(30.0);
-                                let tex_opt = icon_url_opt
-                                    .and_then(|u| self.mr_icons.get(u))
-                                    .and_then(|o| o.as_ref());
-                                let is_icon_loading = icon_url_opt
-                                    .is_some_and(|u| self.mr_icons_pending.contains(u));
-                                if let Some(tex) = tex_opt {
-                                    ui.add(
-                                        egui::Image::new(tex)
-                                            .fit_to_exact_size(icon_size)
-                                            .rounding(Rounding::same(6.5)),
-                                    );
-                                } else {
-                                    let (rect, _) =
-                                        ui.allocate_exact_size(icon_size, Sense::hover());
-                                    draw_icon_placeholder(
-                                        ui,
-                                        rect,
-                                        6.5,
-                                        &display_title,
-                                        is_icon_loading,
-                                    );
-                                }
-
-                                ui.vertical(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(&display_title)
-                                            .strong()
-                                            .color(if item.enabled {
-                                                text_primary()
-                                            } else {
-                                                text_muted()
-                                            }),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{} KB",
-                                            (item.size_bytes / 1024).max(1)
-                                        ))
-                                        .small()
-                                        .color(text_muted()),
-                                    );
-                                });
-
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.0;
-                                        let compact_row = card_inner_w < 380.0;
-                                        let del_clicked = if compact_row {
-                                            ui_icon_button(
-                                                ui,
-                                                ("srv_cnt_del", &item.disk_name),
-                                                Icon::Trash,
-                                                tr(lang, "btn.remove"),
-                                                ButtonVariant::Danger,
-                                                true,
-                                                28.0,
-                                            )
-                                            .clicked()
-                                        } else {
-                                            ui_button_icon(
-                                                ui,
-                                                ("srv_cnt_del", &item.disk_name),
-                                                Some(Icon::Trash),
-                                                tr(lang, "btn.remove"),
-                                                ButtonVariant::Danger,
-                                                true,
-                                                28.0,
-                                            )
-                                            .clicked()
-                                        };
-                                        if del_clicked {
-                                            match std::fs::remove_file(
-                                                content_dir.join(&item.disk_name),
-                                            ) {
-                                                Ok(()) => {
-                                                    anim::emit_burst(ctx, anim::pointer_or_center(ctx), DANGER, 8);
-                                                    self.show_toast(
-                                                        ctx,
-                                                        format!(
-                                                            "{}: {display_title}",
-                                                            tr(lang, "toast.removed")
-                                                        ),
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    self.show_toast(
-                                                        ctx,
-                                                        format!("Failed to remove {display_title}: {e}"),
-                                                    );
-                                                }
+                            let compact_row = card_inner_w < 480.0;
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(card_inner_w, 38.0),
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.set_max_width(card_inner_w);
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    let del_clicked = if compact_row {
+                                        ui_icon_button(
+                                            ui,
+                                            ("srv_cnt_del", &item.disk_name),
+                                            Icon::Trash,
+                                            tr(lang, "btn.remove"),
+                                            ButtonVariant::Danger,
+                                            true,
+                                            28.0,
+                                        )
+                                        .clicked()
+                                    } else {
+                                        ui_button_icon(
+                                            ui,
+                                            ("srv_cnt_del", &item.disk_name),
+                                            Some(Icon::Trash),
+                                            tr(lang, "btn.remove"),
+                                            ButtonVariant::Danger,
+                                            true,
+                                            28.0,
+                                        )
+                                        .clicked()
+                                    };
+                                    if del_clicked {
+                                        match std::fs::remove_file(
+                                            content_dir.join(&item.disk_name),
+                                        ) {
+                                            Ok(()) => {
+                                                anim::emit_burst(
+                                                    ctx,
+                                                    anim::pointer_or_center(ctx),
+                                                    DANGER,
+                                                    8,
+                                                );
+                                                self.show_toast(
+                                                    ctx,
+                                                    format!(
+                                                        "{}: {display_title}",
+                                                        tr(lang, "toast.removed")
+                                                    ),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                self.show_toast(
+                                                    ctx,
+                                                    format!("Failed to remove {display_title}: {e}"),
+                                                );
                                             }
                                         }
+                                    }
+                                    if ui.available_width() > 210.0 {
                                         if !item.enabled {
                                             badge_sized(
                                                 ui,
                                                 tr(lang, "content.disabled"),
                                                 false,
                                                 28.0,
-                                                Some(112.0),
+                                                Some(108.0),
                                             );
                                         } else if let Some(inf) = info {
                                             badge_sized(
@@ -1489,13 +1522,110 @@ impl McLauncherApp {
                                                 &inf.version_number,
                                                 true,
                                                 28.0,
-                                                Some(112.0),
+                                                Some(108.0),
                                             )
                                             .on_hover_text(&inf.version_number);
                                         }
-                                    },
-                                );
-                            });
+                                    }
+
+                                    let left_w = (ui.available_width() - 4.0).max(40.0);
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(left_w, 36.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.set_max_width(left_w);
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            let toggle_id = format!(
+                                                "{}_{}_{}",
+                                                srv.id, folder_name, item.base_name
+                                            );
+                                            if mod_toggle_switch(ui, &toggle_id, item.enabled)
+                                                .clicked()
+                                            {
+                                                if let Ok(now_on) = toggle_content_file(
+                                                    &content_dir,
+                                                    &item.disk_name,
+                                                ) {
+                                                    let pos = anim::pointer_or_center(ctx);
+                                                    let col = if now_on {
+                                                        accent()
+                                                    } else {
+                                                        text_secondary()
+                                                    };
+                                                    anim::emit_ring(ctx, pos, col, 26.0);
+                                                    anim::emit_floating_badge(
+                                                        ctx,
+                                                        pos,
+                                                        if now_on {
+                                                            Some(Icon::Check)
+                                                        } else {
+                                                            None
+                                                        },
+                                                        if now_on { "" } else { "-" },
+                                                        col,
+                                                    );
+                                                }
+                                            }
+                                            let icon_size = Vec2::splat(30.0);
+                                            let tex_opt = icon_url_opt
+                                                .and_then(|u| self.mr_icons.get(u))
+                                                .and_then(|o| o.as_ref());
+                                            let is_icon_loading = icon_url_opt
+                                                .is_some_and(|u| self.mr_icons_pending.contains(u));
+                                            if let Some(tex) = tex_opt {
+                                                ui.add(
+                                                    egui::Image::new(tex)
+                                                        .fit_to_exact_size(icon_size)
+                                                        .rounding(Rounding::same(6.5)),
+                                                );
+                                            } else {
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    icon_size,
+                                                    Sense::hover(),
+                                                );
+                                                draw_icon_placeholder(
+                                                    ui,
+                                                    rect,
+                                                    6.5,
+                                                    &display_title,
+                                                    is_icon_loading,
+                                                );
+                                            }
+                                            let mid_w = (left_w - 82.0).max(20.0);
+                                            ui.allocate_ui_with_layout(
+                                                Vec2::new(mid_w, 34.0),
+                                                egui::Layout::top_down(egui::Align::Min),
+                                                |ui| {
+                                                    ui.set_max_width(mid_w);
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(&display_title)
+                                                                .strong()
+                                                                .color(if item.enabled {
+                                                                    text_primary()
+                                                                } else {
+                                                                    text_muted()
+                                                                }),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(format!(
+                                                                "{} KB",
+                                                                (item.size_bytes / 1024).max(1)
+                                                            ))
+                                                            .small()
+                                                            .color(text_muted()),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                },
+                                            );
+                                        },
+                                    );
+                                },
+                            );
                         });
                         ui.add_space(4.0);
                     }
@@ -1548,7 +1678,9 @@ impl McLauncherApp {
                             .min_scrolled_height(180.0)
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
-                                ui.set_min_width((card_w - 44.0).max(120.0));
+                                let srv_log_w = (card_w - 44.0).max(120.0);
+                                ui.set_min_width(srv_log_w);
+                                ui.set_max_width(srv_log_w);
                                 if self.server_logs.is_empty() {
                                     ui.label(
                                         egui::RichText::new("Server console output will appear here.")
@@ -1566,11 +1698,14 @@ impl McLauncherApp {
                                         } else {
                                             text_secondary()
                                         };
-                                        ui.label(
-                                            egui::RichText::new(line)
-                                                .monospace()
-                                                .size(11.5)
-                                                .color(col),
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(line)
+                                                    .monospace()
+                                                    .size(11.5)
+                                                    .color(col),
+                                            )
+                                            .wrap(),
                                         );
                                     }
                                 }
@@ -1965,55 +2100,73 @@ impl McLauncherApp {
             section_header(ui, tr(lang, "srv.sec_gameplay"));
             ui.add_space(8.0);
 
-            let cur_gm = prop_get(entries, "gamemode", "survival").to_lowercase();
-            ui.label(
-                egui::RichText::new(tr(lang, "srv.gamemode"))
-                    .small()
-                    .color(text_secondary()),
-            );
-            ui.add_space(4.0);
-            ui_flow_row(ui, 28.0, |ui| {
-                for (val, disp) in [
-                    ("survival", "Survival"),
-                    ("creative", "Creative"),
-                    ("adventure", "Adventure"),
-                    ("spectator", "Spectator"),
-                ] {
-                    let active = cur_gm == val;
-                    if ui_pill_tab(ui, ("srv_gm_pill", &edited.id, val), disp, active).clicked()
-                        && !active
-                    {
-                        prop_set(entries, "gamemode", val.to_string());
+            let mut cur_gm = prop_get(entries, "gamemode", "survival").to_lowercase();
+            let mut cur_diff = prop_get(entries, "difficulty", "easy").to_lowercase();
+            let gm_opts = [
+                ("survival", "Survival"),
+                ("creative", "Creative"),
+                ("adventure", "Adventure"),
+                ("spectator", "Spectator"),
+            ];
+            let diff_opts = [
+                ("peaceful", "Peaceful"),
+                ("easy", "Easy"),
+                ("normal", "Normal"),
+                ("hard", "Hard"),
+            ];
+            ui_wrap_row(ui, 30.0, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "srv.gamemode"))
+                            .small()
+                            .color(text_secondary()),
+                    );
+                    let gm_lbl = gm_opts
+                        .iter()
+                        .find(|(v, _)| *v == cur_gm)
+                        .map(|(_, d)| *d)
+                        .unwrap_or("Survival");
+                    let prev_gm = cur_gm.clone();
+                    egui::ComboBox::from_id_salt(("srv_gm_combo", &edited.id))
+                        .selected_text(gm_lbl)
+                        .width(146.0)
+                        .show_ui(ui, |ui| {
+                            for (val, disp) in gm_opts {
+                                ui.selectable_value(&mut cur_gm, val.to_string(), disp);
+                            }
+                        });
+                    if cur_gm != prev_gm {
+                        prop_set(entries, "gamemode", cur_gm.clone());
                         props_changed = true;
                         anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 28.0);
                     }
-                }
-            });
-
-            ui.add_space(8.0);
-            let cur_diff = prop_get(entries, "difficulty", "easy").to_lowercase();
-            ui.label(
-                egui::RichText::new(tr(lang, "srv.difficulty"))
-                    .small()
-                    .color(text_secondary()),
-            );
-            ui.add_space(4.0);
-            ui_flow_row(ui, 28.0, |ui| {
-                for (val, disp) in [
-                    ("peaceful", "Peaceful"),
-                    ("easy", "Easy"),
-                    ("normal", "Normal"),
-                    ("hard", "Hard"),
-                ] {
-                    let active = cur_diff == val;
-                    if ui_pill_tab(ui, ("srv_diff_pill", &edited.id, val), disp, active).clicked()
-                        && !active
-                    {
-                        prop_set(entries, "difficulty", val.to_string());
+                });
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(tr(lang, "srv.difficulty"))
+                            .small()
+                            .color(text_secondary()),
+                    );
+                    let diff_lbl = diff_opts
+                        .iter()
+                        .find(|(v, _)| *v == cur_diff)
+                        .map(|(_, d)| *d)
+                        .unwrap_or("Easy");
+                    let prev_diff = cur_diff.clone();
+                    egui::ComboBox::from_id_salt(("srv_diff_combo", &edited.id))
+                        .selected_text(diff_lbl)
+                        .width(146.0)
+                        .show_ui(ui, |ui| {
+                            for (val, disp) in diff_opts {
+                                ui.selectable_value(&mut cur_diff, val.to_string(), disp);
+                            }
+                        });
+                    if cur_diff != prev_diff {
+                        prop_set(entries, "difficulty", cur_diff.clone());
                         props_changed = true;
                         anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 28.0);
                     }
-                }
+                });
             });
 
             ui.add_space(10.0);
@@ -2044,23 +2197,20 @@ impl McLauncherApp {
                 }
             });
             ui.add_space(4.0);
-            ui_flow_row(ui, 26.0, |ui| {
-                for preset in [5_u32, 10, 20, 50, 100] {
-                    if ui_pill_tab(
-                        ui,
-                        ("srv_maxp_preset", &edited.id, preset),
-                        &preset.to_string(),
-                        edited.max_players == preset,
-                    )
-                    .clicked()
-                    {
-                        edited.max_players = preset;
-                        model_changed = true;
-                        sync_model_to_props = true;
-                        anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 26.0);
+            let prev_maxp = edited.max_players;
+            egui::ComboBox::from_id_salt(("srv_maxp_combo", &edited.id))
+                .selected_text(format!("{}", edited.max_players))
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    for preset in [5_u32, 10, 20, 50, 100] {
+                        ui.selectable_value(&mut edited.max_players, preset, preset.to_string());
                     }
-                }
-            });
+                });
+            if edited.max_players != prev_maxp {
+                model_changed = true;
+                sync_model_to_props = true;
+                anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 26.0);
+            }
 
             ui.add_space(8.0);
             let mut vd = prop_get_u32(entries, "view-distance", 10).max(2);
@@ -2577,23 +2727,25 @@ impl McLauncherApp {
             });
 
             ui.add_space(6.0);
-            ui_flow_row(ui, 28.0, |ui| {
-                for preset in [1024_u32, 2048, 4096, 6144, 8192, 12288, 16384] {
-                    if ui_pill_tab(
-                        ui,
-                        ("srv_ram_preset", &edited.id, preset),
-                        &format!("{} GB", preset / 1024),
-                        edited.max_ram_mb == preset,
-                    )
-                    .clicked()
-                    {
-                        edited.max_ram_mb = preset;
-                        edited.min_ram_mb = (preset / 2).clamp(512, 4096).min(preset);
-                        anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 28.0);
-                        model_changed = true;
+            let prev_srv_ram = edited.max_ram_mb;
+            egui::ComboBox::from_id_salt(("srv_ram_combo", &edited.id))
+                .selected_text(format!("{} GB", edited.max_ram_mb / 1024))
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    for preset in [1024_u32, 2048, 4096, 6144, 8192, 12288, 16384] {
+                        ui.selectable_value(
+                            &mut edited.max_ram_mb,
+                            preset,
+                            format!("{} GB ({preset} MB)", preset / 1024),
+                        );
                     }
-                }
-            });
+                });
+            if edited.max_ram_mb != prev_srv_ram {
+                let preset = edited.max_ram_mb;
+                edited.min_ram_mb = (preset / 2).clamp(512, 4096).min(preset);
+                anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 28.0);
+                model_changed = true;
+            }
             if edited.max_ram_mb >= 12288 {
                 ui.add_space(6.0);
                 ui_alert_banner(
@@ -2640,38 +2792,35 @@ impl McLauncherApp {
                     .color(text_secondary()),
             );
             ui.add_space(4.0);
-            ui_flow_row(ui, 28.0, |ui| {
-                let is_auto = edited.java_path.trim().is_empty();
-                if ui_pill_tab(
-                    ui,
-                    ("srv_java_auto", &edited.id),
-                    tr(lang, "inst.auto"),
-                    is_auto,
-                )
-                .clicked()
-                {
-                    edited.java_path.clear();
-                    anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 26.0);
-                    model_changed = true;
-                }
-                for j in &java_installs {
-                    let j_str = j.path.to_string_lossy().to_string();
-                    let active = edited.java_path == j_str;
-                    if ui_pill_tab(
-                        ui,
-                        ("srv_java_pill", &edited.id, j_str.as_str()),
-                        &format!("Java {}", j.major),
-                        active,
-                    )
-                    .on_hover_text(&j_str)
-                    .clicked()
-                    {
-                        edited.java_path = j_str;
-                        anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 26.0);
-                        model_changed = true;
+            let cur_srv_java_lbl = if edited.java_path.trim().is_empty() {
+                tr(lang, "inst.auto").to_string()
+            } else {
+                java_installs
+                    .iter()
+                    .find(|j| j.path.to_string_lossy() == edited.java_path)
+                    .map(|j| format!("Java {}", j.major))
+                    .unwrap_or_else(|| edited.java_path.clone())
+            };
+            let prev_srv_java = edited.java_path.clone();
+            egui::ComboBox::from_id_salt(("srv_java_combo", &edited.id))
+                .selected_text(cur_srv_java_lbl)
+                .width((card_w - 24.0).clamp(160.0, 320.0))
+                .truncate()
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut edited.java_path, String::new(), tr(lang, "inst.auto"));
+                    for j in &java_installs {
+                        let j_str = j.path.to_string_lossy().to_string();
+                        ui.selectable_value(
+                            &mut edited.java_path,
+                            j_str,
+                            format!("Java {}", j.major),
+                        );
                     }
-                }
-            });
+                });
+            if edited.java_path != prev_srv_java {
+                anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 26.0);
+                model_changed = true;
+            }
 
             ui.add_space(6.0);
             let java_placeholder = if cfg!(windows) {
@@ -2727,51 +2876,40 @@ impl McLauncherApp {
             }
 
             ui.add_space(4.0);
-            ui_flow_row(ui, 26.0, |ui| {
-                let presets = [
-                    (
-                        "Aikar's Flags",
-                        "-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1",
-                    ),
-                    (
-                        "G1GC",
-                        "-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=100",
-                    ),
-                    ("ZGC", "-XX:+UseZGC -XX:+ZGenerational"),
-                ];
-                for (lbl, flags) in presets {
-                    if ui_button(
-                        ui,
-                        ("srv_jvm_preset", &edited.id, lbl),
-                        lbl,
-                        ButtonVariant::Subtle,
-                        true,
-                        26.0,
-                    )
-                    .on_hover_text(flags)
-                    .clicked()
-                    {
-                        edited.jvm_args = flags.to_string();
-                        anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 26.0);
-                        model_changed = true;
+            let presets = [
+                (
+                    "Aikar's Flags",
+                    "-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1",
+                ),
+                (
+                    "G1GC",
+                    "-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=100",
+                ),
+                ("ZGC", "-XX:+UseZGC -XX:+ZGenerational"),
+            ];
+            let active_srv_jvm_lbl = presets
+                .iter()
+                .find(|(_, f)| edited.jvm_args.trim() == *f)
+                .map(|(l, _)| *l)
+                .unwrap_or("JVM Preset");
+            let prev_srv_jvm = edited.jvm_args.clone();
+            egui::ComboBox::from_id_salt(("srv_jvm_preset_combo", &edited.id))
+                .selected_text(active_srv_jvm_lbl)
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    for (lbl, flags) in presets {
+                        ui.selectable_value(&mut edited.jvm_args, flags.to_string(), lbl);
                     }
-                }
-                if !edited.jvm_args.trim().is_empty()
-                    && ui_button(
-                        ui,
-                        ("srv_jvm_clear", &edited.id),
+                    ui.selectable_value(
+                        &mut edited.jvm_args,
+                        String::new(),
                         tr(lang, "btn.clear"),
-                        ButtonVariant::Subtle,
-                        true,
-                        26.0,
-                    )
-                    .clicked()
-                {
-                    edited.jvm_args.clear();
-                    anim::emit_ring(ctx, anim::pointer_or_center(ctx), text_secondary(), 24.0);
-                    model_changed = true;
-                }
-            });
+                    );
+                });
+            if edited.jvm_args != prev_srv_jvm {
+                anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 26.0);
+                model_changed = true;
+            }
         });
         ui.add_space(12.0);
 
@@ -3215,16 +3353,24 @@ impl McLauncherApp {
         }
 
         let mut open = self.show_create_server_modal;
-        let max_modal_w = (screen.width() - 32.0).clamp(280.0, 480.0);
+        let max_modal_w = (screen.width() - 32.0).clamp(260.0, 480.0);
+        let max_modal_h = (screen.height() - 32.0).max(240.0);
         let offset_y = (1.0 - ease_out_cubic(modal_t)) * 18.0;
         let win_resp = egui::Window::new(tr(lang, "srv.new"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .max_width(max_modal_w)
+            .max_height(max_modal_h)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, offset_y))
             .show(ctx, |ui| {
-                let field_w = (ui.available_width() - 108.0).clamp(140.0, 290.0);
+                let inner_w = (max_modal_w - 28.0).max(200.0);
+                let field_w = (inner_w - 108.0).clamp(120.0, 290.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("create_srv_modal_scroll")
+                    .auto_shrink([false, true])
+                    .max_height((max_modal_h - 90.0).max(120.0))
+                    .show(ui, |ui| {
                 egui::Grid::new("create_server_grid")
                     .num_columns(2)
                     .spacing([12.0, 12.0])
@@ -3241,25 +3387,18 @@ impl McLauncherApp {
                         ui.end_row();
 
                         ui.label("Software");
-                        ui.vertical(|ui| {
-                            ui.set_max_width(field_w.max(320.0));
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                        egui::ComboBox::from_id_salt("new_srv_sw_combo")
+                            .selected_text(self.new_srv_software.label())
+                            .width(field_w.clamp(140.0, 220.0))
+                            .show_ui(ui, |ui| {
                                 for sw in ServerSoftware::ALL {
-                                    let active = self.new_srv_software == sw;
-                                    if ui_pill_tab(
-                                        ui,
-                                        ("new_srv_sw", sw.label()),
+                                    ui.selectable_value(
+                                        &mut self.new_srv_software,
+                                        sw,
                                         sw.label(),
-                                        active,
-                                    )
-                                    .clicked()
-                                    {
-                                        self.new_srv_software = sw;
-                                    }
+                                    );
                                 }
                             });
-                        });
                         ui.end_row();
 
                         ui.label(tr(lang, "modal.version"));
@@ -3285,7 +3424,12 @@ impl McLauncherApp {
                         ui.end_row();
 
                         ui.label("RAM (MB)");
-                        ui_ram_slider(ui, &mut self.new_srv_max_ram, 1024..=16384, field_w);
+                        ui_ram_slider(
+                            ui,
+                            &mut self.new_srv_max_ram,
+                            1024..=16384,
+                            (field_w - 86.0).clamp(90.0, 210.0),
+                        );
                         ui.end_row();
 
                         ui.label("MOTD");
@@ -3327,7 +3471,7 @@ impl McLauncherApp {
                         ui,
                         AlertKind::Warning,
                         tr(lang, "srv.tunnel_notice"),
-                        (ui.available_width() - 8.0).max(180.0),
+                        (ui.available_width() - 8.0).max(160.0),
                     );
                 }
                 ui.add_space(4.0);
@@ -3337,6 +3481,7 @@ impl McLauncherApp {
                     &mut self.new_srv_eula,
                     tr(lang, "srv.eula"),
                 );
+                });
 
                 ui.add_space(12.0);
                 let name_valid = !self.new_srv_name.trim().is_empty()

@@ -658,12 +658,13 @@ pub fn ui_toolbar_row<R>(
     row_h: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    let avail_w = ui.available_width();
+    let avail_w = ui.available_width().max(20.0);
     let box_h = row_h + 2.0;
     ui.allocate_ui_with_layout(
         Vec2::new(avail_w, box_h),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
+            ui.set_max_width(avail_w);
             ui.set_min_height(box_h);
             let r = ui.max_rect();
             let clip = ui.clip_rect().intersect(egui::Rect::from_min_max(
@@ -678,40 +679,29 @@ pub fn ui_toolbar_row<R>(
     )
 }
 
-/// Single-line horizontal row where controls align to the centerline and compress spacing
-/// when the window narrows instead of wrapping onto another line.
+/// Multi-line wrapping horizontal row that adapts button padding and spacing when narrow
+/// and wraps controls onto subsequent lines within `ui.available_width()` without clipping.
 pub fn ui_wrap_row<R>(
     ui: &mut egui::Ui,
     row_h: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    let avail_w = ui.available_width();
+    let avail_w = ui.available_width().max(60.0);
     let pad_x = if avail_w < 420.0 {
-        6.0
+        7.0
     } else if avail_w < 620.0 {
-        8.5
+        9.0
     } else {
         11.0
     };
-    let gap_x = if avail_w < 460.0 { 4.0 } else { 6.0 };
-    let box_h = row_h + 2.0;
-    ui.allocate_ui_with_layout(
-        Vec2::new(avail_w, box_h),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.set_min_height(box_h);
-            let r = ui.max_rect();
-            let clip = ui.clip_rect().intersect(egui::Rect::from_min_max(
-                Pos2::new(r.left() - 4.0, r.top() - 4.0),
-                Pos2::new(r.right() + 2.0, r.bottom() + 4.0),
-            ));
-            ui.set_clip_rect(clip);
-            ui.spacing_mut().interact_size.y = row_h;
-            ui.spacing_mut().button_padding = Vec2::new(pad_x, ((row_h - 15.0) * 0.5).max(2.0));
-            ui.spacing_mut().item_spacing = Vec2::new(gap_x, 0.0);
-            add_contents(ui)
-        },
-    )
+    let gap_x = if avail_w < 460.0 { 5.0 } else { 6.0 };
+    ui.scope(|ui| {
+        ui.set_max_width(avail_w);
+        ui.spacing_mut().interact_size.y = row_h;
+        ui.spacing_mut().button_padding = Vec2::new(pad_x, ((row_h - 15.0) * 0.5).max(2.0));
+        ui.spacing_mut().item_spacing = Vec2::new(gap_x, 6.0);
+        ui.horizontal_wrapped(add_contents).inner
+    })
 }
 
 /// Multi-line wrapping horizontal row where controls align vertically on each line
@@ -849,6 +839,7 @@ pub fn ui_pill_tab(
 }
 
 /// Renders a loader selector pill tinted with each loader's signature accent() colors.
+#[allow(dead_code)]
 pub fn ui_loader_pill(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash,
@@ -971,12 +962,27 @@ pub fn ui_checkbox(
     label: &str,
 ) -> bool {
     let font = FontId::new(12.5, FontFamily::Proportional);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_string(), font, text_primary());
     let box_sz = 17.0;
     let gap = 7.0;
-    let row_h = ui.spacing().interact_size.y.max(26.0);
+    let avail_bound = if ui.layout().main_dir().is_vertical() {
+        ui.available_width()
+    } else {
+        ui.max_rect().width()
+    };
+    let max_text_w = if avail_bound.is_finite() && avail_bound > box_sz + gap + 24.0 {
+        (avail_bound - box_sz - gap - 6.0).max(40.0)
+    } else {
+        f32::INFINITY
+    };
+    let galley = ui
+        .painter()
+        .layout(label.to_string(), font, text_primary(), max_text_w);
+    let row_h = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(26.0)
+        .max(galley.size().y + 6.0);
     let desired = Vec2::new(box_sz + gap + galley.size().x + 4.0, row_h);
     let chk_id = ui.make_persistent_id(("chk_base", &id_salt));
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
@@ -1020,8 +1026,18 @@ pub fn ui_checkbox(
         let painter = ui.painter();
         let pop = click_info.map_or(0.0, |(t, _)| (t * std::f32::consts::PI).sin() * 0.14);
         let box_scale = (1.0 - press_t * 0.08 + pop).max(0.8);
+        let multiline = galley.rows.len() > 1;
+        let box_cy = if multiline {
+            let first_row_h = galley
+                .rows
+                .first()
+                .map_or(box_sz, |r| r.rect.height());
+            rect.top() + (first_row_h * 0.5 + 3.0).max(box_sz * 0.5 + 2.0)
+        } else {
+            rect.center().y
+        };
         let box_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + box_sz * 0.5 + 1.0, rect.center().y),
+            Pos2::new(rect.left() + box_sz * 0.5 + 1.0, box_cy),
             Vec2::splat(box_sz * box_scale),
         );
         let fill = lerp_color(
@@ -1060,8 +1076,13 @@ pub fn ui_checkbox(
         }
 
         let text_col = lerp_color(text_secondary(), text_primary(), check_t.max(hover_t * 0.8));
+        let text_y = if multiline {
+            rect.top() + 3.0
+        } else {
+            rect.center().y - galley.size().y * 0.5
+        };
         painter.galley(
-            Pos2::new(rect.left() + box_sz + 1.0 + gap, rect.center().y - galley.size().y * 0.5),
+            Pos2::new(rect.left() + box_sz + 1.0 + gap, text_y),
             galley,
             text_col,
         );

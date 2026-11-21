@@ -14,8 +14,12 @@ use self::anim::{
 };
 use crate::auth::{
     account_skin_cache_key, check_github_latest_release, download_and_apply_update,
-    ensure_authlib_injector, ensure_valid_account, fetch_account_skin, login_ely_by,
+    ensure_authlib_injector, ensure_valid_account_with_mode, fetch_account_skin, login_ely_by,
     start_microsoft_device_login, DEFAULT_MS_CLIENT_ID,
+};
+use crate::curseforge::{
+    fetch_curseforge_versions_for_profile, install_curseforge_project, parse_cf_project_id,
+    search_curseforge_projects,
 };
 use crate::discord::{
     format_presence, unix_now_secs, DiscordActivityKind, DiscordRpc, PresenceState,
@@ -23,31 +27,34 @@ use crate::discord::{
 use crate::i18n::{tr, Language};
 use crate::icons::{draw_brand_logo_animated, draw_icon, draw_icon_animated, draw_player_pixel_avatar, Icon};
 use crate::launcher::{
-    detect_java_installations, download_java_major, ensure_java_runtime, is_managed_java_path,
-    launch_game, open_in_file_manager, remove_managed_java,
+    detect_java_installations, download_java_major, ensure_java_runtime_with_mode,
+    is_managed_java_path, launch_game, open_in_file_manager, remove_managed_java,
 };
 use crate::models::{
     Account, AccountKind, AccountStore, DedicatedServer, DeviceCodeInfo, FilePickPurpose,
-    GameHandle, InstalledProject, JavaInstall, LauncherPaths, LauncherSettings, LauncherUpdateInfo,
-    LoaderKind, LoaderVersionEntry, ModLoader, ModrinthInstallOutcome, ModrinthProjectType,
-    ModrinthSearchHit, ModrinthSort, ModrinthVersion, Profile, ServerHandle, ServerSoftware,
-    ThemePreset, VersionManifest, VersionType, WorkerEvent,
+    GameHandle, InstalledProject, InstanceLogFile, JavaInstall, LauncherPaths, LauncherSettings,
+    LauncherUpdateInfo, LoaderKind, LoaderVersionEntry, LogFileKind, ModLoader,
+    ModrinthInstallOutcome, ModrinthProjectType, ModrinthSearchHit, ModrinthSort, ModrinthVersion,
+    MrpackExportOptions, Profile, ProjectSource, ServerHandle, ServerSoftware, ThemePreset,
+    VersionManifest, VersionType, WorkerEvent,
 };
 use crate::modrinth::{
     backfill_server_installed_index, backup_world, decode_icon_bytes, decode_screenshot_thumbnail,
     delete_content_file, delete_screenshot, delete_world, delete_world_backup,
-    delete_world_datapack, disable_incompatible_mods_for_loader, export_instance_mrpack,
-    fetch_icon, fetch_project_versions_for_profile, import_local_file, import_modpack_archive,
+    delete_world_datapack, disable_incompatible_mods_for_loader,
+    export_instance_mrpack_with_options, fetch_icon, fetch_project_versions_for_profile,
+    identify_instance_content_by_hash, import_local_file, import_modpack_archive,
     import_world_datapack, install_project, install_server_project,
     install_server_specific_version, install_specific_version, list_content_items,
-    list_screenshots, list_world_backups, list_world_datapacks, list_worlds, load_installed_index,
-    load_server_installed_index, restore_world_backup, search_projects, set_all_content_enabled,
-    toggle_content_file, toggle_world_datapack, update_all_installed_projects,
-    InstalledContentItem, ScreenshotEntry, SearchParams, WorldBackupEntry, WorldEntry,
+    list_instance_log_files, list_screenshots, list_world_backups, list_world_datapacks,
+    list_worlds, load_installed_index, load_server_installed_index, read_instance_log_file,
+    restore_world_backup, search_projects, set_all_content_enabled, toggle_content_file,
+    toggle_world_datapack, update_all_installed_projects, upload_to_mclogs, InstalledContentItem,
+    ScreenshotEntry, SearchParams, WorldBackupEntry, WorldEntry,
 };
 use crate::mojang::{
-    fetch_loader_versions, fetch_version_manifest, prepare_version, request_download_cancel,
-    reset_download_cancel, CANCELLED_ERR_MSG,
+    fetch_loader_versions, fetch_version_manifest, prepare_version_with_mode,
+    request_download_cancel, reset_download_cancel, CANCELLED_ERR_MSG,
 };
 use crate::servers::{
     delete_server_property_entry, detect_local_lan_ip, is_server_provisioned,
@@ -71,7 +78,7 @@ use crate::theme::{
     mod_toggle_switch, mono_spinner, primary_action_button, section_header,
     server_software_badge, set_theme_palette, solid_accent_badge, tick_theme_transition,
     transition_theme_palette, ui_alert_banner, ui_button, ui_button_icon, ui_button_sized,
-    ui_checkbox, ui_flow_row, ui_icon_button, ui_int_slider, ui_loader_pill, ui_pill_tab,
+    ui_checkbox, ui_flow_row, ui_icon_button, ui_int_slider, ui_pill_tab,
     ui_pill_tab_icon, ui_ram_slider, ui_search_input, ui_text_input, ui_toolbar_row, ui_wrap_row,
     with_alpha, AlertKind, ButtonVariant, SystemFont, accent, accent_text, bg_card,
     bg_card_active, bg_card_hover, bg_elevated, bg_input, bg_sidebar, bg_void, border_subtle,
@@ -156,14 +163,16 @@ enum InstanceSubTab {
     Content,
     Worlds,
     Screenshots,
+    Logs,
     Settings,
 }
 
 impl InstanceSubTab {
-    const ALL: [InstanceSubTab; 4] = [
+    const ALL: [InstanceSubTab; 5] = [
         InstanceSubTab::Content,
         InstanceSubTab::Worlds,
         InstanceSubTab::Screenshots,
+        InstanceSubTab::Logs,
         InstanceSubTab::Settings,
     ];
 
@@ -172,6 +181,7 @@ impl InstanceSubTab {
             InstanceSubTab::Content => "Content",
             InstanceSubTab::Worlds => "Worlds",
             InstanceSubTab::Screenshots => "Screenshots",
+            InstanceSubTab::Logs => "Logs",
             InstanceSubTab::Settings => "Settings",
         }
     }
@@ -181,9 +191,16 @@ impl InstanceSubTab {
             InstanceSubTab::Content => tr(lang, "inst.content"),
             InstanceSubTab::Worlds => tr(lang, "inst.worlds"),
             InstanceSubTab::Screenshots => tr(lang, "inst.screenshots"),
+            InstanceSubTab::Logs => tr(lang, "inst.logs"),
             InstanceSubTab::Settings => tr(lang, "inst.settings"),
         }
     }
+}
+
+struct RunningGame {
+    profile_id: String,
+    handle: GameHandle,
+    started_at: std::time::Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,6 +326,7 @@ enum LogLevel {
     Error,
 }
 
+#[derive(Clone)]
 struct LogEntry {
     timestamp: String,
     level: LogLevel,
@@ -409,9 +427,10 @@ pub struct McLauncherApp {
     show_snapshots: bool,
 
     is_busy: bool,
-    game_handle: Option<GameHandle>,
-    running_profile_id: Option<String>,
-    launch_started_at: Option<std::time::Instant>,
+    running_games: HashMap<String, RunningGame>,
+    launching_profiles: HashSet<String>,
+    instance_logs: HashMap<String, VecDeque<LogEntry>>,
+    console_profile_id: Option<String>,
     progress: f32,
     status_text: String,
 
@@ -424,6 +443,19 @@ pub struct McLauncherApp {
     log_revision: u64,
     log_cache: ConsoleLayoutCache,
     fs_cache: FsUiCache,
+
+    // SHA-1 identification, logs viewer & export modal
+    identifying_mods: bool,
+    inst_log_files: Vec<InstanceLogFile>,
+    inst_log_files_pid: String,
+    inst_log_selected: Option<std::path::PathBuf>,
+    inst_log_content: String,
+    inst_log_filter: String,
+    mclogs_uploading: bool,
+    mclogs_last_url: Option<String>,
+    show_export_mrpack_modal: bool,
+    export_mrpack_profile_idx: Option<usize>,
+    export_mrpack_opts: MrpackExportOptions,
 
     // New profile modal state
     show_new_modal: bool,
@@ -452,7 +484,8 @@ pub struct McLauncherApp {
     auth_error: Option<String>,
     auth_status: Option<String>,
 
-    // Modrinth Discover state
+    // Discover state (Modrinth / CurseForge)
+    discover_source: ProjectSource,
     mr_query: String,
     mr_type: ModrinthProjectType,
     mr_sort: ModrinthSort,
@@ -603,9 +636,10 @@ impl McLauncherApp {
             java_scanning: true,
             show_snapshots: false,
             is_busy: false,
-            game_handle: None,
-            running_profile_id: None,
-            launch_started_at: None,
+            running_games: HashMap::new(),
+            launching_profiles: HashSet::new(),
+            instance_logs: HashMap::new(),
+            console_profile_id: None,
             progress: 0.0,
             status_text: String::new(),
             logs: VecDeque::with_capacity(MAX_LOG_LINES),
@@ -616,11 +650,22 @@ impl McLauncherApp {
             log_revision: 1,
             log_cache: ConsoleLayoutCache::default(),
             fs_cache: FsUiCache::default(),
+            identifying_mods: false,
+            inst_log_files: Vec::new(),
+            inst_log_files_pid: String::new(),
+            inst_log_selected: None,
+            inst_log_content: String::new(),
+            inst_log_filter: String::new(),
+            mclogs_uploading: false,
+            mclogs_last_url: None,
+            show_export_mrpack_modal: false,
+            export_mrpack_profile_idx: None,
+            export_mrpack_opts: MrpackExportOptions::default(),
             show_new_modal: false,
             new_name: "New Instance".to_string(),
             new_version: "1.21.4".to_string(),
             new_loader: LoaderKind::Fabric,
-            new_ram_mb: 4096,
+            new_ram_mb: settings.default_max_ram_mb.clamp(512, 32768),
             new_show_snapshots: false,
             new_username: "Player".to_string(),
             confirm_delete_idx: None,
@@ -637,6 +682,7 @@ impl McLauncherApp {
             ms_busy: false,
             auth_error: None,
             auth_status: None,
+            discover_source: ProjectSource::Modrinth,
             mr_query: String::new(),
             mr_type: ModrinthProjectType::Mod,
             mr_sort: ModrinthSort::Downloads,
@@ -744,8 +790,13 @@ impl McLauncherApp {
     }
 
     fn current_discord_kind(&self) -> DiscordActivityKind {
-        if let Some(rid) = &self.running_profile_id {
-            if let Some(p) = self.profiles.iter().find(|p| &p.id == rid) {
+        if let Some(rg) = self
+            .profiles
+            .get(self.selected_idx)
+            .and_then(|p| self.running_games.get(&p.id))
+            .or_else(|| self.running_games.values().next())
+        {
+            if let Some(p) = self.profiles.iter().find(|p| p.id == rg.profile_id) {
                 return DiscordActivityKind::Playing {
                     instance: p.name.clone(),
                     version: p.version_id.clone(),
@@ -836,7 +887,9 @@ impl McLauncherApp {
         if raw_t < 1.0 {
             ui.ctx().request_repaint();
         }
+        let max_w = ui.available_width().max(120.0);
         let resp = ui.vertical(|ui| {
+            ui.set_max_width(max_w);
             if raw_t < 1.0 {
                 ui.add_space((1.0 - eased) * 8.0);
             }
@@ -847,9 +900,9 @@ impl McLauncherApp {
         }
     }
 
-    fn push_log(&mut self, line: String) {
+    fn classify_log_level(line: &str) -> LogLevel {
         let lower = line.to_lowercase();
-        let level = if lower.contains("error")
+        if lower.contains("error")
             || lower.contains("exception")
             || lower.contains("fatal")
             || lower.contains("[stderr]")
@@ -859,7 +912,11 @@ impl McLauncherApp {
             LogLevel::Warn
         } else {
             LogLevel::Info
-        };
+        }
+    }
+
+    fn push_log(&mut self, line: String) {
+        let level = Self::classify_log_level(&line);
         if level == LogLevel::Error && self.nav_page != NavPage::Console {
             self.log_error_count += 1;
         }
@@ -874,11 +931,123 @@ impl McLauncherApp {
         self.log_revision = self.log_revision.wrapping_add(1);
     }
 
+    fn push_instance_log(&mut self, profile_id: &str, line: String) {
+        let level = Self::classify_log_level(&line);
+        if level == LogLevel::Error && self.nav_page != NavPage::Console {
+            self.log_error_count += 1;
+        }
+        let buf = self
+            .instance_logs
+            .entry(profile_id.to_string())
+            .or_insert_with(|| VecDeque::with_capacity(MAX_LOG_LINES));
+        if buf.len() >= MAX_LOG_LINES {
+            buf.pop_front();
+        }
+        buf.push_back(LogEntry {
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            level,
+            text: line,
+        });
+        self.log_revision = self.log_revision.wrapping_add(1);
+    }
+
+    fn current_console_logs(&self) -> &VecDeque<LogEntry> {
+        if let Some(pid) = &self.console_profile_id {
+            if let Some(buf) = self.instance_logs.get(pid) {
+                return buf;
+            }
+        }
+        &self.logs
+    }
+
     fn clear_logs(&mut self) {
-        self.logs.clear();
+        if let Some(pid) = &self.console_profile_id {
+            if let Some(buf) = self.instance_logs.get_mut(pid) {
+                buf.clear();
+            }
+        } else {
+            self.logs.clear();
+        }
         self.log_error_count = 0;
         self.last_crash_code = None;
         self.log_revision = self.log_revision.wrapping_add(1);
+    }
+
+    fn is_profile_running(&self, profile_id: &str) -> bool {
+        self.running_games.contains_key(profile_id)
+    }
+
+    fn is_profile_launching(&self, profile_id: &str) -> bool {
+        self.launching_profiles.contains(profile_id)
+    }
+
+    fn is_selected_running(&self) -> bool {
+        self.profiles
+            .get(self.selected_idx)
+            .is_some_and(|p| self.running_games.contains_key(&p.id))
+    }
+
+    fn is_selected_launching(&self) -> bool {
+        self.profiles
+            .get(self.selected_idx)
+            .is_some_and(|p| self.launching_profiles.contains(&p.id))
+    }
+
+    fn any_game_running(&self) -> bool {
+        !self.running_games.is_empty()
+    }
+
+    fn start_identify_mods(&mut self) {
+        if self.identifying_mods || self.mr_installing {
+            return;
+        }
+        let Some(profile) = self.profiles.get(self.selected_idx).cloned() else {
+            return;
+        };
+        self.identifying_mods = true;
+        let paths = self.paths.clone();
+        let tx = self.tx.clone();
+        let pid = profile.id.clone();
+        thread::spawn(move || {
+            let result = identify_instance_content_by_hash(&paths, &profile);
+            let _ = tx.send(WorkerEvent::ModrinthIdentifyFinished {
+                profile_id: pid,
+                result,
+            });
+        });
+    }
+
+    fn start_mclogs_upload(&mut self, content: String) {
+        if self.mclogs_uploading {
+            return;
+        }
+        self.mclogs_uploading = true;
+        self.mclogs_last_url = None;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let res = upload_to_mclogs(&content);
+            let _ = tx.send(WorkerEvent::McloGsUploaded(res));
+        });
+    }
+
+    fn start_export_mrpack_with_options(&mut self, profile_idx: usize, opts: MrpackExportOptions) {
+        let Some(profile) = self.profiles.get(profile_idx).cloned() else {
+            return;
+        };
+        self.is_busy = true;
+        self.progress = 0.25;
+        self.status_text = format!(
+            "{} {}...",
+            tr(self.settings.language, "status.exporting"),
+            profile.name
+        );
+        let paths = self.paths.clone();
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let res = export_instance_mrpack_with_options(&paths, &profile, &opts)
+                .map(|p| ModrinthInstallOutcome::ModpackExported { path: p });
+            let _ = tx.send(WorkerEvent::ModrinthInstallFinished(res));
+        });
     }
 
     fn scan_java(&mut self) {
@@ -908,10 +1077,12 @@ impl McLauncherApp {
     }
 
     fn current_profile_filter_key(&self) -> String {
-        self.profiles
+        let base = self
+            .profiles
             .get(self.selected_idx)
             .map(|p| format!("{}|{:?}", p.version_id, p.loader.kind()))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        format!("{base}|{:?}", self.discover_source)
     }
 
     fn sync_discover_for_profile(&mut self) {
@@ -1051,9 +1222,14 @@ impl McLauncherApp {
             server_software,
             offset,
         };
+        let discover_source = self.discover_source;
+        let cf_api_key = self.settings.curseforge_api_key.clone();
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let res = search_projects(&params);
+            let res = match discover_source {
+                ProjectSource::Modrinth => search_projects(&params),
+                ProjectSource::CurseForge => search_curseforge_projects(&cf_api_key, &params),
+            };
             let _ = tx.send(WorkerEvent::ModrinthSearchFinished {
                 generation,
                 append,
@@ -1075,15 +1251,22 @@ impl McLauncherApp {
     }
 
     fn start_launch_with_world(&mut self, quick_world: Option<String>) {
-        if self.is_busy || self.game_handle.is_some() {
+        if self.is_busy || self.update_installing {
             return;
         }
         let Some(profile) = self.profiles.get_mut(self.selected_idx) else {
             return;
         };
+        if self.running_games.contains_key(&profile.id)
+            || self.launching_profiles.contains(&profile.id)
+        {
+            return;
+        }
         profile.last_played = Some(chrono::Utc::now().to_rfc3339());
         let profile_clone = profile.clone();
-        self.running_profile_id = Some(profile_clone.id.clone());
+        let profile_id = profile_clone.id.clone();
+        self.launching_profiles.insert(profile_id.clone());
+        self.console_profile_id = Some(profile_id.clone());
         let _ = save_profiles(&self.paths, &self.profiles);
 
         let mut account = self
@@ -1092,7 +1275,6 @@ impl McLauncherApp {
             .unwrap_or_else(|| Account::offline(profile_clone.username.clone()));
 
         reset_download_cancel();
-        self.is_busy = true;
         self.last_crash_code = None;
         self.progress = 0.03;
         self.status_text = format!(
@@ -1100,22 +1282,31 @@ impl McLauncherApp {
             tr(self.settings.language, "status.preparing"),
             profile_clone.version_id
         );
-        self.push_log(format!(
-            "[Launcher] Preparing '{}' ({} • {}) as {}",
-            profile_clone.name,
-            profile_clone.version_id,
-            profile_clone.loader.label(),
-            account.username
-        ));
+        self.push_instance_log(
+            &profile_id,
+            format!(
+                "[Launcher] Preparing '{}' ({} • {}) as {}{}",
+                profile_clone.name,
+                profile_clone.version_id,
+                profile_clone.loader.label(),
+                account.username,
+                if self.settings.offline_mode {
+                    " [offline]"
+                } else {
+                    ""
+                }
+            ),
+        );
 
         let paths = self.paths.clone();
         let manifest = self.manifest.clone();
         let ms_client_id = self.ms_client_id.clone();
+        let offline_mode = self.settings.offline_mode;
         let tx = self.tx.clone();
         thread::spawn(move || {
             let res = (|| -> Result<GameHandle, String> {
                 let before_token_check = serde_json::to_string(&account).ok();
-                ensure_valid_account(&mut account, &ms_client_id)?;
+                ensure_valid_account_with_mode(&mut account, &ms_client_id, offline_mode)?;
                 if serde_json::to_string(&account).ok() != before_token_check {
                     let _ = tx.send(WorkerEvent::AccountRefreshed(account.clone()));
                 }
@@ -1130,12 +1321,21 @@ impl McLauncherApp {
                     None
                 };
 
-                let prepared = prepare_version(
+                let prepared = prepare_version_with_mode(
                     &paths,
                     &profile_clone.version_id,
                     &profile_clone.loader,
                     manifest.as_ref(),
-                    &|req| ensure_java_runtime(&paths, &profile_clone, req, Some(&tx)),
+                    &|req| {
+                        ensure_java_runtime_with_mode(
+                            &paths,
+                            &profile_clone,
+                            req,
+                            offline_mode,
+                            Some(&tx),
+                        )
+                    },
+                    offline_mode,
                     &tx,
                 )?;
                 launch_game(
@@ -1145,10 +1345,14 @@ impl McLauncherApp {
                     &prepared,
                     injector_path.as_deref(),
                     quick_world.as_deref(),
+                    offline_mode,
                     tx.clone(),
                 )
             })();
-            let _ = tx.send(WorkerEvent::LaunchFinished(res));
+            let _ = tx.send(WorkerEvent::LaunchFinished {
+                profile_id,
+                result: res,
+            });
         });
     }
 
@@ -1166,7 +1370,7 @@ impl McLauncherApp {
     }
 
     fn start_launcher_update(&mut self) {
-        if self.update_installing || self.is_busy || self.game_handle.is_some() {
+        if self.update_installing || self.is_busy || self.any_game_running() {
             return;
         }
         let Some(info) = self.update_available.clone() else {
@@ -1314,17 +1518,32 @@ impl McLauncherApp {
         });
     }
 
-    fn stop_game(&mut self) {
+    fn stop_profile(&mut self, profile_id: &str) {
         let mut stopped = false;
-        if let Some(handle) = &self.game_handle {
-            if let Ok(mut child) = handle.lock() {
+        if let Some(rg) = self.running_games.get(profile_id) {
+            if let Ok(mut child) = rg.handle.lock() {
                 let _ = child.kill();
                 stopped = true;
             }
         }
         if stopped {
             self.status_text = tr(self.settings.language, "status.stopping").to_string();
-            self.push_log("[Launcher] Sent stop signal to game process".to_string());
+            self.push_instance_log(
+                profile_id,
+                "[Launcher] Sent stop signal to game process".to_string(),
+            );
+        }
+    }
+
+    fn stop_game(&mut self) {
+        if let Some(pid) = self.profiles.get(self.selected_idx).map(|p| p.id.clone()) {
+            if self.running_games.contains_key(&pid) {
+                self.stop_profile(&pid);
+                return;
+            }
+        }
+        if let Some(first_pid) = self.running_games.keys().next().cloned() {
+            self.stop_profile(&first_pid);
         }
     }
 
@@ -1383,6 +1602,10 @@ impl McLauncherApp {
                     println!("{line}");
                     self.push_log(line);
                 }
+                WorkerEvent::InstanceLog { profile_id, line } => {
+                    println!("[{profile_id}] {line}");
+                    self.push_instance_log(&profile_id, line);
+                }
                 WorkerEvent::AccountRefreshed(updated) => {
                     if let Some(slot) = self
                         .account_store
@@ -1394,17 +1617,39 @@ impl McLauncherApp {
                         let _ = save_accounts(&self.paths, &self.account_store);
                     }
                 }
-                WorkerEvent::LaunchFinished(res) => {
-                    self.is_busy = false;
-                    match res {
+                WorkerEvent::LaunchFinished { profile_id, result } => {
+                    self.launching_profiles.remove(&profile_id);
+                    let prof_name = self
+                        .profiles
+                        .iter()
+                        .find(|p| p.id == profile_id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "Instance".to_string());
+                    match result {
                         Ok(handle) => {
                             let lang = self.settings.language;
-                            self.game_handle = Some(handle);
-                            self.launch_started_at = Some(std::time::Instant::now());
+                            self.running_games.insert(
+                                profile_id.clone(),
+                                RunningGame {
+                                    profile_id: profile_id.clone(),
+                                    handle,
+                                    started_at: std::time::Instant::now(),
+                                },
+                            );
                             self.last_crash_code = None;
-                            self.status_text = tr(lang, "status.running").to_string();
-                            self.push_log("[Launcher] Minecraft process started".to_string());
-                            let launched_msg = tr(lang, "toast.game_launched").to_string();
+                            self.status_text = format!(
+                                "{} ({})",
+                                tr(lang, "status.running"),
+                                prof_name
+                            );
+                            self.push_instance_log(
+                                &profile_id,
+                                "[Launcher] Minecraft process started".to_string(),
+                            );
+                            let launched_msg = format!(
+                                "{}: {prof_name}",
+                                tr(lang, "toast.game_launched")
+                            );
                             self.show_toast(ctx, launched_msg);
                             anim::emit_edge_pulse(ctx, accent());
                             self.scan_java();
@@ -1415,22 +1660,25 @@ impl McLauncherApp {
                         }
                         Err(e) if e == CANCELLED_ERR_MSG => {
                             let lang = self.settings.language;
-                            self.running_profile_id = None;
-                            self.launch_started_at = None;
-                            self.progress = 0.0;
+                            if self.launching_profiles.is_empty() {
+                                self.progress = 0.0;
+                            }
                             let msg = tr(lang, "status.cancelled").to_string();
                             self.status_text = msg.clone();
-                            self.push_log("[Launcher] Cancelled by user".to_string());
+                            self.push_instance_log(
+                                &profile_id,
+                                "[Launcher] Cancelled by user".to_string(),
+                            );
                             self.show_toast(ctx, msg);
                             self.sync_discord_presence();
                         }
                         Err(e) => {
                             let lang = self.settings.language;
-                            self.running_profile_id = None;
-                            self.launch_started_at = None;
-                            self.progress = 0.0;
+                            if self.launching_profiles.is_empty() {
+                                self.progress = 0.0;
+                            }
                             self.status_text = format!("{}: {e}", tr(lang, "status.error"));
-                            self.push_log(format!("[Launcher ERROR] {e}"));
+                            self.push_instance_log(&profile_id, format!("[Launcher ERROR] {e}"));
                             self.show_toast(
                                 ctx,
                                 format!("{}: {e}", tr(lang, "status.launch_failed")),
@@ -1440,33 +1688,33 @@ impl McLauncherApp {
                         }
                     }
                 }
-                WorkerEvent::GameExited(code) => {
-                    if let (Some(started), Some(rid)) =
-                        (self.launch_started_at.take(), self.running_profile_id.as_deref())
-                    {
-                        let elapsed = started.elapsed().as_secs().max(1);
-                        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == rid) {
+                WorkerEvent::GameExited { profile_id, code } => {
+                    if let Some(rg) = self.running_games.remove(&profile_id) {
+                        let elapsed = rg.started_at.elapsed().as_secs().max(1);
+                        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == profile_id) {
                             p.playtime_secs = p.playtime_secs.saturating_add(elapsed);
                             let _ = save_profiles(&self.paths, &self.profiles);
                         }
                     }
-                    self.game_handle = None;
-                    self.running_profile_id = None;
-                    self.progress = 0.0;
+                    if self.running_games.is_empty() && self.launching_profiles.is_empty() {
+                        self.progress = 0.0;
+                    }
+                    self.inst_log_files_pid.clear();
                     let msg = match code {
                         Some(0) => "Game exited (code 0)".to_string(),
                         Some(c) => format!("Game exited (code {c})"),
                         None => "Game exited".to_string(),
                     };
                     self.status_text = msg.clone();
-                    self.push_log(format!("[Launcher] {msg}"));
+                    self.push_instance_log(&profile_id, format!("[Launcher] {msg}"));
                     self.sync_discord_presence();
-                    if self.settings.hide_on_launch {
+                    if self.settings.hide_on_launch && self.running_games.is_empty() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     }
                     if matches!(code, Some(c) if c != 0) {
                         self.last_crash_code = code;
+                        self.console_profile_id = Some(profile_id);
                         anim::emit_edge_pulse(ctx, DANGER);
                         if self.settings.open_console_on_crash {
                             self.switch_page(ctx, NavPage::Console);
@@ -1565,6 +1813,7 @@ impl McLauncherApp {
                     }
                 }
                 WorkerEvent::ModrinthInstallFinished(res) => {
+                    self.is_busy = false;
                     self.mr_installing = false;
                     self.mr_installing_id = None;
                     self.progress = 0.0;
@@ -1597,9 +1846,36 @@ impl McLauncherApp {
                             anim::emit_edge_pulse(ctx, accent());
                         }
                         Ok(ModrinthInstallOutcome::ModpackProfileCreated {
-                            profile,
+                            mut profile,
                             files_count,
                         }) => {
+                            // Apply global default instance settings when pack didn't specify custom values
+                            if profile.min_ram_mb == 512 && profile.max_ram_mb == 2048 {
+                                profile.min_ram_mb = self.settings.default_min_ram_mb.clamp(256, 32768);
+                                profile.max_ram_mb = self
+                                    .settings
+                                    .default_max_ram_mb
+                                    .max(profile.min_ram_mb)
+                                    .clamp(512, 32768);
+                            }
+                            if profile.jvm_args.is_empty() && !self.settings.default_jvm_args.is_empty() {
+                                profile.jvm_args = self.settings.default_jvm_args.clone();
+                            }
+                            if profile.java_path.is_empty() && !self.settings.default_java_path.is_empty() {
+                                profile.java_path = self.settings.default_java_path.clone();
+                            }
+                            if profile.window_width.is_none() {
+                                profile.window_width = self.settings.default_window_width;
+                            }
+                            if profile.window_height.is_none() {
+                                profile.window_height = self.settings.default_window_height;
+                            }
+                            if !profile.fullscreen {
+                                profile.fullscreen = self.settings.default_fullscreen;
+                            }
+                            if !profile.prefer_discrete_gpu {
+                                profile.prefer_discrete_gpu = self.settings.default_prefer_discrete_gpu;
+                            }
                             let lang = self.settings.language;
                             let name = profile.name.clone();
                             self.profiles.push(profile);
@@ -1614,6 +1890,17 @@ impl McLauncherApp {
                             self.status_text = msg.clone();
                             self.show_toast(ctx, msg);
                             anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 12);
+                            anim::emit_edge_pulse(ctx, accent());
+                        }
+                        Ok(ModrinthInstallOutcome::ModpackExported { path }) => {
+                            let fname = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "modpack.mrpack".to_string());
+                            let msg = format!("{}: {fname}", tr(self.settings.language, "toast.exported"));
+                            self.status_text = msg.clone();
+                            self.show_toast(ctx, msg);
+                            anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 10);
                             anim::emit_edge_pulse(ctx, accent());
                         }
                         Err(e) if e == CANCELLED_ERR_MSG => {
@@ -1662,6 +1949,52 @@ impl McLauncherApp {
                             self.status_text = format!("{}: {e}", tr(lang, "status.update_failed"));
                             self.show_toast(ctx, format!("{}: {e}", tr(lang, "status.error")));
                             anim::emit_edge_pulse(ctx, DANGER);
+                        }
+                    }
+                }
+                WorkerEvent::ModrinthIdentifyFinished { profile_id, result } => {
+                    self.identifying_mods = false;
+                    if let Some(p) = self.profiles.get(self.selected_idx) {
+                        if p.id == profile_id {
+                            self.mr_installed_cache = load_installed_index(&self.paths, p);
+                            self.fs_cache.invalidate();
+                        }
+                    }
+                    let lang = self.settings.language;
+                    match result {
+                        Ok((found, total)) => {
+                            let msg = format!(
+                                "{}: {found}/{total}",
+                                tr(lang, "content.identified_toast")
+                            );
+                            self.status_text = msg.clone();
+                            self.show_toast(ctx, msg);
+                            if found > 0 {
+                                anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 8);
+                            }
+                        }
+                        Err(e) => {
+                            self.show_toast(ctx, format!("{}: {e}", tr(lang, "status.error")));
+                        }
+                    }
+                }
+                WorkerEvent::McloGsUploaded(res) => {
+                    self.mclogs_uploading = false;
+                    match res {
+                        Ok(url) => {
+                            ctx.copy_text(url.clone());
+                            self.mclogs_last_url = Some(url.clone());
+                            self.show_toast(
+                                ctx,
+                                format!("{} {url}", tr(self.settings.language, "logs.uploaded_toast")),
+                            );
+                            anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 8);
+                        }
+                        Err(e) => {
+                            self.show_toast(
+                                ctx,
+                                format!("{}: {e}", tr(self.settings.language, "status.error")),
+                            );
                         }
                     }
                 }
@@ -1858,7 +2191,8 @@ impl McLauncherApp {
                             let can_auto = self.settings.auto_update
                                 && info.download_url.is_some()
                                 && !self.is_busy
-                                && self.game_handle.is_none()
+                                && !self.any_game_running()
+                                && self.launching_profiles.is_empty()
                                 && !self.update_installing;
                             self.update_available = Some(info);
                             self.update_checked_up_to_date = false;
@@ -2052,6 +2386,7 @@ impl McLauncherApp {
                 self.confirm_delete_idx = None;
                 self.show_create_server_modal = false;
                 self.confirm_delete_server_idx = None;
+                self.show_export_mrpack_modal = false;
                 self.show_cmd_palette = false;
                 self.mr_detail_hit = None;
             }
@@ -2498,7 +2833,7 @@ impl McLauncherApp {
             ui.separator();
             ui.add_space(6.0);
 
-            let is_game_running = self.game_handle.is_some();
+            let is_game_running = self.any_game_running();
             let is_server_running = self.running_server_id.is_some();
 
             bounded_scroll(ui, "nav_sidebar_scroll", |ui| {
@@ -2729,8 +3064,25 @@ impl McLauncherApp {
 
     fn render_top_bar(&mut self, ui: &mut egui::Ui) {
         let avail_w = ui.available_width();
-        let btn_w = if avail_w < 480.0 { 112.0 } else { 142.0 };
-        let left_w = (avail_w - btn_w - 20.0).max(80.0);
+        let btn_w = if avail_w < 540.0 {
+            104.0
+        } else if avail_w < 680.0 {
+            122.0
+        } else {
+            142.0
+        };
+        let show_status_badges = avail_w >= 680.0;
+        let show_update_btn = self.update_available.is_some() && avail_w >= 540.0;
+        let right_reserve = btn_w
+            + if show_status_badges {
+                (if self.settings.offline_mode { 84.0 } else { 0.0 })
+                    + (if self.running_games.len() > 1 { 92.0 } else { 0.0 })
+            } else {
+                0.0
+            }
+            + if show_update_btn { 96.0 } else { 0.0 }
+            + 24.0;
+        let left_w = (avail_w - right_reserve).max(90.0);
 
         ui_toolbar_row(ui, 34.0, |ui| {
             ui.allocate_ui_with_layout(
@@ -2744,9 +3096,9 @@ impl McLauncherApp {
                     ui.spacing_mut().item_spacing.x = 6.0;
 
                     if let Some(cur) = self.profiles.get(self.selected_idx).cloned() {
-                        let show_badge = left_w >= 300.0;
+                        let show_badge = left_w >= 290.0;
                         let reserve = (if show_badge { 88.0 } else { 0.0 }) + 12.0;
-                        let combo_w = (left_w - reserve).clamp(80.0, 260.0);
+                        let combo_w = (left_w - reserve).clamp(80.0, 280.0);
 
                         let combo_resp = egui::ComboBox::from_id_salt("topbar_instance_combo")
                             .selected_text(format!("{} ({})", cur.name, cur.version_id))
@@ -2800,8 +3152,9 @@ impl McLauncherApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let is_running = self.game_handle.is_some();
-                let (btn_text, icon, enabled, stop_style, pulsing) = if self.is_busy {
+                let is_launching = self.is_selected_launching();
+                let is_running = self.is_selected_running();
+                let (btn_text, icon, enabled, stop_style, pulsing) = if is_launching || self.is_busy {
                     (
                         tr(self.settings.language, "top.loading"),
                         None,
@@ -2837,8 +3190,32 @@ impl McLauncherApp {
                     }
                 }
 
+                if show_status_badges && self.settings.offline_mode {
+                    badge_sized(
+                        ui,
+                        tr(self.settings.language, "top.offline_badge"),
+                        false,
+                        24.0,
+                        None,
+                    );
+                }
+
+                if show_status_badges && self.running_games.len() > 1 {
+                    badge_sized(
+                        ui,
+                        &format!(
+                            "{} {}",
+                            self.running_games.len(),
+                            tr(self.settings.language, "top.running_count")
+                        ),
+                        true,
+                        24.0,
+                        None,
+                    );
+                }
+
                 if let Some(upd) = self.update_available.clone() {
-                    if ui.available_width() > 96.0 {
+                    if show_update_btn {
                         let ver = upd.version.trim_start_matches(['v', 'V']);
                         let resp = ui_button_icon(
                             ui,
@@ -2879,14 +3256,14 @@ impl McLauncherApp {
     }
 
     fn render_bottom_bar(&mut self, ui: &mut egui::Ui) {
-        let can_cancel = (self.is_busy && self.game_handle.is_none() && !self.update_installing)
+        let can_cancel = ((!self.launching_profiles.is_empty() || self.is_busy) && !self.update_installing)
             || self.mr_installing
             || self.server_busy
             || self.java_downloading_major.is_some();
         if can_cancel {
-            ui.horizontal(|ui| {
+            ui_toolbar_row(ui, 26.0, |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let bar_w = (ui.available_width() - 96.0).max(80.0);
+                let bar_w = (ui.available_width() - 96.0).max(60.0);
                 ui.allocate_ui_with_layout(
                     Vec2::new(bar_w, 26.0),
                     egui::Layout::left_to_right(egui::Align::Center),
@@ -2921,7 +3298,7 @@ impl McLauncherApp {
                 "main_progress",
                 self.progress,
                 &self.status_text,
-                self.is_busy || self.mr_installing,
+                self.is_busy || !self.launching_profiles.is_empty() || self.mr_installing,
             );
         }
     }
@@ -2996,8 +3373,8 @@ impl eframe::App for McLauncherApp {
         self.ensure_account_skins_requested();
 
         let screen_w = ctx.screen_rect().width();
-        let compact_sidebar = screen_w < 680.0;
-        let target_sidebar_w = if compact_sidebar { 60.0 } else { 208.0 };
+        let compact_sidebar = screen_w < 900.0;
+        let target_sidebar_w = if compact_sidebar { 58.0 } else { 196.0 };
         let sidebar_w = ctx.animate_value_with_time(
             egui::Id::new("sidebar_width_anim"),
             target_sidebar_w,
@@ -3022,7 +3399,10 @@ impl eframe::App for McLauncherApp {
             });
 
         // 2. Bottom Progress Bar (smooth animated height slide-in/out)
-        let show_bottom_bar = self.is_busy || self.mr_installing || self.progress > 0.0;
+        let show_bottom_bar = self.is_busy
+            || !self.launching_profiles.is_empty()
+            || self.mr_installing
+            || self.progress > 0.0;
         let bar_t = ctx.animate_bool_with_time(
             egui::Id::new("bottom_bar_open_anim"),
             show_bottom_bar,
@@ -3072,6 +3452,8 @@ impl eframe::App for McLauncherApp {
                     .inner_margin(Margin::same(if compact_pad { 10.0 } else { 16.0 })),
             )
             .show(ctx, |ui| {
+                let panel_w = ui.available_width().max(120.0);
+                ui.set_max_width(panel_w);
                 let now = ctx.input(|i| i.time);
                 let raw_t = ((now - self.page_switch_time) / 0.18).clamp(0.0, 1.0) as f32;
                 let eased = ease_out_cubic(raw_t);
@@ -3098,6 +3480,7 @@ impl eframe::App for McLauncherApp {
 
         self.render_new_profile_modal(ctx);
         self.render_delete_confirm_modal(ctx);
+        self.render_export_mrpack_modal(ctx);
         self.render_create_server_modal(ctx);
         self.render_delete_server_modal(ctx);
         self.render_project_details_modal(ctx);

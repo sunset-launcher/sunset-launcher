@@ -49,13 +49,29 @@ pub(super) fn bounded_scroll<R>(
     id_salt: &str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::scroll_area::ScrollAreaOutput<R> {
+    let outer_w = ui.available_width().max(20.0);
+    let content_w = if outer_w > 80.0 {
+        (outer_w - 14.0).max(60.0)
+    } else {
+        outer_w
+    };
     let max_h = ui.available_height().max(0.0);
     egui::ScrollArea::vertical()
         .id_salt(id_salt)
         .auto_shrink([false, false])
         .min_scrolled_height(0.0)
         .max_height(max_h)
-        .show(ui, add_contents)
+        .show(ui, |ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(content_w, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_max_width(content_w);
+                    add_contents(ui)
+                },
+            )
+            .inner
+        })
 }
 
 pub(super) fn format_size(bytes: u64) -> String {
@@ -482,7 +498,7 @@ pub(super) fn render_instance_avatar_controls(
     request_pick: &mut bool,
     reset_icon: &mut bool,
 ) {
-    ui.horizontal(|ui| {
+    ui_wrap_row(ui, 36.0, |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let av_id = ui.make_persistent_id((id_salt, "avatar_click"));
         let (av_rect, av_resp) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
@@ -572,16 +588,20 @@ pub(super) fn clamp_summary(s: &str, max_chars: usize) -> String {
 
 pub(super) fn render_loader_kind_pills(ui: &mut egui::Ui, id_prefix: &str, loader: &mut ModLoader) -> bool {
     let mut changed = false;
-    let current = loader.kind();
-    ui_flow_row(ui, 28.0, |ui| {
-        for kind in LoaderKind::ALL {
-            let active = current == kind;
-            if ui_loader_pill(ui, (id_prefix, kind.label()), kind, active).clicked() && !active {
-                *loader = ModLoader::from_kind(kind, String::new());
-                changed = true;
+    let mut current = loader.kind();
+    let combo_w = ui.available_width().clamp(90.0, 170.0);
+    egui::ComboBox::from_id_salt((id_prefix, "loader_kind_combo"))
+        .selected_text(current.label())
+        .width(combo_w)
+        .truncate()
+        .show_ui(ui, |ui| {
+            for kind in LoaderKind::ALL {
+                if ui.selectable_value(&mut current, kind, kind.label()).changed() {
+                    *loader = ModLoader::from_kind(kind, String::new());
+                    changed = true;
+                }
             }
-        }
-    });
+        });
     changed
 }
 
@@ -600,9 +620,11 @@ pub(super) fn render_loader_version_picker(
         } else {
             loader_version.clone()
         };
+        let combo_w = (ui.available_width() - 24.0).clamp(90.0, width.max(90.0));
         egui::ComboBox::from_id_salt(combo_id)
             .selected_text(label)
-            .width(width)
+            .width(combo_w)
+            .truncate()
             .show_ui(ui, |ui| {
                 if ui
                     .selectable_value(loader_version, String::new(), "Auto")

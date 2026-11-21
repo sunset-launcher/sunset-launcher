@@ -547,11 +547,23 @@ fn download_adoptium_jre(
 }
 
 /// Resolves the Java binary for `profile`, automatically downloading the required
-/// Eclipse Temurin JRE into `paths.root/java` when Auto mode finds no suitable local runtime.
+/// Finds a usable Java binary (configured -> detected matching major -> managed Adoptium JRE).
+/// When `offline_mode` is false, downloads an Eclipse Temurin JRE into `paths.root/java` if needed.
+#[allow(dead_code)]
 pub fn ensure_java_runtime(
     paths: &LauncherPaths,
     profile: &Profile,
     required: Option<u32>,
+    tx: Option<&Sender<WorkerEvent>>,
+) -> Result<PathBuf, String> {
+    ensure_java_runtime_with_mode(paths, profile, required, false, tx)
+}
+
+pub fn ensure_java_runtime_with_mode(
+    paths: &LauncherPaths,
+    profile: &Profile,
+    required: Option<u32>,
+    offline_mode: bool,
     tx: Option<&Sender<WorkerEvent>>,
 ) -> Result<PathBuf, String> {
     if !profile.java_path.trim().is_empty() {
@@ -564,6 +576,21 @@ pub fn ensure_java_runtime(
         // 1.18-1.20.4 -> Java 17) don't break on newer runtimes like Java 21/25.
         if let Some(exact) = installs.iter().find(|j| j.major == req) {
             return Ok(exact.path.clone());
+        }
+        if offline_mode {
+            if let Ok(bin) = resolve_java_binary(profile, Some(req)) {
+                emit_log(
+                    tx,
+                    format!(
+                        "[Java] Offline mode: using fallback Java at {} (required {req})",
+                        bin.display()
+                    ),
+                );
+                return Ok(bin);
+            }
+            return Err(format!(
+                "Offline mode: Java {req} is not installed locally and cannot be downloaded offline."
+            ));
         }
         match download_adoptium_jre(paths, req, tx) {
             Ok(bin) => return Ok(bin),
@@ -587,6 +614,12 @@ pub fn ensure_java_runtime(
 
     if let Ok(bin) = resolve_java_binary(profile, None) {
         return Ok(bin);
+    }
+    if offline_mode {
+        return Err(
+            "Offline mode: no Java runtime found locally. Install Java or disable offline mode."
+                .to_string(),
+        );
     }
     download_adoptium_jre(paths, 21, tx)
 }
@@ -671,6 +704,95 @@ fn collect_arg_values(
     }
 }
 
+/// Parses newline-separated `KEY=VALUE` environment variables (ignoring `#` comments and blanks).
+pub fn parse_env_vars(input: &str) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+    for raw_line in input.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        if let Some((k, v)) = line.split_once('=') {
+            let key = k.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let mut val = v.trim();
+            if val.len() >= 2
+                && ((val.starts_with('"') && val.ends_with('"'))
+                    || (val.starts_with('\'') && val.ends_with('\'')))
+            {
+                val = &val[1..val.len() - 1];
+            }
+            vars.push((key.to_string(), val.to_string()));
+        }
+    }
+    vars
+}
+
+fn run_shell_hook(
+    cmd_str: &str,
+    cwd: &Path,
+    envs: &[(String, String)],
+    label: &str,
+    tx: &Sender<WorkerEvent>,
+    profile_id: &str,
+) -> Result<(), String> {
+    let trimmed = cmd_str.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let _ = tx.send(WorkerEvent::InstanceLog {
+        profile_id: profile_id.to_string(),
+        line: format!("[Hook:{label}] Running: {trimmed}"),
+    });
+
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", trimmed]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", trimmed]);
+        c
+    };
+    cmd.current_dir(cwd);
+    configure_background_command(&mut cmd);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("{label} command failed to start: {e}"))?;
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if !line.trim().is_empty() {
+            let _ = tx.send(WorkerEvent::InstanceLog {
+                profile_id: profile_id.to_string(),
+                line: format!("[Hook:{label}] {line}"),
+            });
+        }
+    }
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        if !line.trim().is_empty() {
+            let _ = tx.send(WorkerEvent::InstanceLog {
+                profile_id: profile_id.to_string(),
+                line: format!("[Hook:{label} ERR] {line}"),
+            });
+        }
+    }
+
+    if !output.status.success() {
+        return Err(format!(
+            "{label} command exited with code {:?}",
+            output.status.code()
+        ));
+    }
+    Ok(())
+}
+
 /// Launches Minecraft in a child process and streams stdout/stderr to the UI.
 /// Returns a handle that lets the UI stop the game.
 pub fn launch_game(
@@ -680,6 +802,7 @@ pub fn launch_game(
     prepared: &PreparedLaunch,
     authlib_injector: Option<&Path>,
     quick_world: Option<&str>,
+    offline_mode: bool,
     tx: Sender<WorkerEvent>,
 ) -> Result<GameHandle, String> {
     check_not_cancelled()?;
@@ -688,8 +811,27 @@ pub fn launch_game(
         .java_version
         .as_ref()
         .map(|j| j.major_version);
-    let java_bin = ensure_java_runtime(paths, profile, required_java, Some(&tx))?;
+    let java_bin =
+        ensure_java_runtime_with_mode(paths, profile, required_java, offline_mode, Some(&tx))?;
     let game_dir = instance_dir(paths, profile);
+    let profile_id = profile.id.clone();
+
+    let mut hook_envs = parse_env_vars(&profile.env_vars);
+    hook_envs.push((
+        "SUNSET_INSTANCE_DIR".to_string(),
+        game_dir.to_string_lossy().to_string(),
+    ));
+    hook_envs.push(("SUNSET_PROFILE_NAME".to_string(), profile.name.clone()));
+    hook_envs.push(("SUNSET_MC_VERSION".to_string(), profile.version_id.clone()));
+
+    run_shell_hook(
+        &profile.pre_launch_cmd,
+        &game_dir,
+        &hook_envs,
+        "pre-launch",
+        &tx,
+        &profile_id,
+    )?;
 
     // Sync pre-1.6 `map_to_resources` assets into `<instance>/resources/` when applicable.
     if let Some(ref idx_path) = prepared.map_to_resources_index {
@@ -900,15 +1042,26 @@ pub fn launch_game(
 
     append_profile_launch_args_with_world(profile, quick_world, &mut cmd_args);
 
-    let _ = tx.send(WorkerEvent::Log(format!(
-        "[Launcher] Starting {} ({}) with {} in {}",
-        profile.name,
-        profile.version_id,
-        java_bin.display(),
-        game_dir.display()
-    )));
+    let _ = tx.send(WorkerEvent::InstanceLog {
+        profile_id: profile_id.clone(),
+        line: format!(
+            "[Launcher] Starting {} ({}) with {} in {}",
+            profile.name,
+            profile.version_id,
+            java_bin.display(),
+            game_dir.display()
+        ),
+    });
 
-    let mut command = Command::new(&java_bin);
+    let wrapper_tokens = split_jvm_args(&profile.wrapper_cmd);
+    let mut command = if let Some((wrapper_exe, wrapper_rest)) = wrapper_tokens.split_first() {
+        let mut c = Command::new(wrapper_exe);
+        c.args(wrapper_rest);
+        c.arg(&java_bin);
+        c
+    } else {
+        Command::new(&java_bin)
+    };
     command
         .args(&cmd_args)
         .current_dir(&game_dir)
@@ -921,29 +1074,41 @@ pub fn launch_game(
             .env("__NV_PRIME_RENDER_OFFLOAD", "1")
             .env("__GLX_VENDOR_LIBRARY_NAME", "nvidia");
     }
+    for (k, v) in parse_env_vars(&profile.env_vars) {
+        command.env(k, v);
+    }
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to start Java ({}): {e}", java_bin.display()))?;
 
     if let Some(stdout) = child.stdout.take() {
         let tx_out = tx.clone();
+        let pid_out = profile_id.clone();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = tx_out.send(WorkerEvent::Log(line));
+                let _ = tx_out.send(WorkerEvent::InstanceLog {
+                    profile_id: pid_out.clone(),
+                    line,
+                });
             }
         });
     }
     if let Some(stderr) = child.stderr.take() {
         let tx_err = tx.clone();
+        let pid_err = profile_id.clone();
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                let _ = tx_err.send(WorkerEvent::Log(line));
+                let _ = tx_err.send(WorkerEvent::InstanceLog {
+                    profile_id: pid_err.clone(),
+                    line,
+                });
             }
         });
     }
 
     let handle: GameHandle = Arc::new(Mutex::new(child));
     let watcher = Arc::clone(&handle);
+    let post_exit_cmd = profile.post_exit_cmd.clone();
     thread::spawn(move || loop {
         // Poll instead of wait() so the UI can lock the child and kill it.
         let status = match watcher.lock() {
@@ -952,12 +1117,31 @@ pub fn launch_game(
         };
         match status {
             Ok(Some(s)) => {
-                let _ = tx.send(WorkerEvent::GameExited(s.code()));
+                if let Err(err) = run_shell_hook(
+                    &post_exit_cmd,
+                    &game_dir,
+                    &hook_envs,
+                    "post-exit",
+                    &tx,
+                    &profile_id,
+                ) {
+                    let _ = tx.send(WorkerEvent::InstanceLog {
+                        profile_id: profile_id.clone(),
+                        line: format!("[Hook:post-exit WARN] {err}"),
+                    });
+                }
+                let _ = tx.send(WorkerEvent::GameExited {
+                    profile_id,
+                    code: s.code(),
+                });
                 break;
             }
             Ok(None) => thread::sleep(Duration::from_millis(400)),
             Err(_) => {
-                let _ = tx.send(WorkerEvent::GameExited(None));
+                let _ = tx.send(WorkerEvent::GameExited {
+                    profile_id,
+                    code: None,
+                });
                 break;
             }
         }
@@ -1142,6 +1326,26 @@ mod tests {
                 r"-XX:HeapDumpPath=C:\My Games\dumps\mc.hprof",
                 "-Dfoo.bar=hello world",
                 "-Xmx4G",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_env_vars_handles_comments_quotes_and_export() {
+        let raw = "
+# comment
+FOO=bar
+export BAZ = \"hello world\"
+SINGLE='one=two'
+EMPTY=
+";
+        assert_eq!(
+            parse_env_vars(raw),
+            vec![
+                ("FOO".to_string(), "bar".to_string()),
+                ("BAZ".to_string(), "hello world".to_string()),
+                ("SINGLE".to_string(), "one=two".to_string()),
+                ("EMPTY".to_string(), "".to_string()),
             ]
         );
     }

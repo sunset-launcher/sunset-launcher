@@ -169,31 +169,61 @@ pub struct Profile {
     pub icon_path: String,
     #[serde(default)]
     pub dir_name: String,
+    #[serde(default)]
+    pub pre_launch_cmd: String,
+    #[serde(default)]
+    pub post_exit_cmd: String,
+    #[serde(default)]
+    pub wrapper_cmd: String,
+    #[serde(default)]
+    pub env_vars: String,
 }
 
 impl Profile {
     pub fn new(name: String, version_id: String, loader: ModLoader, username: String) -> Self {
+        Self::new_with_defaults(
+            name,
+            version_id,
+            loader,
+            username,
+            &LauncherSettings::default(),
+        )
+    }
+
+    pub fn new_with_defaults(
+        name: String,
+        version_id: String,
+        loader: ModLoader,
+        username: String,
+        defaults: &LauncherSettings,
+    ) -> Self {
+        let min_ram = defaults.default_min_ram_mb.clamp(256, 32768);
+        let max_ram = defaults.default_max_ram_mb.max(min_ram).clamp(512, 32768);
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             version_id,
             loader,
             username,
-            min_ram_mb: 512,
-            max_ram_mb: 2048,
-            java_path: String::new(),
-            jvm_args: String::new(),
+            min_ram_mb: min_ram,
+            max_ram_mb: max_ram,
+            java_path: defaults.default_java_path.clone(),
+            jvm_args: defaults.default_jvm_args.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
             last_played: None,
             pinned: false,
             playtime_secs: 0,
-            window_width: None,
-            window_height: None,
-            fullscreen: false,
+            window_width: defaults.default_window_width,
+            window_height: defaults.default_window_height,
+            fullscreen: defaults.default_fullscreen,
             server_address: String::new(),
-            prefer_discrete_gpu: false,
+            prefer_discrete_gpu: defaults.default_prefer_discrete_gpu,
             icon_path: String::new(),
             dir_name: String::new(),
+            pre_launch_cmd: String::new(),
+            post_exit_cmd: String::new(),
+            wrapper_cmd: String::new(),
+            env_vars: String::new(),
         }
     }
 }
@@ -416,8 +446,18 @@ pub enum WorkerEvent {
         fraction: f32,
     },
     Log(String),
-    LaunchFinished(Result<GameHandle, String>),
-    GameExited(Option<i32>),
+    InstanceLog {
+        profile_id: String,
+        line: String,
+    },
+    LaunchFinished {
+        profile_id: String,
+        result: Result<GameHandle, String>,
+    },
+    GameExited {
+        profile_id: String,
+        code: Option<i32>,
+    },
     /// Account tokens were refreshed in the background and must be persisted.
     AccountRefreshed(Account),
     MsDeviceCodeReady(Result<DeviceCodeInfo, String>),
@@ -430,6 +470,11 @@ pub enum WorkerEvent {
     },
     ModrinthInstallFinished(Result<ModrinthInstallOutcome, String>),
     ModUpdatesFinished(Result<Vec<String>, String>),
+    ModrinthIdentifyFinished {
+        profile_id: String,
+        result: Result<(usize, usize), String>,
+    },
+    McloGsUploaded(Result<String, String>),
     ProjectVersionsLoaded {
         project_id: String,
         result: Result<Vec<ModrinthVersion>, String>,
@@ -742,15 +787,21 @@ impl ModrinthProjectType {
             ModrinthProjectType::Modpack => "modpack",
         }
     }
+}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSource {
+    #[default]
+    Modrinth,
+    CurseForge,
+}
+
+impl ProjectSource {
     pub fn label(self) -> &'static str {
         match self {
-            ModrinthProjectType::Mod => "Mods",
-            ModrinthProjectType::Plugin => "Plugins",
-            ModrinthProjectType::Resourcepack => "Resourcepacks",
-            ModrinthProjectType::Shader => "Shaders",
-            ModrinthProjectType::Datapack => "Datapacks",
-            ModrinthProjectType::Modpack => "Modpacks",
+            ProjectSource::Modrinth => "Modrinth",
+            ProjectSource::CurseForge => "CurseForge",
         }
     }
 }
@@ -773,6 +824,10 @@ pub struct ModrinthSearchHit {
     pub icon_url: Option<String>,
     #[serde(default)]
     pub categories: Vec<String>,
+    #[serde(default)]
+    pub source: ProjectSource,
+    #[serde(default)]
+    pub website_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -789,6 +844,8 @@ pub struct ModrinthVersion {
     pub files: Vec<ModrinthFile>,
     #[serde(default)]
     pub dependencies: Vec<ModrinthDependency>,
+    #[serde(default)]
+    pub cf_dep_mod_ids: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -805,7 +862,7 @@ pub struct ModrinthFile {
     pub primary: bool,
 }
 
-/// Record of a Modrinth project installed into an instance (stored per instance).
+/// Record of a Modrinth or CurseForge project installed into an instance (stored per instance).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledProject {
     pub title: String,
@@ -814,6 +871,50 @@ pub struct InstalledProject {
     pub version_number: String,
     #[serde(default)]
     pub icon_url: Option<String>,
+    #[serde(default)]
+    pub source: ProjectSource,
+}
+
+/// Options controlling what gets included in `.mrpack` `overrides/`.
+#[derive(Debug, Clone)]
+pub struct MrpackExportOptions {
+    pub include_config: bool,
+    pub include_options_txt: bool,
+    pub include_unmatched_mods: bool,
+    pub include_resourcepacks: bool,
+    pub include_shaderpacks: bool,
+    pub include_saves: bool,
+    pub include_screenshots: bool,
+    pub extra_excludes: String,
+}
+
+impl Default for MrpackExportOptions {
+    fn default() -> Self {
+        Self {
+            include_config: true,
+            include_options_txt: true,
+            include_unmatched_mods: true,
+            include_resourcepacks: true,
+            include_shaderpacks: true,
+            include_saves: false,
+            include_screenshots: false,
+            extra_excludes: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFileKind {
+    CrashReport,
+    Log,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstanceLogFile {
+    pub filename: String,
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub kind: LogFileKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -877,6 +978,9 @@ pub enum ModrinthInstallOutcome {
     ModpackProfileCreated {
         profile: Profile,
         files_count: usize,
+    },
+    ModpackExported {
+        path: PathBuf,
     },
 }
 
@@ -1150,6 +1254,14 @@ fn default_custom_accent() -> [u8; 3] {
     [255, 128, 66]
 }
 
+fn default_min_ram() -> u32 {
+    512
+}
+
+fn default_max_ram() -> u32 {
+    2048
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LauncherSettings {
@@ -1175,6 +1287,24 @@ pub struct LauncherSettings {
     pub auto_update: bool,
     #[serde(default)]
     pub curseforge_api_key: String,
+    #[serde(default)]
+    pub offline_mode: bool,
+    #[serde(default = "default_min_ram")]
+    pub default_min_ram_mb: u32,
+    #[serde(default = "default_max_ram")]
+    pub default_max_ram_mb: u32,
+    #[serde(default)]
+    pub default_jvm_args: String,
+    #[serde(default)]
+    pub default_java_path: String,
+    #[serde(default)]
+    pub default_window_width: Option<u32>,
+    #[serde(default)]
+    pub default_window_height: Option<u32>,
+    #[serde(default)]
+    pub default_fullscreen: bool,
+    #[serde(default)]
+    pub default_prefer_discrete_gpu: bool,
 }
 
 impl Default for LauncherSettings {
@@ -1192,6 +1322,15 @@ impl Default for LauncherSettings {
             check_updates_on_startup: true,
             auto_update: false,
             curseforge_api_key: String::new(),
+            offline_mode: false,
+            default_min_ram_mb: default_min_ram(),
+            default_max_ram_mb: default_max_ram(),
+            default_jvm_args: String::new(),
+            default_java_path: String::new(),
+            default_window_width: None,
+            default_window_height: None,
+            default_fullscreen: false,
+            default_prefer_discrete_gpu: false,
         }
     }
 }
@@ -1217,6 +1356,35 @@ mod tests {
         assert_eq!(LauncherSettings::default().theme_preset, ThemePreset::Sunset);
         assert_eq!(ThemePreset::Sunset.palette().accent, [255, 128, 66]);
         assert_eq!(ThemePreset::Emerald.palette().accent, [27, 217, 106]);
+    }
+
+    #[test]
+    fn profile_new_with_defaults_applies_settings() {
+        let mut s = LauncherSettings::default();
+        s.default_min_ram_mb = 2048;
+        s.default_max_ram_mb = 6144;
+        s.default_jvm_args = "-XX:+UseG1GC".to_string();
+        s.default_java_path = "/opt/jdk21/bin/java".to_string();
+        s.default_window_width = Some(1920);
+        s.default_window_height = Some(1080);
+        s.default_fullscreen = true;
+        s.default_prefer_discrete_gpu = true;
+
+        let p = Profile::new_with_defaults(
+            "Pack".into(),
+            "1.21.4".into(),
+            ModLoader::Vanilla,
+            "Alex".into(),
+            &s,
+        );
+        assert_eq!(p.min_ram_mb, 2048);
+        assert_eq!(p.max_ram_mb, 6144);
+        assert_eq!(p.jvm_args, "-XX:+UseG1GC");
+        assert_eq!(p.java_path, "/opt/jdk21/bin/java");
+        assert_eq!(p.window_width, Some(1920));
+        assert_eq!(p.window_height, Some(1080));
+        assert!(p.fullscreen);
+        assert!(p.prefer_discrete_gpu);
     }
 }
 

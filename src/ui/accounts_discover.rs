@@ -36,7 +36,7 @@ impl McLauncherApp {
 
         bounded_scroll(ui, "accounts_scroll", |ui| {
             let card_inner_w = (ui.available_width() - 32.0).max(130.0);
-            let inner_w = card_inner_w.clamp(120.0, 340.0);
+            let inner_w = card_inner_w.clamp(120.0, 460.0);
 
             if let Some(err) = &self.auth_error {
                 ui_alert_banner(ui, AlertKind::Error, &format!("Error: {err}"), card_inner_w + 22.0);
@@ -147,7 +147,7 @@ impl McLauncherApp {
                 animated_card(ui, acc_card_id, is_active, |ui| {
                     ui.set_min_width(card_inner_w);
                     ui.set_max_width(card_inner_w);
-                    if card_inner_w >= 340.0 {
+                    if card_inner_w >= 430.0 {
                         ui_toolbar_row(ui, 34.0, |ui| {
                             let (av_r, _) =
                                 ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
@@ -485,7 +485,7 @@ impl McLauncherApp {
                         "offline_user_in",
                         &mut self.offline_input,
                         "Steve",
-                        (inner_w - 130.0).max(110.0),
+                        (card_inner_w - 150.0).clamp(110.0, 260.0),
                         false,
                     );
                     let enter = edit_resp.lost_focus()
@@ -546,22 +546,64 @@ impl McLauncherApp {
         };
 
         let avail_w = ui.available_width();
-        ui_toolbar_row(ui, 30.0, |ui| {
-            ui.heading(egui::RichText::new("Modrinth").size(21.0).color(text_primary()));
-            if avail_w >= 460.0 {
-                let max_badge_w = (avail_w - 310.0).max(90.0);
-                badge_sized(ui, &target_label, !is_vanilla_mods, 26.0, Some(max_badge_w));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if avail_w >= 460.0 {
+            ui_toolbar_row(ui, 30.0, |ui| {
+                ui.heading(
+                    egui::RichText::new(self.discover_source.label())
+                        .size(21.0)
+                        .color(text_primary()),
+                );
+                if avail_w >= 540.0 {
+                    let max_badge_w = (avail_w - 320.0).max(80.0);
+                    badge_sized(ui, &target_label, !is_vanilla_mods, 26.0, Some(max_badge_w));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if target_server.is_some() {
+                        if ui_button_icon(
+                            ui,
+                            "mr_back_srv_btn",
+                            Some(Icon::Server),
+                            tr(self.settings.language, "nav.servers"),
+                            ButtonVariant::Secondary,
+                            true,
+                            30.0,
+                        )
+                        .clicked()
+                        {
+                            self.switch_page(ui.ctx(), NavPage::Servers);
+                        }
+                    } else if ui_button_icon(
+                        ui,
+                        "mr_inst_content_btn",
+                        Some(Icon::Layers),
+                        tr(self.settings.language, "btn.instance_content"),
+                        ButtonVariant::Secondary,
+                        true,
+                        30.0,
+                    )
+                    .clicked()
+                    {
+                        self.instance_tab = InstanceSubTab::Content;
+                        self.switch_page(ui.ctx(), NavPage::Instance);
+                    }
+                });
+            });
+        } else {
+            ui_wrap_row(ui, 28.0, |ui| {
+                ui.heading(
+                    egui::RichText::new(self.discover_source.label())
+                        .size(21.0)
+                        .color(text_primary()),
+                );
                 if target_server.is_some() {
                     if ui_button_icon(
                         ui,
-                        "mr_back_srv_btn",
+                        "mr_back_srv_btn_n",
                         Some(Icon::Server),
                         tr(self.settings.language, "nav.servers"),
                         ButtonVariant::Secondary,
                         true,
-                        30.0,
+                        28.0,
                     )
                     .clicked()
                     {
@@ -569,12 +611,12 @@ impl McLauncherApp {
                     }
                 } else if ui_button_icon(
                     ui,
-                    "mr_inst_content_btn",
+                    "mr_inst_content_btn_n",
                     Some(Icon::Layers),
                     tr(self.settings.language, "btn.instance_content"),
                     ButtonVariant::Secondary,
                     true,
-                    30.0,
+                    28.0,
                 )
                 .clicked()
                 {
@@ -582,7 +624,7 @@ impl McLauncherApp {
                     self.switch_page(ui.ctx(), NavPage::Instance);
                 }
             });
-        });
+        }
 
         ui.add_space(6.0);
         if !self.servers.is_empty() {
@@ -672,7 +714,27 @@ impl McLauncherApp {
             });
             ui.add_space(6.0);
         }
-        ui_flow_row(ui, 30.0, |ui| {
+        ui_wrap_row(ui, 30.0, |ui| {
+            if target_server.is_none() {
+                let prev_src = self.discover_source;
+                egui::ComboBox::from_id_salt("discover_src_combo")
+                    .selected_text(self.discover_source.label())
+                    .width(122.0)
+                    .show_ui(ui, |ui| {
+                        for src in [ProjectSource::Modrinth, ProjectSource::CurseForge] {
+                            ui.selectable_value(&mut self.discover_source, src, src.label());
+                        }
+                    });
+                if self.discover_source != prev_src {
+                    self.mr_results.clear();
+                    self.mr_total_hits = 0;
+                    self.mr_next_offset = 0;
+                    self.mr_has_more = false;
+                    self.mr_error = None;
+                    self.mark_subtab_switch(ui.ctx());
+                    self.trigger_modrinth_search(false);
+                }
+            }
             let (allow_srv_mods, allow_srv_plugins) = if let Some(srv) = &target_server {
                 let srv_dir = server_dir(&self.paths, srv);
                 (
@@ -682,55 +744,48 @@ impl McLauncherApp {
             } else {
                 (true, false)
             };
-            for (pt, ic) in [
-                (ModrinthProjectType::Mod, Icon::Layers),
-                (ModrinthProjectType::Plugin, Icon::Server),
-                (ModrinthProjectType::Modpack, Icon::Grid),
-                (ModrinthProjectType::Resourcepack, Icon::Sparkle),
-                (ModrinthProjectType::Shader, Icon::Star),
-                (ModrinthProjectType::Datapack, Icon::Folder),
-            ] {
-                if target_server.is_some() {
-                    match pt {
-                        ModrinthProjectType::Mod if !allow_srv_mods => continue,
-                        ModrinthProjectType::Plugin if !allow_srv_plugins => continue,
-                        ModrinthProjectType::Modpack
-                        | ModrinthProjectType::Resourcepack
-                        | ModrinthProjectType::Shader
-                        | ModrinthProjectType::Datapack => continue,
-                        _ => {}
-                    }
-                } else if pt == ModrinthProjectType::Plugin {
-                    continue;
-                }
-                let pt_lbl = match pt {
-                    ModrinthProjectType::Mod => tr(self.settings.language, "content.mods"),
-                    ModrinthProjectType::Plugin => tr(self.settings.language, "mr.plugins"),
-                    ModrinthProjectType::Modpack => tr(self.settings.language, "mr.modpacks"),
-                    ModrinthProjectType::Resourcepack => {
-                        tr(self.settings.language, "content.resourcepacks")
-                    }
-                    ModrinthProjectType::Shader => {
-                        tr(self.settings.language, "content.shaderpacks")
-                    }
-                    ModrinthProjectType::Datapack => tr(self.settings.language, "mr.datapacks"),
-                };
-                if ui_pill_tab_icon(
-                    ui,
-                    ("mr_type_pill", pt.label()),
-                    Some(ic),
-                    pt_lbl,
-                    self.mr_type == pt,
-                )
-                .clicked()
-                    && self.mr_type != pt
-                {
-                    self.mr_type = pt;
-                    self.mark_subtab_switch(ui.ctx());
-                    self.trigger_modrinth_search(false);
-                }
-            }
             let lang = self.settings.language;
+            let pt_label = |pt: ModrinthProjectType| match pt {
+                ModrinthProjectType::Mod => tr(lang, "content.mods"),
+                ModrinthProjectType::Plugin => tr(lang, "mr.plugins"),
+                ModrinthProjectType::Modpack => tr(lang, "mr.modpacks"),
+                ModrinthProjectType::Resourcepack => tr(lang, "content.resourcepacks"),
+                ModrinthProjectType::Shader => tr(lang, "content.shaderpacks"),
+                ModrinthProjectType::Datapack => tr(lang, "mr.datapacks"),
+            };
+            let prev_pt = self.mr_type;
+            egui::ComboBox::from_id_salt("mr_type_combo")
+                .selected_text(pt_label(self.mr_type))
+                .width(142.0)
+                .show_ui(ui, |ui| {
+                    for pt in [
+                        ModrinthProjectType::Mod,
+                        ModrinthProjectType::Plugin,
+                        ModrinthProjectType::Modpack,
+                        ModrinthProjectType::Resourcepack,
+                        ModrinthProjectType::Shader,
+                        ModrinthProjectType::Datapack,
+                    ] {
+                        if target_server.is_some() {
+                            match pt {
+                                ModrinthProjectType::Mod if !allow_srv_mods => continue,
+                                ModrinthProjectType::Plugin if !allow_srv_plugins => continue,
+                                ModrinthProjectType::Modpack
+                                | ModrinthProjectType::Resourcepack
+                                | ModrinthProjectType::Shader
+                                | ModrinthProjectType::Datapack => continue,
+                                _ => {}
+                            }
+                        } else if pt == ModrinthProjectType::Plugin {
+                            continue;
+                        }
+                        ui.selectable_value(&mut self.mr_type, pt, pt_label(pt));
+                    }
+                });
+            if self.mr_type != prev_pt {
+                self.mark_subtab_switch(ui.ctx());
+                self.trigger_modrinth_search(false);
+            }
             let sort_label = |s: ModrinthSort| match s {
                 ModrinthSort::Relevance => tr(lang, "mr.sort_relevance"),
                 ModrinthSort::Downloads => tr(lang, "mr.sort_downloads"),
@@ -739,7 +794,7 @@ impl McLauncherApp {
             };
             egui::ComboBox::from_id_salt("mr_sort_combo")
                 .selected_text(sort_label(self.mr_sort))
-                .width(124.0)
+                .width(132.0)
                 .show_ui(ui, |ui| {
                     for s in [
                         ModrinthSort::Relevance,
@@ -756,8 +811,12 @@ impl McLauncherApp {
         });
 
         ui.add_space(5.0);
-        let search_w = (ui.available_width() - 126.0).clamp(110.0, 460.0);
-        ui_toolbar_row(ui, 30.0, |ui| {
+        let search_w = if ui.available_width() < 340.0 {
+            (ui.available_width() - 16.0).max(110.0)
+        } else {
+            (ui.available_width() - 154.0).clamp(110.0, 520.0)
+        };
+        ui_wrap_row(ui, 30.0, |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let enter_or_cleared = ui_search_input(
                 ui,
@@ -867,7 +926,7 @@ impl McLauncherApp {
 
             let results = self.mr_results.clone();
             let active_loader_slug = cur_loader.and_then(|l| l.modrinth_slug());
-            let wide_card = card_inner_w >= 430.0;
+            let wide_card = card_inner_w >= 540.0;
             for hit in &results {
                 let is_installed = self.mr_installed_cache.contains_key(&hit.project_id);
                 let is_this_installing = mr_installing
@@ -951,10 +1010,11 @@ impl McLauncherApp {
                                         ui.set_max_size(Vec2::new(info_w, 72.0));
                                         ui.spacing_mut().item_spacing.y = 2.0;
 
-                                        // Line 1: Title + Installed badge
+                                        // Line 1: Title + Installed/CF badge
                                         ui_toolbar_row(ui, 20.0, |ui| {
                                             ui.spacing_mut().item_spacing.x = 6.0;
-                                            let badge_w = if is_installed { 76.0 } else { 0.0 };
+                                            let badge_w = if is_installed { 76.0 } else { 0.0 }
+                                                + if hit.source == ProjectSource::CurseForge { 38.0 } else { 0.0 };
                                             ui.allocate_ui(
                                                 Vec2::new((info_w - badge_w).max(60.0), 20.0),
                                                 |ui| {
@@ -988,6 +1048,9 @@ impl McLauncherApp {
                                                     }
                                                 },
                                             );
+                                            if hit.source == ProjectSource::CurseForge {
+                                                badge(ui, "CF", false);
+                                            }
                                             if is_installed {
                                                 badge(ui, tr(self.settings.language, "mr.installed"), true);
                                             }
@@ -1089,18 +1152,20 @@ impl McLauncherApp {
                                             ui,
                                             ("mr_ext_w", &hit.project_id),
                                             Icon::External,
-                                            tr(self.settings.language, "mr.view_modrinth"),
+                                            hit.source.label(),
                                             ButtonVariant::Subtle,
                                             true,
                                             30.0,
                                         )
                                         .clicked()
                                         {
-                                            let url = format!(
-                                                "https://modrinth.com/{}/{}",
-                                                mr_type.api_str(),
-                                                hit.project_id
-                                            );
+                                            let url = hit.website_url.clone().unwrap_or_else(|| {
+                                                format!(
+                                                    "https://modrinth.com/{}/{}",
+                                                    mr_type.api_str(),
+                                                    hit.project_id
+                                                )
+                                            });
                                             anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 28.0);
                                             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                                         }
@@ -1172,7 +1237,8 @@ impl McLauncherApp {
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     ui_toolbar_row(ui, 20.0, |ui| {
-                                        let badge_w = if is_installed { 72.0 } else { 0.0 };
+                                        let badge_w = if is_installed { 72.0 } else { 0.0 }
+                                            + if hit.source == ProjectSource::CurseForge { 36.0 } else { 0.0 };
                                         ui.allocate_ui(
                                             Vec2::new((info_w - badge_w).max(40.0), 20.0),
                                             |ui| {
@@ -1203,6 +1269,9 @@ impl McLauncherApp {
                                                 }
                                             },
                                         );
+                                        if hit.source == ProjectSource::CurseForge {
+                                            badge(ui, "CF", false);
+                                        }
                                         if is_installed {
                                             badge(ui, tr(self.settings.language, "mr.installed"), true);
                                         }
@@ -1242,7 +1311,7 @@ impl McLauncherApp {
                                 btn_lbl,
                                 btn_variant,
                                 !mr_installing,
-                                Vec2::new((card_inner_w - 38.0).max(80.0), 30.0),
+                                Vec2::new((card_inner_w - 44.0).max(60.0), 30.0),
                             )
                             .clicked()
                             {
@@ -1352,16 +1421,31 @@ impl McLauncherApp {
                 self.progress = 0.05;
                 let paths = self.paths.clone();
                 let tx = self.tx.clone();
+                let cf_key = self.settings.curseforge_api_key.clone();
                 thread::spawn(move || {
-                    let res = install_project(
-                        &paths,
-                        &profile,
-                        &project_id,
-                        mr_type,
-                        &title,
-                        icon_url.as_deref(),
-                        &tx,
-                    );
+                    let res = if let Some(cf_mod_id) = parse_cf_project_id(&project_id) {
+                        install_curseforge_project(
+                            &cf_key,
+                            &paths,
+                            &profile,
+                            cf_mod_id,
+                            mr_type,
+                            &title,
+                            icon_url.as_deref(),
+                            None,
+                            &tx,
+                        )
+                    } else {
+                        install_project(
+                            &paths,
+                            &profile,
+                            &project_id,
+                            mr_type,
+                            &title,
+                            icon_url.as_deref(),
+                            &tx,
+                        )
+                    };
                     let _ = tx.send(WorkerEvent::ModrinthInstallFinished(res));
                 });
             }

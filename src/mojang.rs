@@ -1394,14 +1394,112 @@ pub fn materialize_legacy_assets(
     }
 }
 
+fn find_cached_meta_loader_version(version_dir: &Path, slug: &str) -> Option<String> {
+    let prefix = format!("{slug}-");
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    let Ok(entries) = fs::read_dir(version_dir) else {
+        return None;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if let Some(rest) = name.strip_prefix(&prefix).and_then(|s| s.strip_suffix(".json")) {
+            if !rest.is_empty() {
+                let mtime = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().is_none_or(|(t, _)| mtime > *t) {
+                    best = Some((mtime, rest.to_string()));
+                }
+            }
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+fn find_cached_installer_loader_version(version_dir: &Path, slug: &str) -> Option<String> {
+    let prefix = format!("{slug}-");
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    let Ok(entries) = fs::read_dir(version_dir) else {
+        return None;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        if !p.join("version.json").is_file() && !p.join("installer.jar").is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if let Some(ver) = name.strip_prefix(&prefix) {
+            if !ver.is_empty() {
+                let mtime = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().is_none_or(|(t, _)| mtime > *t) {
+                    best = Some((mtime, ver.to_string()));
+                }
+            }
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+fn verify_offline_jobs(jobs: &[DownloadJob], label: &str) -> Result<(), String> {
+    let missing: Vec<String> = jobs
+        .iter()
+        .filter(|j| !j.dest.is_file())
+        .take(5)
+        .map(|j| {
+            j.dest
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file")
+                .to_string()
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Offline mode: missing cached {label} ({}). Launch once while online.",
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// Ensures the requested Minecraft version, optional mod loader (Fabric, Quilt, Forge, NeoForge),
 /// libraries, natives, and assets are downloaded and verified.
+#[allow(dead_code)]
 pub fn prepare_version(
     paths: &LauncherPaths,
     version_id: &str,
     loader: &ModLoader,
     manifest: Option<&VersionManifest>,
     resolve_java: &dyn Fn(Option<u32>) -> Result<PathBuf, String>,
+    tx: &Sender<WorkerEvent>,
+) -> Result<PreparedLaunch, String> {
+    prepare_version_with_mode(paths, version_id, loader, manifest, resolve_java, false, tx)
+}
+
+/// Same as `prepare_version`, but when `offline_mode` is true it uses only locally cached
+/// manifests, loader overlays, libraries, and assets without making network requests.
+pub fn prepare_version_with_mode(
+    paths: &LauncherPaths,
+    version_id: &str,
+    loader: &ModLoader,
+    manifest: Option<&VersionManifest>,
+    resolve_java: &dyn Fn(Option<u32>) -> Result<PathBuf, String>,
+    offline_mode: bool,
     tx: &Sender<WorkerEvent>,
 ) -> Result<PreparedLaunch, String> {
     check_not_cancelled()?;
@@ -1412,11 +1510,20 @@ pub fn prepare_version(
     let json_path = version_dir.join(format!("{version_id}.json"));
 
     let _ = tx.send(WorkerEvent::Progress {
-        stage: format!("Fetching metadata for {version_id}..."),
+        stage: if offline_mode {
+            format!("Loading cached metadata for {version_id} (offline)...")
+        } else {
+            format!("Fetching metadata for {version_id}...")
+        },
         fraction: 0.05,
     });
 
     if !json_path.exists() {
+        if offline_mode {
+            return Err(format!(
+                "Offline mode: version '{version_id}' metadata is not cached locally. Launch once while online."
+            ));
+        }
         let manifest_owned;
         let manifest_ref = match manifest {
             Some(m) => m,
@@ -1481,14 +1588,24 @@ pub fn prepare_version(
         ModLoader::Vanilla => {}
         ModLoader::Fabric { loader_version } | ModLoader::Quilt { loader_version } => {
             let kind = loader.kind();
-            let resolved_ver =
-                resolve_effective_loader_version(kind, version_id, loader_version)?;
+            let slug = kind.modrinth_slug().unwrap_or("fabric");
+            let resolved_ver = if offline_mode && loader_version.trim().is_empty() {
+                find_cached_meta_loader_version(&version_dir, slug).ok_or_else(|| {
+                    format!(
+                        "Offline mode: no cached {} metadata for {version_id}. Launch once while online.",
+                        kind.label()
+                    )
+                })?
+            } else if offline_mode {
+                loader_version.trim().to_string()
+            } else {
+                resolve_effective_loader_version(kind, version_id, loader_version)?
+            };
             let _ = tx.send(WorkerEvent::Progress {
                 stage: format!("{} {resolved_ver}...", kind.label()),
                 fraction: 0.13,
             });
 
-            let slug = kind.modrinth_slug().unwrap_or("fabric");
             let cache_path = version_dir.join(format!("{slug}-{resolved_ver}.json"));
             let (base_api, default_maven) = match kind {
                 LoaderKind::Quilt => (
@@ -1503,6 +1620,11 @@ pub fn prepare_version(
                     .map_err(|e| format!("Failed to read {} cache: {e}", kind.label()))?;
                 serde_json::from_str(&raw)
                     .map_err(|e| format!("Failed to parse {} cache: {e}", kind.label()))?
+            } else if offline_mode {
+                return Err(format!(
+                    "Offline mode: {} {resolved_ver} metadata is not cached locally. Launch once while online.",
+                    kind.label()
+                ));
             } else {
                 let ov =
                     fetch_meta_loader_overlay(base_api, kind.label(), version_id, &resolved_ver)?;
@@ -1533,26 +1655,58 @@ pub fn prepare_version(
         }
         ModLoader::Forge { loader_version } | ModLoader::NeoForge { loader_version } => {
             let kind = loader.kind();
-            let resolved_ver =
-                resolve_effective_loader_version(kind, version_id, loader_version)?;
             let slug = kind.modrinth_slug().unwrap_or("forge");
+            let resolved_ver = if offline_mode && loader_version.trim().is_empty() {
+                find_cached_installer_loader_version(&version_dir, slug).ok_or_else(|| {
+                    format!(
+                        "Offline mode: no cached {} installation for {version_id}. Launch once while online.",
+                        kind.label()
+                    )
+                })?
+            } else if offline_mode {
+                loader_version.trim().to_string()
+            } else {
+                resolve_effective_loader_version(kind, version_id, loader_version)?
+            };
             let loader_dir = version_dir.join(format!("{slug}-{resolved_ver}"));
             fs::create_dir_all(&loader_dir)
                 .map_err(|e| format!("Failed to create {} dir: {e}", kind.label()))?;
 
             let _ = tx.send(WorkerEvent::Progress {
-                stage: format!("Downloading {} {resolved_ver} installer...", kind.label()),
+                stage: format!("{} {resolved_ver}...", kind.label()),
                 fraction: 0.13,
             });
 
             let installer_jar = loader_dir.join("installer.jar");
-            if !installer_jar.is_file() {
-                let url = installer_url_for(&client, kind, version_id, &resolved_ver)?;
-                download_file(&client, &url, &installer_jar, None)?;
-            }
+            let cached_overlay_path = loader_dir.join("version.json");
+            let cached_install_profile_path = loader_dir.join("install_profile.json");
 
-            let (overlay, install_profile) =
-                extract_installer_jar(&installer_jar, &loader_dir, &paths.libraries_dir)?;
+            let (overlay, install_profile) = if offline_mode && cached_overlay_path.is_file() {
+                let ov_raw = fs::read_to_string(&cached_overlay_path)
+                    .map_err(|e| format!("Failed to read cached version.json: {e}"))?;
+                let ov: LoaderProfileOverlay = serde_json::from_str(&ov_raw)
+                    .map_err(|e| format!("Failed to parse cached version.json: {e}"))?;
+                let ip = if cached_install_profile_path.is_file() {
+                    fs::read_to_string(&cached_install_profile_path)
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<ForgeInstallProfile>(&s).ok())
+                } else {
+                    None
+                };
+                (ov, ip)
+            } else {
+                if !installer_jar.is_file() {
+                    if offline_mode {
+                        return Err(format!(
+                            "Offline mode: {} {resolved_ver} is not cached locally. Launch once while online.",
+                            kind.label()
+                        ));
+                    }
+                    let url = installer_url_for(&client, kind, version_id, &resolved_ver)?;
+                    download_file(&client, &url, &installer_jar, None)?;
+                }
+                extract_installer_jar(&installer_jar, &loader_dir, &paths.libraries_dir)?
+            };
 
             let default_maven = match kind {
                 LoaderKind::NeoForge => "https://maven.neoforged.net/releases/",
@@ -1605,17 +1759,25 @@ pub fn prepare_version(
                 .file_name()
                 .ok_or_else(|| "Invalid logging config filename".to_string())?;
             let xml_dest = log_dir.join(safe_id);
-            download_file(
-                &client,
-                &log_client.file.url,
-                &xml_dest,
-                Some(&log_client.file.sha1),
-            )?;
-            Some(
-                log_client
-                    .argument
-                    .replace("${path}", &xml_dest.to_string_lossy()),
-            )
+            if offline_mode {
+                xml_dest.is_file().then(|| {
+                    log_client
+                        .argument
+                        .replace("${path}", &xml_dest.to_string_lossy())
+                })
+            } else {
+                download_file(
+                    &client,
+                    &log_client.file.url,
+                    &xml_dest,
+                    Some(&log_client.file.sha1),
+                )?;
+                Some(
+                    log_client
+                        .argument
+                        .replace("${path}", &xml_dest.to_string_lossy()),
+                )
+            }
         } else {
             None
         }
@@ -1635,29 +1797,42 @@ pub fn prepare_version(
             .assets_dir
             .join("indexes")
             .join(format!("{}.json", asset_info.id));
-        download_file(&client, &asset_info.url, &index_path, Some(&asset_info.sha1))?;
+        if !offline_mode {
+            download_file(&client, &asset_info.url, &index_path, Some(&asset_info.sha1))?;
+        }
 
-        let index_raw = fs::read_to_string(&index_path)
-            .map_err(|e| format!("Failed to read asset index: {e}"))?;
-        let asset_index: AssetIndex = serde_json::from_str(&index_raw)
-            .map_err(|e| format!("Failed to parse asset index: {e}"))?;
+        if index_path.is_file() {
+            let index_raw = fs::read_to_string(&index_path)
+                .map_err(|e| format!("Failed to read asset index: {e}"))?;
+            let asset_index: AssetIndex = serde_json::from_str(&index_raw)
+                .map_err(|e| format!("Failed to parse asset index: {e}"))?;
 
-        let jobs = asset_index
-            .objects
-            .values()
-            .filter(|obj| obj.hash.len() > 2)
-            .map(|obj| {
-                let prefix = &obj.hash[..2];
-                DownloadJob {
-                    url: format!("{RESOURCES_BASE}/{prefix}/{}", obj.hash),
-                    dest: paths.assets_dir.join("objects").join(prefix).join(&obj.hash),
-                    sha1: Some(obj.hash.clone()),
-                    size: Some(obj.size),
-                }
-            })
-            .collect();
-        parsed_asset_meta = Some((asset_info.id.clone(), index_path, asset_index));
-        jobs
+            let jobs = if offline_mode {
+                Vec::new()
+            } else {
+                asset_index
+                    .objects
+                    .values()
+                    .filter(|obj| obj.hash.len() > 2)
+                    .map(|obj| {
+                        let prefix = &obj.hash[..2];
+                        DownloadJob {
+                            url: format!("{RESOURCES_BASE}/{prefix}/{}", obj.hash),
+                            dest: paths.assets_dir.join("objects").join(prefix).join(&obj.hash),
+                            sha1: Some(obj.hash.clone()),
+                            size: Some(obj.size),
+                        }
+                    })
+                    .collect()
+            };
+            parsed_asset_meta = Some((asset_info.id.clone(), index_path, asset_index));
+            jobs
+        } else {
+            let _ = tx.send(WorkerEvent::Log(
+                "[Offline] Asset index not cached; launching with existing assets.".to_string(),
+            ));
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
@@ -1666,22 +1841,26 @@ pub fn prepare_version(
         if let Some(cj) = client_job {
             lib_jobs.push(cj);
         }
-        let lib_total = lib_jobs.len();
-        let _ = tx.send(WorkerEvent::Progress {
-            stage: format!("Libraries: 0/{lib_total}"),
-            fraction: 0.16,
-        });
-        let last_lib_report = AtomicUsize::new(0);
-        download_parallel(&client, lib_jobs, 32, &|done, total| {
-            let prev = last_lib_report.load(Ordering::Relaxed);
-            if done == total || done >= prev + 5 {
-                last_lib_report.store(done, Ordering::Relaxed);
-                let _ = tx.send(WorkerEvent::Progress {
-                    stage: format!("Libraries: {done}/{total}"),
-                    fraction: 0.16 + 0.22 * (done as f32 / total.max(1) as f32),
-                });
-            }
-        })?;
+        if offline_mode {
+            verify_offline_jobs(&lib_jobs, "libraries/client JAR")?;
+        } else {
+            let lib_total = lib_jobs.len();
+            let _ = tx.send(WorkerEvent::Progress {
+                stage: format!("Libraries: 0/{lib_total}"),
+                fraction: 0.16,
+            });
+            let last_lib_report = AtomicUsize::new(0);
+            download_parallel(&client, lib_jobs, 32, &|done, total| {
+                let prev = last_lib_report.load(Ordering::Relaxed);
+                if done == total || done >= prev + 5 {
+                    last_lib_report.store(done, Ordering::Relaxed);
+                    let _ = tx.send(WorkerEvent::Progress {
+                        stage: format!("Libraries: {done}/{total}"),
+                        fraction: 0.16 + 0.22 * (done as f32 / total.max(1) as f32),
+                    });
+                }
+            })?;
+        }
 
         run_installer_processors(
             &ip,
@@ -1694,7 +1873,9 @@ pub fn prepare_version(
         )?;
 
         for jar in &native_jars {
-            extract_natives(jar, &natives_dir)?;
+            if !offline_mode || jar.is_file() {
+                extract_natives(jar, &natives_dir)?;
+            }
         }
 
         if !asset_jobs.is_empty() {
@@ -1716,22 +1897,33 @@ pub fn prepare_version(
             all_jobs.push(cj);
         }
         all_jobs.extend(lib_jobs);
-        all_jobs.extend(asset_jobs);
-
-        let last_report = AtomicUsize::new(0);
-        download_parallel(&client, all_jobs, 64, &|done, total| {
-            let prev = last_report.load(Ordering::Relaxed);
-            if done == total || done >= prev + 25 {
-                last_report.store(done, Ordering::Relaxed);
-                let _ = tx.send(WorkerEvent::Progress {
-                    stage: format!("Downloading: {done}/{total}"),
-                    fraction: 0.16 + 0.80 * (done as f32 / total.max(1) as f32),
-                });
+        if offline_mode {
+            if !client_jar.is_file() {
+                return Err(format!(
+                    "Offline mode: missing cached client JAR for {version_id}. Launch once while online."
+                ));
             }
-        })?;
+            verify_offline_jobs(&all_jobs, "libraries/client JAR")?;
+        } else {
+            all_jobs.extend(asset_jobs);
+
+            let last_report = AtomicUsize::new(0);
+            download_parallel(&client, all_jobs, 64, &|done, total| {
+                let prev = last_report.load(Ordering::Relaxed);
+                if done == total || done >= prev + 25 {
+                    last_report.store(done, Ordering::Relaxed);
+                    let _ = tx.send(WorkerEvent::Progress {
+                        stage: format!("Downloading: {done}/{total}"),
+                        fraction: 0.16 + 0.80 * (done as f32 / total.max(1) as f32),
+                    });
+                }
+            })?;
+        }
 
         for jar in &native_jars {
-            extract_natives(jar, &natives_dir)?;
+            if !offline_mode || jar.is_file() {
+                extract_natives(jar, &natives_dir)?;
+            }
         }
     }
 
@@ -1932,6 +2124,58 @@ mod tests {
                 ..RuleFeatures::default()
             }
         ));
+
+        // Offline mode rejects uncached version cleanly, and prepares locally cached version without network
+        let off_root = tmp.join("offline");
+        let offline_paths = crate::models::LauncherPaths {
+            versions_dir: off_root.join("versions"),
+            libraries_dir: off_root.join("libraries"),
+            assets_dir: off_root.join("assets"),
+            instances_dir: off_root.join("instances"),
+            servers_dir: off_root.join("servers"),
+            profiles_file: off_root.join("profiles.json"),
+            servers_file: off_root.join("servers.json"),
+            accounts_file: off_root.join("accounts.json"),
+            root: off_root.clone(),
+        };
+        std::fs::create_dir_all(&offline_paths.versions_dir).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let err = match super::prepare_version_with_mode(
+            &offline_paths,
+            "1.21.4",
+            &crate::models::ModLoader::Vanilla,
+            None,
+            &|_| Ok(std::path::PathBuf::from("java")),
+            true,
+            &tx,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("expected offline error"),
+        };
+        assert!(err.contains("Offline mode"));
+
+        let vdir = offline_paths.versions_dir.join("1.21.4");
+        std::fs::create_dir_all(&vdir).unwrap();
+        std::fs::write(
+            vdir.join("1.21.4.json"),
+            r#"{"id":"1.21.4","mainClass":"net.minecraft.client.main.Main","libraries":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(vdir.join("1.21.4.jar"), b"fake-client-jar").unwrap();
+        let prepared = super::prepare_version_with_mode(
+            &offline_paths,
+            "1.21.4",
+            &crate::models::ModLoader::Vanilla,
+            None,
+            &|_| Ok(std::path::PathBuf::from("java")),
+            true,
+            &tx,
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.version_details.main_class,
+            "net.minecraft.client.main.Main"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

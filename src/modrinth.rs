@@ -1,7 +1,8 @@
 use crate::models::{
-    DedicatedServer, IconImage, InstalledProject, LauncherPaths, LoaderKind, ModLoader,
-    ModrinthInstallOutcome, ModrinthProjectType, ModrinthSearchHit, ModrinthSearchPage,
-    ModrinthSearchResponse, ModrinthSort, ModrinthVersion, MrpackIndex, Profile, WorkerEvent,
+    DedicatedServer, IconImage, InstalledProject, InstanceLogFile, LauncherPaths, LoaderKind,
+    LogFileKind, ModLoader, ModrinthInstallOutcome, ModrinthProjectType, ModrinthSearchHit,
+    ModrinthSearchPage, ModrinthSearchResponse, ModrinthSort, ModrinthVersion,
+    MrpackExportOptions, MrpackIndex, Profile, ProjectSource, WorkerEvent,
 };
 use crate::mojang::{
     build_async_http_client, build_http_client, check_not_cancelled, download_file,
@@ -543,7 +544,7 @@ pub fn load_installed_index(
     map
 }
 
-fn save_installed_index(
+pub(crate) fn save_installed_index(
     paths: &LauncherPaths,
     profile: &Profile,
     map: &HashMap<String, InstalledProject>,
@@ -553,7 +554,7 @@ fn save_installed_index(
     }
 }
 
-fn default_datapack_rel_folder(inst_dir: &Path) -> String {
+pub(crate) fn default_datapack_rel_folder(inst_dir: &Path) -> String {
     let worlds = list_worlds(inst_dir);
     if let Some(first_world) = worlds.first() {
         format!("saves/{}/datapacks", first_world.folder_name)
@@ -713,7 +714,7 @@ fn install_modpack_version(
     res
 }
 
-fn folder_for(project_type: ModrinthProjectType) -> &'static str {
+pub(crate) fn folder_for(project_type: ModrinthProjectType) -> &'static str {
     match project_type {
         ModrinthProjectType::Plugin => "plugins",
         ModrinthProjectType::Resourcepack => "resourcepacks",
@@ -904,6 +905,7 @@ pub fn install_server_project(
             folder: dest_folder.to_string(),
             version_number: version.version_number.clone(),
             icon_url: icon_url.map(str::to_string),
+            source: ProjectSource::Modrinth,
         },
     );
     save_server_installed_index(paths, server, &index);
@@ -1027,6 +1029,7 @@ pub fn backfill_server_installed_index(paths: &LauncherPaths, server: &Dedicated
                 folder: folder.clone(),
                 version_number: ver.version_number,
                 icon_url,
+                source: ProjectSource::Modrinth,
             },
         );
         changed = true;
@@ -1102,6 +1105,7 @@ pub fn install_server_specific_version(
             folder: dest_folder.to_string(),
             version_number: version.version_number.clone(),
             icon_url: icon_url.map(str::to_string),
+            source: ProjectSource::Modrinth,
         },
     );
     save_server_installed_index(paths, server, &index);
@@ -1177,6 +1181,7 @@ fn install_version_single(
             folder: folder_rel,
             version_number: version.version_number.clone(),
             icon_url,
+            source: ProjectSource::Modrinth,
         },
     );
     Ok(file.filename.clone())
@@ -1536,6 +1541,7 @@ pub fn update_all_installed_projects(
                         folder: (*folder).to_string(),
                         version_number: latest_ver.version_number,
                         icon_url: existing_icon,
+                        source: ProjectSource::Modrinth,
                     },
                 );
                 updated_project_ids.insert(latest_ver.project_id);
@@ -1544,10 +1550,12 @@ pub fn update_all_installed_projects(
         }
     }
 
-    // Fallback check for tracked entries (e.g. disabled mods or projects skipped by batch lookup).
+    // Fallback check for tracked Modrinth entries (e.g. disabled mods or projects skipped by batch lookup).
     let entries: Vec<(String, InstalledProject)> = index
         .iter()
-        .filter(|(pid, _)| !updated_project_ids.contains(*pid))
+        .filter(|(pid, p)| {
+            p.source == ProjectSource::Modrinth && !updated_project_ids.contains(*pid)
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let total = entries.len().max(1);
@@ -1807,23 +1815,64 @@ pub fn parse_mrpack_loader(deps: &HashMap<String, String>) -> Result<(String, Mo
     Ok((mc_version, loader))
 }
 
+fn parse_exclude_patterns(raw: &str) -> Vec<String> {
+    raw.split([',', '\n', ';'])
+        .map(|s| s.trim().replace('\\', "/"))
+        .map(|s| s.trim_start_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+pub(crate) fn path_matches_exclude(rel_posix: &str, patterns: &[String]) -> bool {
+    let rel_lower = rel_posix.to_ascii_lowercase();
+    let file_name = rel_posix.rsplit('/').next().unwrap_or(rel_posix);
+    let file_lower = file_name.to_ascii_lowercase();
+    for pat in patterns {
+        let p = pat.to_ascii_lowercase();
+        let p_trimmed = p.trim_end_matches('/');
+        if p.ends_with('/') {
+            if rel_lower.starts_with(&p) || rel_lower == p_trimmed {
+                return true;
+            }
+        } else if let Some(ext) = p.strip_prefix("*.") {
+            if file_lower.ends_with(&format!(".{ext}")) {
+                return true;
+            }
+        } else if let Some(prefix) = p.strip_suffix('*') {
+            if rel_lower.starts_with(prefix) || file_lower.starts_with(prefix) {
+                return true;
+            }
+        } else if rel_lower == p
+            || rel_lower.starts_with(&format!("{p}/"))
+            || file_lower == p
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn add_dir_to_zip(
     writer: &mut zip::ZipWriter<File>,
     options: zip::write::SimpleFileOptions,
     base_dir: &Path,
     dir: &Path,
     archive_prefix: &str,
+    excludes: &[String],
 ) -> Result<(), String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Ok(());
     };
     for entry in entries.flatten() {
         let p = entry.path();
-        if p.is_dir() {
-            add_dir_to_zip(writer, options, base_dir, &p, archive_prefix)?;
-        } else if p.is_file() {
-            if let Ok(rel) = p.strip_prefix(base_dir) {
-                let rel_posix = rel.to_string_lossy().replace('\\', "/");
+        if let Ok(rel) = p.strip_prefix(base_dir) {
+            let rel_posix = rel.to_string_lossy().replace('\\', "/");
+            if path_matches_exclude(&rel_posix, excludes) {
+                continue;
+            }
+            if p.is_dir() {
+                add_dir_to_zip(writer, options, base_dir, &p, archive_prefix, excludes)?;
+            } else if p.is_file() {
                 let zip_name = if archive_prefix.is_empty() {
                     rel_posix
                 } else {
@@ -1844,9 +1893,17 @@ fn add_dir_to_zip(
 
 /// Exports an instance's loader metadata, mods, resourcepacks, shaderpacks, and configs
 /// into a spec-compliant `.mrpack` archive under `paths.root/exports/`.
-/// Files hosted on Modrinth are emitted in `modrinth.index.json` `files[]` with SHA-1 + SHA-512
-/// hashes and official download URLs; custom/unmatched files and `config/` go into `overrides/`.
+#[allow(dead_code)]
 pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Result<PathBuf, String> {
+    export_instance_mrpack_with_options(paths, profile, &MrpackExportOptions::default())
+}
+
+/// Same as `export_instance_mrpack`, honoring `MrpackExportOptions` exclusions.
+pub fn export_instance_mrpack_with_options(
+    paths: &LauncherPaths,
+    profile: &Profile,
+    export_opts: &MrpackExportOptions,
+) -> Result<PathBuf, String> {
     let inst = instance_dir(paths, profile);
     let exports_dir = paths.root.join("exports");
     fs::create_dir_all(&exports_dir)
@@ -1889,16 +1946,35 @@ pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Resul
         _ => {}
     }
 
+    let excludes = parse_exclude_patterns(&export_opts.extra_excludes);
+
     struct CandidatePackFile {
         rel_posix: String,
         disk_path: PathBuf,
         sha1: String,
         sha512: String,
         size: u64,
+        include_as_override: bool,
     }
 
     let mut candidates: Vec<CandidatePackFile> = Vec::new();
-    for sub in ["mods", "resourcepacks", "shaderpacks"] {
+    let folder_checks = [
+        ("mods", true, export_opts.include_unmatched_mods),
+        (
+            "resourcepacks",
+            export_opts.include_resourcepacks,
+            export_opts.include_resourcepacks,
+        ),
+        (
+            "shaderpacks",
+            export_opts.include_shaderpacks,
+            export_opts.include_shaderpacks,
+        ),
+    ];
+    for (sub, include_indexed, include_override) in folder_checks {
+        if !include_indexed && !include_override {
+            continue;
+        }
         let dir = inst.join(sub);
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -1914,13 +1990,18 @@ pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Resul
             if fname.starts_with('.') || fname.ends_with(".disabled") {
                 continue;
             }
+            let rel_posix = format!("{sub}/{fname}");
+            if path_matches_exclude(&rel_posix, &excludes) {
+                continue;
+            }
             if let Ok((sha1, sha512, size)) = compute_file_hashes(&p) {
                 candidates.push(CandidatePackFile {
-                    rel_posix: format!("{sub}/{fname}"),
+                    rel_posix,
                     disk_path: p,
                     sha1,
                     sha512,
                     size,
+                    include_as_override: include_override,
                 });
             }
         }
@@ -1929,33 +2010,37 @@ pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Resul
     let mut resolved_urls: HashMap<String, String> = HashMap::new();
     if !candidates.is_empty() {
         if let Ok(client) = build_http_client() {
-            let sha1_list: Vec<&str> = candidates.iter().map(|c| c.sha1.as_str()).collect();
-            let body = serde_json::json!({
-                "hashes": sha1_list,
-                "algorithm": "sha1",
-            });
-            if let Ok(resp) = client
-                .post(format!("{MODRINTH_API_BASE}/version_files"))
-                .json(&body)
-                .send()
-                .and_then(|r| r.error_for_status())
-            {
-                if let Ok(map) = resp.json::<HashMap<String, ModrinthVersion>>() {
-                    for (hash_key, ver) in map {
-                        if let Some(matched_file) = ver
-                            .files
-                            .iter()
-                            .find(|f| {
-                                f.hashes
-                                    .sha1
-                                    .as_deref()
-                                    .is_some_and(|h| h.eq_ignore_ascii_case(&hash_key))
-                            })
-                            .or_else(|| ver.files.first())
-                        {
-                            if !matched_file.url.is_empty() {
-                                resolved_urls
-                                    .insert(hash_key.to_ascii_lowercase(), matched_file.url.clone());
+            for chunk in candidates.chunks(100) {
+                let sha1_list: Vec<&str> = chunk.iter().map(|c| c.sha1.as_str()).collect();
+                let body = serde_json::json!({
+                    "hashes": sha1_list,
+                    "algorithm": "sha1",
+                });
+                if let Ok(resp) = client
+                    .post(format!("{MODRINTH_API_BASE}/version_files"))
+                    .json(&body)
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                {
+                    if let Ok(map) = resp.json::<HashMap<String, ModrinthVersion>>() {
+                        for (hash_key, ver) in map {
+                            if let Some(matched_file) = ver
+                                .files
+                                .iter()
+                                .find(|f| {
+                                    f.hashes
+                                        .sha1
+                                        .as_deref()
+                                        .is_some_and(|h| h.eq_ignore_ascii_case(&hash_key))
+                                })
+                                .or_else(|| ver.files.first())
+                            {
+                                if !matched_file.url.is_empty() {
+                                    resolved_urls.insert(
+                                        hash_key.to_ascii_lowercase(),
+                                        matched_file.url.clone(),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1981,7 +2066,7 @@ pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Resul
                 downloads: vec![url.clone()],
                 file_size: Some(cand.size),
             });
-        } else {
+        } else if cand.include_as_override {
             override_files.push((cand.rel_posix, cand.disk_path));
         }
     }
@@ -2018,25 +2103,62 @@ pub fn export_instance_mrpack(paths: &LauncherPaths, profile: &Profile) -> Resul
         zip_writer
             .start_file(&zip_name, options)
             .map_err(|e| format!("Failed to add {zip_name}: {e}"))?;
-        let mut src =
-            File::open(&disk_path).map_err(|e| format!("Failed to open {}: {e}", disk_path.display()))?;
+        let mut src = File::open(&disk_path)
+            .map_err(|e| format!("Failed to open {}: {e}", disk_path.display()))?;
         io::copy(&mut src, &mut zip_writer)
             .map_err(|e| format!("Failed to copy {}: {e}", disk_path.display()))?;
     }
 
-    let config_dir = inst.join("config");
-    if config_dir.is_dir() {
-        add_dir_to_zip(&mut zip_writer, options, &inst, &config_dir, "overrides/")?;
+    if export_opts.include_config {
+        let config_dir = inst.join("config");
+        if config_dir.is_dir() && !path_matches_exclude("config", &excludes) {
+            add_dir_to_zip(
+                &mut zip_writer,
+                options,
+                &inst,
+                &config_dir,
+                "overrides/",
+                &excludes,
+            )?;
+        }
     }
-    let options_txt = inst.join("options.txt");
-    if options_txt.is_file() {
-        zip_writer
-            .start_file("overrides/options.txt", options)
-            .map_err(|e| format!("Failed to add overrides/options.txt: {e}"))?;
-        let mut src =
-            File::open(&options_txt).map_err(|e| format!("Failed to open options.txt: {e}"))?;
-        io::copy(&mut src, &mut zip_writer)
-            .map_err(|e| format!("Failed to copy options.txt: {e}"))?;
+    if export_opts.include_options_txt {
+        let options_txt = inst.join("options.txt");
+        if options_txt.is_file() && !path_matches_exclude("options.txt", &excludes) {
+            zip_writer
+                .start_file("overrides/options.txt", options)
+                .map_err(|e| format!("Failed to add overrides/options.txt: {e}"))?;
+            let mut src =
+                File::open(&options_txt).map_err(|e| format!("Failed to open options.txt: {e}"))?;
+            io::copy(&mut src, &mut zip_writer)
+                .map_err(|e| format!("Failed to copy options.txt: {e}"))?;
+        }
+    }
+    if export_opts.include_saves {
+        let saves_dir = inst.join("saves");
+        if saves_dir.is_dir() && !path_matches_exclude("saves", &excludes) {
+            add_dir_to_zip(
+                &mut zip_writer,
+                options,
+                &inst,
+                &saves_dir,
+                "overrides/",
+                &excludes,
+            )?;
+        }
+    }
+    if export_opts.include_screenshots {
+        let shots_dir = inst.join("screenshots");
+        if shots_dir.is_dir() && !path_matches_exclude("screenshots", &excludes) {
+            add_dir_to_zip(
+                &mut zip_writer,
+                options,
+                &inst,
+                &shots_dir,
+                "overrides/",
+                &excludes,
+            )?;
+        }
     }
 
     zip_writer
@@ -2423,7 +2545,7 @@ struct CfHashEntry {
     algo: u8,
 }
 
-fn curseforge_edge_cdn_url(file_id: u64, file_name: &str) -> String {
+pub(crate) fn curseforge_edge_cdn_url(file_id: u64, file_name: &str) -> String {
     let major = file_id / 1000;
     let minor = file_id % 1000;
     format!("https://edge.forgecdn.net/files/{major}/{minor}/{file_name}")
@@ -2468,22 +2590,23 @@ pub fn install_curseforge_zip(
     let mut downloaded_count = 0usize;
 
     if !required_files.is_empty() {
-        let api_key = curseforge_api_key.trim();
-        if api_key.is_empty() {
-            let _ = tx.send(WorkerEvent::Log(
-                "[CurseForge] Tip: Set a CurseForge API Key in Settings to download remote manifest files; extracting bundled overrides only.".to_string(),
-            ));
-        } else {
-            let client = build_http_client()?;
-            let file_ids: Vec<u64> = required_files.iter().map(|f| f.file_id).collect();
-            let _ = tx.send(WorkerEvent::Progress {
-                stage: format!("Resolving {} CurseForge files...", file_ids.len()),
-                fraction: 0.12,
-            });
-            let resp = client
-                .post("https://api.curseforge.com/v1/mods/files")
-                .header("x-api-key", api_key)
-                .json(&serde_json::json!({ "fileIds": file_ids }))
+        let (base_url, opt_key) = crate::curseforge::cf_api_endpoint(curseforge_api_key);
+        let client = build_http_client()?;
+        let file_ids: Vec<u64> = required_files.iter().map(|f| f.file_id).collect();
+        let _ = tx.send(WorkerEvent::Progress {
+            stage: format!("Resolving {} CurseForge files...", file_ids.len()),
+            fraction: 0.12,
+        });
+
+        let mut all_cf_files = Vec::new();
+        for chunk in file_ids.chunks(250) {
+            let mut req = client
+                .post(format!("{base_url}/mods/files"))
+                .json(&serde_json::json!({ "fileIds": chunk }));
+            if let Some(key) = opt_key {
+                req = req.header("x-api-key", key);
+            }
+            let resp = req
                 .send()
                 .map_err(|e| format!("CurseForge API request failed: {e}"))?
                 .error_for_status()
@@ -2491,56 +2614,57 @@ pub fn install_curseforge_zip(
             let parsed: CfFilesApiResponse = resp
                 .json()
                 .map_err(|e| format!("Invalid CurseForge API response: {e}"))?;
-
-            let mut jobs = Vec::new();
-            let mods_dir = inst_dir.join("mods");
-            let rpacks_dir = inst_dir.join("resourcepacks");
-            let shaders_dir = inst_dir.join("shaderpacks");
-            let _ = fs::create_dir_all(&mods_dir);
-
-            for cf in parsed.data {
-                let safe_name = Path::new(&cf.file_name)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .filter(|n| !n.is_empty() && !n.contains(".."))
-                    .unwrap_or("mod.jar")
-                    .to_string();
-                let url = cf
-                    .download_url
-                    .filter(|u| !u.is_empty())
-                    .unwrap_or_else(|| curseforge_edge_cdn_url(cf.id, &safe_name));
-                let sha1 = cf
-                    .hashes
-                    .iter()
-                    .find(|h| h.algo == 1)
-                    .map(|h| h.value.clone());
-                let target_dir = if safe_name.to_ascii_lowercase().ends_with(".zip") {
-                    if safe_name.to_ascii_lowercase().contains("shader") {
-                        &shaders_dir
-                    } else {
-                        &rpacks_dir
-                    }
-                } else {
-                    &mods_dir
-                };
-                let _ = fs::create_dir_all(target_dir);
-                jobs.push(crate::mojang::DownloadJob {
-                    url,
-                    dest: target_dir.join(safe_name),
-                    sha1,
-                    size: cf.file_length,
-                });
-            }
-
-            downloaded_count = jobs.len();
-            let _ = required_files.first().map(|f| f.project_id);
-            crate::mojang::download_parallel(&client, jobs, 20, &|done, total| {
-                let _ = tx.send(WorkerEvent::Progress {
-                    stage: format!("CurseForge files: {done}/{total}"),
-                    fraction: 0.18 + 0.65 * (done as f32 / total.max(1) as f32),
-                });
-            })?;
+            all_cf_files.extend(parsed.data);
         }
+
+        let mut jobs = Vec::new();
+        let mods_dir = inst_dir.join("mods");
+        let rpacks_dir = inst_dir.join("resourcepacks");
+        let shaders_dir = inst_dir.join("shaderpacks");
+        let _ = fs::create_dir_all(&mods_dir);
+
+        for cf in all_cf_files {
+            let safe_name = Path::new(&cf.file_name)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|n| !n.is_empty() && !n.contains(".."))
+                .unwrap_or("mod.jar")
+                .to_string();
+            let url = cf
+                .download_url
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| curseforge_edge_cdn_url(cf.id, &safe_name));
+            let sha1 = cf
+                .hashes
+                .iter()
+                .find(|h| h.algo == 1)
+                .map(|h| h.value.clone());
+            let target_dir = if safe_name.to_ascii_lowercase().ends_with(".zip") {
+                if safe_name.to_ascii_lowercase().contains("shader") {
+                    &shaders_dir
+                } else {
+                    &rpacks_dir
+                }
+            } else {
+                &mods_dir
+            };
+            let _ = fs::create_dir_all(target_dir);
+            jobs.push(crate::mojang::DownloadJob {
+                url,
+                dest: target_dir.join(safe_name),
+                sha1,
+                size: cf.file_length,
+            });
+        }
+
+        downloaded_count = jobs.len();
+        let _ = required_files.first().map(|f| f.project_id);
+        crate::mojang::download_parallel(&client, jobs, 20, &|done, total| {
+            let _ = tx.send(WorkerEvent::Progress {
+                stage: format!("CurseForge files: {done}/{total}"),
+                fraction: 0.18 + 0.65 * (done as f32 / total.max(1) as f32),
+            });
+        })?;
     }
 
     let ov_trimmed = manifest.overrides.trim_matches('/');
@@ -2892,7 +3016,7 @@ pub fn backup_world(inst_dir: &Path, folder_name: &str) -> Result<PathBuf, Strin
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
     let prefix = format!("{folder_name}/");
-    add_dir_to_zip(&mut writer, options, &world_dir, &world_dir, &prefix)?;
+    add_dir_to_zip(&mut writer, options, &world_dir, &world_dir, &prefix, &[])?;
     writer
         .finish()
         .map_err(|e| format!("Failed to finalize world backup: {e}"))?;
@@ -3238,6 +3362,261 @@ pub fn import_world_datapack(
     fs::copy(src_path, dir.join(&filename))
         .map_err(|e| format!("Failed to import datapack '{filename}': {e}"))?;
     Ok(filename)
+}
+
+/// Identifies locally added mods, resourcepacks, and shaderpacks in `profile`
+/// by querying Modrinth's `POST /v2/version_files` with their SHA-1 hashes.
+/// Returns `(newly_identified_count, total_unmatched_checked)`.
+pub fn identify_instance_content_by_hash(
+    paths: &LauncherPaths,
+    profile: &Profile,
+) -> Result<(usize, usize), String> {
+    let inst = instance_dir(paths, profile);
+    let mut index = load_installed_index(paths, profile);
+    let indexed_files: HashSet<String> = index
+        .values()
+        .map(|p| format!("{}/{}", p.folder, p.filename))
+        .collect();
+
+    let mut hash_to_meta: HashMap<String, (String, String)> = HashMap::new();
+    for folder in ["mods", "resourcepacks", "shaderpacks"] {
+        let dir = inst.join(folder);
+        for item in list_content_items(&dir) {
+            if indexed_files.contains(&format!("{folder}/{}", item.base_name)) {
+                continue;
+            }
+            let path = dir.join(&item.disk_name);
+            if let Ok((sha1_hex, _, _)) = compute_file_hashes(&path) {
+                hash_to_meta.insert(
+                    sha1_hex.to_ascii_lowercase(),
+                    (folder.to_string(), item.base_name),
+                );
+            }
+        }
+    }
+
+    let total_unmatched = hash_to_meta.len();
+    if total_unmatched == 0 {
+        return Ok((0, 0));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct VersionFileMatch {
+        project_id: String,
+        version_number: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ProjectBrief {
+        id: String,
+        title: String,
+        #[serde(default)]
+        icon_url: Option<String>,
+    }
+
+    let client = build_http_client()?;
+    let all_hashes: Vec<String> = hash_to_meta.keys().cloned().collect();
+    let mut matched_versions: HashMap<String, VersionFileMatch> = HashMap::new();
+
+    for chunk in all_hashes.chunks(100) {
+        let body = serde_json::json!({
+            "hashes": chunk,
+            "algorithm": "sha1"
+        });
+        let resp = client
+            .post(format!("{MODRINTH_API_BASE}/version_files"))
+            .json(&body)
+            .send()
+            .map_err(|e| format!("Modrinth hash lookup failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("Modrinth hash lookup HTTP error: {e}"))?;
+        let part: HashMap<String, VersionFileMatch> = resp
+            .json()
+            .map_err(|e| format!("Invalid Modrinth version_files response: {e}"))?;
+        matched_versions.extend(part);
+    }
+
+    if matched_versions.is_empty() {
+        return Ok((0, total_unmatched));
+    }
+
+    let project_ids: Vec<String> = matched_versions
+        .values()
+        .map(|v| v.project_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut proj_by_id: HashMap<String, ProjectBrief> = HashMap::new();
+    for chunk in project_ids.chunks(100) {
+        let ids_param = serde_json::to_string(chunk).unwrap_or_else(|_| "[]".to_string());
+        if let Ok(resp) = client
+            .get(format!("{MODRINTH_API_BASE}/projects"))
+            .query(&[("ids", ids_param.as_str())])
+            .send()
+            .and_then(|r| r.error_for_status())
+        {
+            if let Ok(projects) = resp.json::<Vec<ProjectBrief>>() {
+                for p in projects {
+                    proj_by_id.insert(p.id.clone(), p);
+                }
+            }
+        }
+    }
+
+    let mut identified = 0usize;
+    for (hash, ver) in matched_versions {
+        let Some((folder, filename)) = hash_to_meta.get(&hash.to_ascii_lowercase()) else {
+            continue;
+        };
+        let proj = proj_by_id.get(&ver.project_id);
+        let title = proj
+            .map(|p| p.title.clone())
+            .unwrap_or_else(|| filename.clone());
+        let icon_url = proj.and_then(|p| p.icon_url.clone());
+        index.insert(
+            ver.project_id,
+            InstalledProject {
+                title,
+                filename: filename.clone(),
+                folder: folder.clone(),
+                version_number: ver.version_number,
+                icon_url,
+                source: ProjectSource::Modrinth,
+            },
+        );
+        identified += 1;
+    }
+
+    if identified > 0 {
+        save_installed_index(paths, profile, &index);
+    }
+    Ok((identified, total_unmatched))
+}
+
+/// Lists crash reports (`crash-reports/*.txt`) and logs (`logs/*.log`) in an instance directory.
+pub fn list_instance_log_files(inst_dir: &Path) -> Vec<InstanceLogFile> {
+    let mut out = Vec::new();
+    for (sub, kind, allowed_ext) in [
+        ("crash-reports", LogFileKind::CrashReport, "txt"),
+        ("logs", LogFileKind::Log, "log"),
+    ] {
+        let dir = inst_dir.join(sub);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut group = Vec::new();
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let ext_ok = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case(allowed_ext));
+            if !ext_ok {
+                continue;
+            }
+            let Some(filename) = p.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            let meta = e.metadata().ok();
+            let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let mtime = meta
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            group.push((
+                mtime,
+                InstanceLogFile {
+                    filename,
+                    path: p,
+                    size_bytes,
+                    kind,
+                },
+            ));
+        }
+        group.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.filename.cmp(&a.1.filename)));
+        out.extend(group.into_iter().map(|(_, f)| f));
+    }
+    out
+}
+
+/// Reads an instance log or crash-report file (capping at the last 512 KB if huge).
+pub fn read_instance_log_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    const MAX_BYTES: usize = 512 * 1024;
+    if bytes.len() > MAX_BYTES {
+        let slice = &bytes[bytes.len() - MAX_BYTES..];
+        Ok(format!(
+            "[... truncated to last 512 KB ...]\n{}",
+            String::from_utf8_lossy(slice)
+        ))
+    } else {
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+}
+
+/// Masks local OS usernames and access tokens before sharing logs externally.
+pub fn sanitize_log_for_upload(raw: &str) -> String {
+    let mut out = raw.to_string();
+    for env_key in ["USER", "USERNAME", "LOGNAME"] {
+        if let Ok(user) = std::env::var(env_key) {
+            let trimmed = user.trim();
+            if trimmed.len() >= 2 {
+                out = out.replace(&format!("/home/{trimmed}"), "/home/<user>");
+                out = out.replace(&format!("/Users/{trimmed}"), "/Users/<user>");
+                out = out.replace(&format!("C:\\Users\\{trimmed}"), "C:\\Users\\<user>");
+            }
+        }
+    }
+    let mut masked_lines = Vec::new();
+    for line in out.lines() {
+        if let Some(idx) = line.find("--accessToken ") {
+            let prefix = &line[..idx + "--accessToken ".len()];
+            let rest = &line[idx + "--accessToken ".len()..];
+            let suffix = rest
+                .find(char::is_whitespace)
+                .map(|sp| &rest[sp..])
+                .unwrap_or("");
+            masked_lines.push(format!("{prefix}<redacted>{suffix}"));
+        } else {
+            masked_lines.push(line.to_string());
+        }
+    }
+    masked_lines.join("\n")
+}
+
+/// Uploads sanitized log/crash text to `https://api.mclo.gs/1/log` and returns the shareable URL.
+pub fn upload_to_mclogs(raw_content: &str) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct McloGsResp {
+        success: bool,
+        url: Option<String>,
+        error: Option<String>,
+    }
+
+    let sanitized = sanitize_log_for_upload(raw_content);
+    if sanitized.trim().is_empty() {
+        return Err("Log is empty".to_string());
+    }
+    let client = build_http_client()?;
+    let resp = client
+        .post("https://api.mclo.gs/1/log")
+        .form(&[("content", sanitized.as_str())])
+        .send()
+        .map_err(|e| format!("mclo.gs upload failed: {e}"))?;
+    let parsed: McloGsResp = resp
+        .json()
+        .map_err(|e| format!("Invalid mclo.gs response: {e}"))?;
+    if parsed.success {
+        parsed
+            .url
+            .ok_or_else(|| "mclo.gs succeeded without URL".to_string())
+    } else {
+        Err(parsed
+            .error
+            .unwrap_or_else(|| "mclo.gs rejected log upload".to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -3687,6 +4066,77 @@ mod tests {
             }
             _ => panic!("Expected CurseForge ModpackProfileCreated"),
         }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sanitize_log_and_mrpack_exclusions_work() {
+        let sanitized = super::sanitize_log_for_upload(
+            "Starting with --accessToken secret_abc_123 --uuid 0000",
+        );
+        assert!(!sanitized.contains("secret_abc_123"));
+        assert!(sanitized.contains("--accessToken <redacted> --uuid 0000"));
+
+        let pats = super::parse_exclude_patterns("*.bak, config/secret.toml, journey-map/");
+        assert!(super::path_matches_exclude("mods/test.jar.bak", &pats));
+        assert!(super::path_matches_exclude("config/secret.toml", &pats));
+        assert!(super::path_matches_exclude("journey-map/data.bin", &pats));
+        assert!(!super::path_matches_exclude("config/sodium.json", &pats));
+
+        let root = std::env::temp_dir().join(format!(
+            "mc_launcher_logs_exp_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = crate::models::LauncherPaths {
+            versions_dir: root.join("versions"),
+            libraries_dir: root.join("libraries"),
+            assets_dir: root.join("assets"),
+            instances_dir: root.join("instances"),
+            servers_dir: root.join("servers"),
+            profiles_file: root.join("profiles.json"),
+            servers_file: root.join("servers.json"),
+            accounts_file: root.join("accounts.json"),
+            root: root.clone(),
+        };
+        fs::create_dir_all(&paths.instances_dir).unwrap();
+        let profile = crate::models::Profile::new(
+            "ExportTest".into(),
+            "1.21.4".into(),
+            crate::models::ModLoader::Vanilla,
+            "P".into(),
+        );
+        let inst = crate::storage::instance_dir(&paths, &profile);
+        fs::create_dir_all(inst.join("config")).unwrap();
+        fs::create_dir_all(inst.join("saves/world1")).unwrap();
+        fs::create_dir_all(inst.join("crash-reports")).unwrap();
+        fs::create_dir_all(inst.join("logs")).unwrap();
+        fs::write(inst.join("config/keep.toml"), b"a=1").unwrap();
+        fs::write(inst.join("config/secret.toml"), b"token=x").unwrap();
+        fs::write(inst.join("options.txt"), b"fov:1.0").unwrap();
+        fs::write(inst.join("saves/world1/level.dat"), b"world").unwrap();
+        fs::write(inst.join("crash-reports/crash-1.txt"), b"crash").unwrap();
+        fs::write(inst.join("logs/latest.log"), b"log").unwrap();
+
+        let logs = super::list_instance_log_files(&inst);
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].kind, crate::models::LogFileKind::CrashReport);
+        assert_eq!(logs[1].kind, crate::models::LogFileKind::Log);
+
+        let mut opts = crate::models::MrpackExportOptions::default();
+        opts.include_options_txt = false;
+        opts.include_saves = false;
+        opts.extra_excludes = "config/secret.toml".to_string();
+        let mrpack = super::export_instance_mrpack_with_options(&paths, &profile, &opts).unwrap();
+        let zr = zip::ZipArchive::new(fs::File::open(&mrpack).unwrap()).unwrap();
+        let names: Vec<String> = zr.file_names().map(str::to_string).collect();
+        assert!(names.contains(&"overrides/config/keep.toml".to_string()));
+        assert!(!names.contains(&"overrides/config/secret.toml".to_string()));
+        assert!(!names.contains(&"overrides/options.txt".to_string()));
+        assert!(!names.iter().any(|n| n.starts_with("overrides/saves/")));
 
         let _ = fs::remove_dir_all(&root);
     }

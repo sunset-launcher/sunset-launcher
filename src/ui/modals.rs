@@ -40,113 +40,115 @@ impl McLauncherApp {
 
         let mut open = self.show_new_modal;
         let max_modal_w = (screen.width() - 32.0).clamp(260.0, 480.0);
+        let max_modal_h = (screen.height() - 32.0).max(240.0);
         let modal_offset_y = (1.0 - ease_out_cubic(modal_t)) * 18.0;
         let win_resp = egui::Window::new(tr(self.settings.language, "modal.create_title"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .max_width(max_modal_w)
+            .max_height(max_modal_h)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, modal_offset_y))
             .show(ctx, |ui| {
-                let field_w = (ui.available_width() - 96.0).clamp(120.0, 290.0);
+                let inner_w = (max_modal_w - 28.0).max(200.0);
+                let field_w = (inner_w - 96.0).clamp(120.0, 300.0);
                 let mut enter_create = false;
-                egui::Grid::new("new_profile_grid")
-                    .num_columns(2)
-                    .spacing([12.0, 10.0])
+                egui::ScrollArea::vertical()
+                    .id_salt("new_profile_modal_scroll")
+                    .auto_shrink([false, true])
+                    .max_height((max_modal_h - 90.0).max(120.0))
                     .show(ui, |ui| {
-                        ui.label(tr(self.settings.language, "modal.name"));
-                        let r = ui_text_input(
-                            ui,
-                            "modal_inst_name",
-                            &mut self.new_name,
-                            "My Modded World",
-                            field_w,
-                            false,
-                        );
-                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            enter_create = true;
-                        }
-                        ui.end_row();
+                        egui::Grid::new("new_profile_grid")
+                            .num_columns(2)
+                            .spacing([12.0, 10.0])
+                            .show(ui, |ui| {
+                                ui.label(tr(self.settings.language, "modal.name"));
+                                let r = ui_text_input(
+                                    ui,
+                                    "modal_inst_name",
+                                    &mut self.new_name,
+                                    "My Modded World",
+                                    field_w,
+                                    false,
+                                );
+                                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    enter_create = true;
+                                }
+                                ui.end_row();
 
-                        ui.label(tr(self.settings.language, "modal.version"));
-                        ui_wrap_row(ui, 30.0, |ui| {
-                            egui::ComboBox::from_id_salt("new_ver_combo")
-                                .selected_text(&self.new_version)
-                                .width((field_w - 108.0).max(110.0))
-                                .show_ui(ui, |ui| {
-                                    if let Some(m) = &self.manifest {
-                                        for v in m
-                                            .versions
-                                            .iter()
-                                            .filter(|v| {
-                                                self.new_show_snapshots
-                                                    || v.version_type == VersionType::Release
-                                            })
-                                            .take(80)
-                                        {
+                                ui.label(tr(self.settings.language, "modal.version"));
+                                ui_wrap_row(ui, 30.0, |ui| {
+                                    egui::ComboBox::from_id_salt("new_ver_combo")
+                                        .selected_text(&self.new_version)
+                                        .width((field_w - 108.0).clamp(100.0, 180.0))
+                                        .show_ui(ui, |ui| {
+                                            if let Some(m) = &self.manifest {
+                                                for v in m
+                                                    .versions
+                                                    .iter()
+                                                    .filter(|v| {
+                                                        self.new_show_snapshots
+                                                            || v.version_type == VersionType::Release
+                                                    })
+                                                    .take(80)
+                                                {
+                                                    ui.selectable_value(
+                                                        &mut self.new_version,
+                                                        v.id.clone(),
+                                                        &v.id,
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    ui_checkbox(
+                                        ui,
+                                        "modal_snapshots_chk",
+                                        &mut self.new_show_snapshots,
+                                        tr(self.settings.language, "inst.snapshots"),
+                                    );
+                                });
+                                ui.end_row();
+
+                                ui.label(tr(self.settings.language, "modal.loader"));
+                                egui::ComboBox::from_id_salt("modal_loader_combo")
+                                    .selected_text(self.new_loader.label())
+                                    .width(field_w.clamp(140.0, 220.0))
+                                    .show_ui(ui, |ui| {
+                                        for kind in LoaderKind::ALL {
                                             ui.selectable_value(
-                                                &mut self.new_version,
-                                                v.id.clone(),
-                                                &v.id,
+                                                &mut self.new_loader,
+                                                kind,
+                                                kind.label(),
                                             );
                                         }
-                                    }
+                                    });
+                                ui.end_row();
+
+                                ui.label(tr(self.settings.language, "modal.memory"));
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(field_w.max(180.0));
+                                    ui.spacing_mut().item_spacing.y = 6.0;
+                                    egui::ComboBox::from_id_salt("modal_ram_preset_combo")
+                                        .selected_text(format!("{} GB", self.new_ram_mb / 1024))
+                                        .width(120.0)
+                                        .show_ui(ui, |ui| {
+                                            for preset in [2048_u32, 4096, 6144, 8192, 12288] {
+                                                ui.selectable_value(
+                                                    &mut self.new_ram_mb,
+                                                    preset,
+                                                    format!("{} GB ({preset} MB)", preset / 1024),
+                                                );
+                                            }
+                                        });
+                                    ui_ram_slider(
+                                        ui,
+                                        &mut self.new_ram_mb,
+                                        512..=16384,
+                                        (field_w - 86.0).clamp(100.0, 220.0),
+                                    );
                                 });
-                            ui_checkbox(
-                                ui,
-                                "modal_snapshots_chk",
-                                &mut self.new_show_snapshots,
-                                tr(self.settings.language, "inst.snapshots"),
-                            );
-                        });
-                        ui.end_row();
-
-                        ui.label(tr(self.settings.language, "modal.loader"));
-                        ui.vertical(|ui| {
-                            ui.set_max_width(field_w.max(240.0));
-                            ui_flow_row(ui, 28.0, |ui| {
-                                for kind in LoaderKind::ALL {
-                                    if ui_loader_pill(
-                                        ui,
-                                        ("modal_loader", kind.label()),
-                                        kind,
-                                        self.new_loader == kind,
-                                    )
-                                    .clicked()
-                                    {
-                                        self.new_loader = kind;
-                                    }
-                                }
+                                ui.end_row();
                             });
-                        });
-                        ui.end_row();
-
-                        ui.label(tr(self.settings.language, "modal.memory"));
-                        ui.vertical(|ui| {
-                            ui.set_max_width(field_w.max(240.0));
-                            ui.spacing_mut().item_spacing.y = 6.0;
-                            ui_flow_row(ui, 28.0, |ui| {
-                                for preset in [2048_u32, 4096, 6144, 8192, 12288] {
-                                    if ui_pill_tab(
-                                        ui,
-                                        ("modal_ram", preset),
-                                        &format!("{} GB", preset / 1024),
-                                        self.new_ram_mb == preset,
-                                    )
-                                    .clicked()
-                                    {
-                                        self.new_ram_mb = preset;
-                                    }
-                                }
-                            });
-                            ui_ram_slider(
-                                ui,
-                                &mut self.new_ram_mb,
-                                512..=16384,
-                                (field_w - 86.0).clamp(110.0, 220.0),
-                            );
-                        });
-                        ui.end_row();
                     });
 
                 ui.add_space(12.0);
@@ -167,13 +169,15 @@ impl McLauncherApp {
                         && name_valid
                     {
                         let loader = ModLoader::from_kind(self.new_loader, String::new());
-                        let mut profile = Profile::new(
+                        let mut profile = Profile::new_with_defaults(
                             self.new_name.trim().to_string(),
                             self.new_version.clone(),
                             loader,
                             self.new_username.trim().to_string(),
+                            &self.settings,
                         );
                         profile.max_ram_mb = self.new_ram_mb;
+                        profile.min_ram_mb = profile.min_ram_mb.min(profile.max_ram_mb);
                         profile.dir_name =
                             unique_instance_dir_name(&self.paths, &profile.name, &self.profiles);
                         self.profiles.push(profile);
@@ -472,10 +476,20 @@ impl McLauncherApp {
             .unwrap_or_else(|| ("1.21.4".to_string(), ModLoader::Vanilla));
         let project_id = hit.project_id.clone();
         let mr_type = self.mr_type;
+        let cf_key = self.settings.curseforge_api_key.clone();
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let result =
-                fetch_project_versions_for_profile(&project_id, mr_type, &game_version, &loader);
+            let result = if let Some(cf_mod_id) = parse_cf_project_id(&project_id) {
+                fetch_curseforge_versions_for_profile(
+                    &cf_key,
+                    cf_mod_id,
+                    mr_type,
+                    &game_version,
+                    &loader,
+                )
+            } else {
+                fetch_project_versions_for_profile(&project_id, mr_type, &game_version, &loader)
+            };
             let _ = tx.send(WorkerEvent::ProjectVersionsLoaded { project_id, result });
         });
     }
@@ -706,22 +720,25 @@ impl McLauncherApp {
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let ext_label = hit.source.label();
                         if ui_button_icon(
                             ui,
                             "mr_detail_ext_btn",
                             Some(Icon::External),
-                            "Modrinth",
+                            ext_label,
                             ButtonVariant::Subtle,
                             true,
                             28.0,
                         )
                         .clicked()
                         {
-                            let url = format!(
-                                "https://modrinth.com/{}/{}",
-                                mr_type.api_str(),
-                                hit.project_id
-                            );
+                            let url = hit.website_url.clone().unwrap_or_else(|| {
+                                format!(
+                                    "https://modrinth.com/{}/{}",
+                                    mr_type.api_str(),
+                                    hit.project_id
+                                )
+                            });
                             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                         }
                     });
@@ -777,92 +794,107 @@ impl McLauncherApp {
                             ui.available_width(),
                         );
                     } else {
+                        let scroll_w = ui.available_width();
+                        let inner_w = (scroll_w - 38.0).max(160.0);
                         egui::ScrollArea::vertical()
                             .id_salt("mr_detail_versions_scroll")
                             .max_height(list_h)
                             .show(ui, |ui| {
-                                let inner_w = (ui.available_width() - 8.0).max(200.0);
+                                ui.set_max_width((scroll_w - 14.0).max(160.0));
                                 for ver in versions.iter().take(45) {
                                     let ver_card_id = ui.make_persistent_id(("mr_ver_row", &ver.id));
                                     animated_card(ui, ver_card_id, false, |ui| {
                                         ui.set_min_width(inner_w);
-                                        ui_toolbar_row(ui, 30.0, |ui| {
-                                            let title_str = if ver.name.trim().is_empty() {
-                                                &ver.version_number
-                                            } else {
-                                                &ver.name
-                                            };
-                                            let ch_accent = ver.version_type == "release";
-                                            let ch_lbl = if ver.version_type.is_empty() {
-                                                "release"
-                                            } else {
-                                                ver.version_type.as_str()
-                                            };
-                                            let file_lbl = ver
-                                                .files
-                                                .first()
-                                                .map(|f| f.filename.as_str())
-                                                .unwrap_or_default();
-                                            let date_lbl =
-                                                format_relative_time(
+                                        ui.set_max_width(inner_w);
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(inner_w, 34.0),
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let ch_accent = ver.version_type == "release";
+                                                if ui_button_sized(
+                                                    ui,
+                                                    ("mr_ver_inst", &ver.id),
+                                                    Some(Icon::Download),
+                                                    if mr_type == ModrinthProjectType::Modpack {
+                                                        tr(
+                                                            self.settings.language,
+                                                            "modal.create_instance",
+                                                        )
+                                                    } else {
+                                                        tr(self.settings.language, "mr.install")
+                                                    },
+                                                    if ch_accent {
+                                                        ButtonVariant::Primary
+                                                    } else {
+                                                        ButtonVariant::Secondary
+                                                    },
+                                                    !mr_installing,
+                                                    Vec2::new(88.0, 28.0),
+                                                )
+                                                .clicked()
+                                                {
+                                                    install_version_req = Some(ver.clone());
+                                                }
+
+                                                let title_str = if ver.name.trim().is_empty() {
+                                                    &ver.version_number
+                                                } else {
+                                                    &ver.name
+                                                };
+                                                let ch_lbl = if ver.version_type.is_empty() {
+                                                    "release"
+                                                } else {
+                                                    ver.version_type.as_str()
+                                                };
+                                                let file_lbl = ver
+                                                    .files
+                                                    .first()
+                                                    .map(|f| f.filename.as_str())
+                                                    .unwrap_or_default();
+                                                let date_lbl = format_relative_time(
                                                     Some(&ver.date_published),
                                                     self.settings.language,
                                                 )
-                                                    .unwrap_or_default();
+                                                .unwrap_or_default();
 
-                                            ui.vertical(|ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.label(
-                                                        egui::RichText::new(title_str)
-                                                            .strong()
-                                                            .color(text_primary()),
-                                                    );
-                                                    badge(ui, ch_lbl, ch_accent);
-                                                });
-                                                let meta = [
-                                                    ver.version_number.as_str(),
-                                                    date_lbl.as_str(),
-                                                    file_lbl,
-                                                ]
-                                                .into_iter()
-                                                .filter(|s| !s.is_empty())
-                                                .collect::<Vec<_>>()
-                                                .join(" • ");
-                                                ui.label(
-                                                    egui::RichText::new(meta)
-                                                        .small()
-                                                        .color(text_muted()),
+                                                let left_w = (ui.available_width() - 8.0).max(40.0);
+                                                ui.allocate_ui_with_layout(
+                                                    Vec2::new(left_w, 34.0),
+                                                    egui::Layout::top_down(egui::Align::Min),
+                                                    |ui| {
+                                                        ui.set_max_width(left_w);
+                                                        ui_toolbar_row(ui, 18.0, |ui| {
+                                                            ui.add(
+                                                                egui::Label::new(
+                                                                    egui::RichText::new(title_str)
+                                                                        .strong()
+                                                                        .color(text_primary()),
+                                                                )
+                                                                .truncate(),
+                                                            );
+                                                            badge(ui, ch_lbl, ch_accent);
+                                                        });
+                                                        let meta = [
+                                                            ver.version_number.as_str(),
+                                                            date_lbl.as_str(),
+                                                            file_lbl,
+                                                        ]
+                                                        .into_iter()
+                                                        .filter(|s| !s.is_empty())
+                                                        .collect::<Vec<_>>()
+                                                        .join(" • ");
+                                                        ui.add(
+                                                            egui::Label::new(
+                                                                egui::RichText::new(meta)
+                                                                    .small()
+                                                                    .color(text_muted()),
+                                                            )
+                                                            .truncate(),
+                                                        );
+                                                    },
                                                 );
-                                            });
-
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if ui_button_sized(
-                                                        ui,
-                                                        ("mr_ver_inst", &ver.id),
-                                                        Some(Icon::Download),
-                                                        if mr_type == ModrinthProjectType::Modpack
-                                                        {
-                                                            tr(self.settings.language, "modal.create_instance")
-                                                        } else {
-                                                            tr(self.settings.language, "mr.install")
-                                                        },
-                                                        if ch_accent {
-                                                            ButtonVariant::Primary
-                                                        } else {
-                                                            ButtonVariant::Secondary
-                                                        },
-                                                        !mr_installing,
-                                                        Vec2::new(88.0, 28.0),
-                                                    )
-                                                    .clicked()
-                                                    {
-                                                        install_version_req = Some(ver.clone());
-                                                    }
-                                                },
-                                            );
-                                        });
+                                            },
+                                        );
                                     });
                                     ui.add_space(4.0);
                                 }
@@ -953,17 +985,32 @@ impl McLauncherApp {
                 let pid = hit.project_id.clone();
                 let title = hit.title.clone();
                 let icon_url = hit.icon_url.clone();
+                let cf_key = self.settings.curseforge_api_key.clone();
                 thread::spawn(move || {
-                    let res = install_specific_version(
-                        &paths,
-                        &profile,
-                        &pid,
-                        mr_type,
-                        &title,
-                        icon_url.as_deref(),
-                        &version,
-                        &tx,
-                    );
+                    let res = if let Some(cf_mod_id) = parse_cf_project_id(&pid) {
+                        install_curseforge_project(
+                            &cf_key,
+                            &paths,
+                            &profile,
+                            cf_mod_id,
+                            mr_type,
+                            &title,
+                            icon_url.as_deref(),
+                            Some(&version),
+                            &tx,
+                        )
+                    } else {
+                        install_specific_version(
+                            &paths,
+                            &profile,
+                            &pid,
+                            mr_type,
+                            &title,
+                            icon_url.as_deref(),
+                            &version,
+                            &tx,
+                        )
+                    };
                     let _ = tx.send(WorkerEvent::ModrinthInstallFinished(res));
                 });
             }
@@ -1611,7 +1658,7 @@ impl McLauncherApp {
                 }
                 PaletteAction::CopyLogs => {
                     let text: String = self
-                        .logs
+                        .current_console_logs()
                         .iter()
                         .map(|e| format!("[{}] {}", e.timestamp, e.text))
                         .collect::<Vec<_>>()
@@ -1638,6 +1685,175 @@ impl McLauncherApp {
                     }
                 }
             }
+        }
+    }
+
+    pub(super) fn render_export_mrpack_modal(&mut self, ctx: &egui::Context) {
+        let modal_t = ctx.animate_bool_with_time(
+            egui::Id::new("export_mrpack_modal_anim"),
+            self.show_export_mrpack_modal,
+            0.16,
+        );
+        if modal_t > 0.01 && modal_t < 0.99 {
+            ctx.request_repaint();
+        }
+        if !self.show_export_mrpack_modal && modal_t <= 0.01 {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("export_mrpack_backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
+                ui.painter().rect_filled(
+                    rect,
+                    Rounding::ZERO,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, (modal_t * 170.0) as u8),
+                );
+                if resp.clicked() {
+                    self.show_export_mrpack_modal = false;
+                }
+            });
+        if !self.show_export_mrpack_modal {
+            return;
+        }
+
+        let lang = self.settings.language;
+        let idx = self.export_mrpack_profile_idx.unwrap_or(self.selected_idx);
+        let prof_name = self
+            .profiles
+            .get(idx)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "Instance".to_string());
+        let max_modal_w = (screen.width() - 32.0).clamp(260.0, 440.0);
+        let max_modal_h = (screen.height() - 32.0).max(240.0);
+        let field_w = (max_modal_w - 36.0).max(160.0);
+        let offset_y = (1.0 - ease_out_cubic(modal_t)) * 18.0;
+
+        let mut open = true;
+        let mut do_export = false;
+        let mut do_cancel = false;
+
+        let win_resp = egui::Window::new(format!("{}: {prof_name}", tr(lang, "export.title")))
+            .id(egui::Id::new("export_mrpack_modal_win"))
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .max_width(max_modal_w)
+            .max_height(max_modal_h)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, offset_y))
+            .show(ctx, |ui| {
+                ui.set_min_width(field_w);
+                egui::ScrollArea::vertical()
+                    .id_salt("export_mrpack_modal_scroll")
+                    .auto_shrink([false, true])
+                    .max_height((max_modal_h - 90.0).max(120.0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(tr(lang, "export.desc"))
+                                .small()
+                                .color(text_secondary()),
+                        );
+                        ui.add_space(6.0);
+                        ui_checkbox(
+                            ui,
+                            "exp_opt_config",
+                            &mut self.export_mrpack_opts.include_config,
+                            tr(lang, "export.inc_config"),
+                        );
+                        ui_checkbox(
+                            ui,
+                            "exp_opt_options",
+                            &mut self.export_mrpack_opts.include_options_txt,
+                            tr(lang, "export.inc_options"),
+                        );
+                        ui_checkbox(
+                            ui,
+                            "exp_opt_unmatched",
+                            &mut self.export_mrpack_opts.include_unmatched_mods,
+                            tr(lang, "export.inc_unmatched"),
+                        );
+                        ui_checkbox(
+                            ui,
+                            "exp_opt_rpacks",
+                            &mut self.export_mrpack_opts.include_resourcepacks,
+                            tr(lang, "content.resourcepacks"),
+                        );
+                        ui_checkbox(
+                            ui,
+                            "exp_opt_shaders",
+                            &mut self.export_mrpack_opts.include_shaderpacks,
+                            tr(lang, "content.shaderpacks"),
+                        );
+                        ui_checkbox(
+                            ui,
+                            "exp_opt_saves",
+                            &mut self.export_mrpack_opts.include_saves,
+                            tr(lang, "export.inc_saves"),
+                        );
+                        ui_checkbox(
+                            ui,
+                            "exp_opt_shots",
+                            &mut self.export_mrpack_opts.include_screenshots,
+                            tr(lang, "export.inc_screenshots"),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(tr(lang, "export.extra_excludes"))
+                                .small()
+                                .color(text_secondary()),
+                        );
+                        ui_text_input(
+                            ui,
+                            "exp_extra_excludes",
+                            &mut self.export_mrpack_opts.extra_excludes,
+                            "*.bak, config/secret.toml, journey-map/",
+                            field_w,
+                            true,
+                        );
+                    });
+                ui.add_space(10.0);
+                ui_toolbar_row(ui, 30.0, |ui| {
+                    if ui_button_icon(
+                        ui,
+                        "exp_confirm_btn",
+                        Some(Icon::Download),
+                        tr(lang, "btn.export_mrpack"),
+                        ButtonVariant::Primary,
+                        !self.is_busy,
+                        30.0,
+                    )
+                    .clicked()
+                    {
+                        do_export = true;
+                    }
+                    if ui_button(
+                        ui,
+                        "exp_cancel_btn",
+                        tr(lang, "btn.cancel"),
+                        ButtonVariant::Secondary,
+                        true,
+                        30.0,
+                    )
+                    .clicked()
+                    {
+                        do_cancel = true;
+                    }
+                });
+            });
+
+        if let Some(ir) = win_resp {
+            ctx.move_to_top(ir.response.layer_id);
+        }
+        if !open || do_cancel {
+            self.show_export_mrpack_modal = false;
+        }
+        if do_export {
+            self.show_export_mrpack_modal = false;
+            let opts = self.export_mrpack_opts.clone();
+            self.start_export_mrpack_with_options(idx, opts);
         }
     }
 }
