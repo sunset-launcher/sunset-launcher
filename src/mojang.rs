@@ -481,6 +481,7 @@ pub(crate) fn finalize_downloaded_file(tmp_path: &Path, dest: &Path) -> Result<(
 
     for delay_ms in [15_u64, 35, 75, 150, 300] {
         #[cfg(windows)]
+        #[allow(clippy::permissions_set_readonly_false)]
         if dest.exists() {
             if let Ok(meta) = fs::metadata(dest) {
                 let mut perms = meta.permissions();

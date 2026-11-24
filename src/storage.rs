@@ -1102,12 +1102,12 @@ fn try_acquire_single_instance_lock(paths: &LauncherPaths) -> Option<SingleInsta
     }
     #[cfg(windows)]
     {
-        use std::io::Write;
         use std::os::windows::fs::OpenOptionsExt;
         let lock_path = paths.root.join("instance.lock");
         match fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(true)
             .share_mode(0)
             .open(&lock_path)
         {
