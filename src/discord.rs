@@ -56,10 +56,7 @@ pub fn unix_now_secs() -> i64 {
 /// Formats `(details, state)` in the currently selected launcher language.
 pub fn format_presence(lang: Language, kind: &DiscordActivityKind) -> (String, String) {
     match kind {
-        DiscordActivityKind::InLauncher => (
-            tr(lang, "rpc.in_launcher").to_string(),
-            String::new(),
-        ),
+        DiscordActivityKind::InLauncher => (tr(lang, "rpc.in_launcher").to_string(), String::new()),
         DiscordActivityKind::BrowsingModrinth => (
             tr(lang, "rpc.browsing_mods").to_string(),
             "Modrinth".to_string(),
@@ -68,14 +65,8 @@ pub fn format_presence(lang: Language, kind: &DiscordActivityKind) -> (String, S
             tr(lang, "rpc.configuring").to_string(),
             format!("{}: {name}", tr(lang, "rpc.instance")),
         ),
-        DiscordActivityKind::Console => (
-            tr(lang, "rpc.console").to_string(),
-            String::new(),
-        ),
-        DiscordActivityKind::Accounts => (
-            tr(lang, "rpc.accounts").to_string(),
-            String::new(),
-        ),
+        DiscordActivityKind::Console => (tr(lang, "rpc.console").to_string(), String::new()),
+        DiscordActivityKind::Accounts => (tr(lang, "rpc.accounts").to_string(), String::new()),
         DiscordActivityKind::Playing {
             instance,
             version,
@@ -484,4 +475,3 @@ mod tests {
         assert!(d_idle < Instant::now() + DEBOUNCE_WINDOW + Duration::from_millis(50));
     }
 }
-

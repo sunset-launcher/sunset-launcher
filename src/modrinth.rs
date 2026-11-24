@@ -1,14 +1,16 @@
 use crate::models::{
     DedicatedServer, IconImage, InstalledProject, InstanceLogFile, LauncherPaths, LoaderKind,
     LogFileKind, ModLoader, ModrinthInstallOutcome, ModrinthProjectType, ModrinthSearchHit,
-    ModrinthSearchPage, ModrinthSearchResponse, ModrinthSort, ModrinthVersion,
-    MrpackExportOptions, MrpackIndex, Profile, ProjectSource, WorkerEvent,
+    ModrinthSearchPage, ModrinthSearchResponse, ModrinthSort, ModrinthVersion, MrpackExportOptions,
+    MrpackIndex, Profile, ProjectSource, WorkerEvent,
 };
 use crate::mojang::{
     build_async_http_client, build_http_client, check_not_cancelled, download_file,
 };
 use crate::servers::server_supports_plugins_live;
-use crate::storage::{atomic_write, instance_dir, server_dir};
+use crate::storage::{
+    atomic_write, ensure_instance_mods_dir, instance_dir, server_dir, unique_instance_dir_name,
+};
 use reqwest::blocking::Client;
 use reqwest::StatusCode;
 use sha1::{Digest as _, Sha1};
@@ -56,9 +58,7 @@ fn icon_http_client() -> Result<&'static Client, String> {
 pub fn build_search_facets(params: &SearchParams) -> Option<Vec<Vec<String>>> {
     if params.project_type == ModrinthProjectType::Mod
         && (params.loader_filter == Some(LoaderKind::Vanilla)
-            || params
-                .server_software
-                .is_some_and(|sw| !sw.supports_mods()))
+            || params.server_software.is_some_and(|sw| !sw.supports_mods()))
     {
         return None;
     }
@@ -72,9 +72,16 @@ pub fn build_search_facets(params: &SearchParams) -> Option<Vec<Vec<String>>> {
             vec!["categories:datapack".to_string()],
         ]
     } else {
-        vec![vec![format!("project_type:{}", params.project_type.api_str())]]
+        vec![vec![format!(
+            "project_type:{}",
+            params.project_type.api_str()
+        )]]
     };
-    if let Some(ver) = params.game_version.as_deref().filter(|v| !v.trim().is_empty()) {
+    if let Some(ver) = params
+        .game_version
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
         facets.push(vec![format!("versions:{}", ver.trim())]);
     }
     if params.server_software.is_some() {
@@ -215,10 +222,7 @@ fn filter_hits_by_version_loader(
                                 .await;
                             match res {
                                 Ok(resp) if resp.status().is_success() => {
-                                    let list = resp
-                                        .json::<Vec<serde::de::IgnoredAny>>()
-                                        .await
-                                        .ok();
+                                    let list = resp.json::<Vec<serde::de::IgnoredAny>>().await.ok();
                                     return (project_id, list.map(|v| !v.is_empty()));
                                 }
                                 Ok(resp)
@@ -330,9 +334,7 @@ pub fn search_projects(params: &SearchParams) -> Result<ModrinthSearchPage, Stri
         };
         collected.extend(verified);
 
-        if raw_len < SEARCH_PAGE_SIZE
-            || (cur_offset as u64) >= total_hits
-            || collected.len() >= 10
+        if raw_len < SEARCH_PAGE_SIZE || (cur_offset as u64) >= total_hits || collected.len() >= 10
         {
             break;
         }
@@ -492,9 +494,7 @@ fn fetch_best_version(
                 .ok_or_else(|| "No files available for this project on Modrinth.".to_string())
         }
         ModrinthProjectType::Modpack => {
-            let preferred = loader
-                .modrinth_slug()
-                .map(|s| format!("[\"{s}\"]"));
+            let preferred = loader.modrinth_slug().map(|s| format!("[\"{s}\"]"));
             if let Some(ref p) = preferred {
                 if let Some(v) = get_versions(client, project_id, None, Some(p))?
                     .into_iter()
@@ -588,6 +588,7 @@ pub fn install_project(
             if project_type == ModrinthProjectType::Mod && !profile.loader.is_modded() {
                 return Err("Mods require a modded loader (Fabric, Quilt, Forge, or NeoForge). Switch loader in Instance settings.".to_string());
             }
+            let (_, dest_folder, _) = ensure_instance_content_dir(paths, profile, project_type)?;
 
             let mut index = load_installed_index(paths, profile);
             let filename = install_single(
@@ -617,12 +618,6 @@ pub fn install_project(
             }
             save_installed_index(paths, profile, &index);
 
-            let dest_folder = if project_type == ModrinthProjectType::Datapack {
-                default_datapack_rel_folder(&instance_dir(paths, profile))
-            } else {
-                folder_for(project_type).to_string()
-            };
-
             let _ = tx.send(WorkerEvent::Progress {
                 stage: format!("Installed: {filename}"),
                 fraction: 1.0,
@@ -635,7 +630,7 @@ pub fn install_project(
             })
         }
         ModrinthProjectType::Plugin => {
-            return Err("Plugins can only be installed to Dedicated Servers.".to_string());
+            Err("Plugins can only be installed to Dedicated Servers.".to_string())
         }
         ModrinthProjectType::Modpack => {
             let version = fetch_best_version(
@@ -660,8 +655,12 @@ fn install_required_deps(
     tx: &Sender<WorkerEvent>,
 ) -> Result<(), String> {
     let mut visited: HashSet<String> = HashSet::from([root_project_id.to_string()]);
-    let mut queue =
-        required_dependencies(client, root_project_id, &profile.version_id, &profile.loader)?;
+    let mut queue = required_dependencies(
+        client,
+        root_project_id,
+        &profile.version_id,
+        &profile.loader,
+    )?;
     while let Some(dep_id) = queue.pop() {
         if !visited.insert(dep_id.clone()) || index.contains_key(&dep_id) {
             continue;
@@ -724,6 +723,89 @@ pub(crate) fn folder_for(project_type: ModrinthProjectType) -> &'static str {
     }
 }
 
+pub(crate) fn sanitize_mod_filename(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+    {
+        return Err(format!("Invalid filename: {raw}"));
+    }
+
+    let mapped: String = trimmed
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = mapped.trim_end_matches([' ', '.']);
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return Err(format!("Invalid filename: {raw}"));
+    }
+
+    let stem = cleaned.split('.').next().unwrap_or("");
+    let is_windows_reserved = matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if is_windows_reserved {
+        Ok(format!("_{cleaned}"))
+    } else {
+        Ok(cleaned.to_string())
+    }
+}
+
+pub(crate) fn ensure_instance_content_dir(
+    paths: &LauncherPaths,
+    profile: &Profile,
+    project_type: ModrinthProjectType,
+) -> Result<(PathBuf, String, PathBuf), String> {
+    let inst = instance_dir(paths, profile);
+    if project_type == ModrinthProjectType::Mod || profile.loader.is_modded() {
+        ensure_instance_mods_dir(paths, profile)?;
+    }
+    let folder_rel = if project_type == ModrinthProjectType::Datapack {
+        default_datapack_rel_folder(&inst)
+    } else {
+        folder_for(project_type).to_string()
+    };
+    let dest_dir = inst.join(&folder_rel);
+    fs::create_dir_all(&dest_dir).map_err(|e| {
+        format!(
+            "Failed to create {folder_rel} directory {}: {e}",
+            dest_dir.display()
+        )
+    })?;
+    Ok((inst, folder_rel, dest_dir))
+}
+
 /// Loads `project_id -> InstalledProject` for a dedicated server, dropping entries whose file is gone.
 pub fn load_server_installed_index(
     paths: &LauncherPaths,
@@ -742,7 +824,7 @@ pub fn load_server_installed_index(
     map
 }
 
-fn save_server_installed_index(
+pub(crate) fn save_server_installed_index(
     paths: &LauncherPaths,
     server: &DedicatedServer,
     map: &HashMap<String, InstalledProject>,
@@ -789,6 +871,7 @@ pub fn install_server_project(
     icon_url: Option<&str>,
     tx: &Sender<WorkerEvent>,
 ) -> Result<ModrinthInstallOutcome, String> {
+    check_not_cancelled()?;
     let srv_dir = server_dir(paths, server);
     let client = build_http_client()?;
     ensure_project_supports_server(&client, project_id, title)?;
@@ -815,35 +898,40 @@ pub fn install_server_project(
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            let ver = get_versions(&client, project_id, Some(&server.mc_version), Some(&loaders_json))?
-                .into_iter()
-                .next()
-                .or_else(|| {
-                    get_versions(
-                        &client,
-                        project_id,
-                        Some(&server.mc_version),
-                        Some("[\"paper\",\"purpur\",\"folia\",\"spigot\",\"bukkit\"]"),
-                    )
-                    .ok()
-                    .and_then(|v| v.into_iter().next())
-                })
-                .or_else(|| {
-                    get_versions(
-                        &client,
-                        project_id,
-                        None,
-                        Some("[\"paper\",\"purpur\",\"folia\",\"spigot\",\"bukkit\"]"),
-                    )
-                    .ok()
-                    .and_then(|v| v.into_iter().next())
-                })
-                .ok_or_else(|| {
-                    format!(
-                        "No compatible plugin version of '{title}' found for Minecraft {}.",
-                        server.mc_version
-                    )
-                })?;
+            let ver = get_versions(
+                &client,
+                project_id,
+                Some(&server.mc_version),
+                Some(&loaders_json),
+            )?
+            .into_iter()
+            .next()
+            .or_else(|| {
+                get_versions(
+                    &client,
+                    project_id,
+                    Some(&server.mc_version),
+                    Some("[\"paper\",\"purpur\",\"folia\",\"spigot\",\"bukkit\"]"),
+                )
+                .ok()
+                .and_then(|v| v.into_iter().next())
+            })
+            .or_else(|| {
+                get_versions(
+                    &client,
+                    project_id,
+                    None,
+                    Some("[\"paper\",\"purpur\",\"folia\",\"spigot\",\"bukkit\"]"),
+                )
+                .ok()
+                .and_then(|v| v.into_iter().next())
+            })
+            .ok_or_else(|| {
+                format!(
+                    "No compatible plugin version of '{title}' found for Minecraft {}.",
+                    server.mc_version
+                )
+            })?;
             ("plugins", ver)
         }
         ModrinthProjectType::Mod => {
@@ -861,30 +949,32 @@ pub fn install_server_project(
             } else {
                 "[\"fabric\"]".to_string()
             };
-            let ver = get_versions(&client, project_id, Some(&server.mc_version), Some(&loaders_json))?
-                .into_iter()
-                .next()
-                .ok_or_else(|| {
-                    format!(
-                        "No compatible mod version of '{title}' found for {} {}.",
-                        server.software.label(),
-                        server.mc_version
-                    )
-                })?;
+            let ver = get_versions(
+                &client,
+                project_id,
+                Some(&server.mc_version),
+                Some(&loaders_json),
+            )?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "No compatible mod version of '{title}' found for {} {}.",
+                    server.software.label(),
+                    server.mc_version
+                )
+            })?;
             ("mods", ver)
         }
         _ => {
-            return Err("Only plugins and mods can be installed to a dedicated server.".to_string());
+            return Err(
+                "Only plugins and mods can be installed to a dedicated server.".to_string(),
+            );
         }
     };
 
     let file = primary_file(&version)?;
-    let safe_name = Path::new(&file.filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty() && !n.contains(".."))
-        .ok_or_else(|| format!("Invalid filename from Modrinth: {}", file.filename))?
-        .to_string();
+    let safe_name = sanitize_mod_filename(&file.filename)?;
     let dest_dir = srv_dir.join(dest_folder);
     fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("Failed to create {}: {e}", dest_dir.display()))?;
@@ -1051,6 +1141,7 @@ pub fn install_server_specific_version(
     version: &ModrinthVersion,
     tx: &Sender<WorkerEvent>,
 ) -> Result<ModrinthInstallOutcome, String> {
+    check_not_cancelled()?;
     let srv_dir = server_dir(paths, server);
     let dest_folder = match project_type {
         ModrinthProjectType::Plugin => {
@@ -1072,19 +1163,16 @@ pub fn install_server_specific_version(
             "mods"
         }
         _ => {
-            return Err("Only plugins and mods can be installed to a dedicated server.".to_string());
+            return Err(
+                "Only plugins and mods can be installed to a dedicated server.".to_string(),
+            );
         }
     };
 
     let client = build_http_client()?;
     ensure_project_supports_server(&client, project_id, title)?;
     let file = primary_file(version)?;
-    let safe_name = Path::new(&file.filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty() && !n.contains(".."))
-        .ok_or_else(|| format!("Invalid filename from Modrinth: {}", file.filename))?
-        .to_string();
+    let safe_name = sanitize_mod_filename(&file.filename)?;
     let dest_dir = srv_dir.join(dest_folder);
     fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("Failed to create {}: {e}", dest_dir.display()))?;
@@ -1145,29 +1233,23 @@ fn install_version_single(
     tx: &Sender<WorkerEvent>,
 ) -> Result<String, String> {
     let file = primary_file(version)?;
-    let inst = instance_dir(paths, profile);
-    let folder_rel = if project_type == ModrinthProjectType::Datapack {
-        default_datapack_rel_folder(&inst)
-    } else {
-        folder_for(project_type).to_string()
-    };
-    let dest_dir = inst.join(&folder_rel);
-    fs::create_dir_all(&dest_dir).map_err(|e| format!("Failed to create {folder_rel}: {e}"))?;
+    let safe_name = sanitize_mod_filename(&file.filename)?;
+    let (inst, folder_rel, dest_dir) = ensure_instance_content_dir(paths, profile, project_type)?;
 
     let _ = tx.send(WorkerEvent::Progress {
-        stage: format!("Downloading {}...", file.filename),
+        stage: format!("Downloading {safe_name}..."),
         fraction: 0.5,
     });
     download_file(
         client,
         &file.url,
-        &dest_dir.join(&file.filename),
+        &dest_dir.join(&safe_name),
         file.hashes.sha1.as_deref(),
     )?;
 
     // Replace an older file of the same project (updating a mod).
     if let Some(old) = index.get(project_id) {
-        if old.filename != file.filename {
+        if old.filename != safe_name {
             let old_dir = inst.join(&old.folder);
             let _ = fs::remove_file(old_dir.join(&old.filename));
             let _ = fs::remove_file(old_dir.join(format!("{}.disabled", old.filename)));
@@ -1177,14 +1259,14 @@ fn install_version_single(
         project_id.to_string(),
         InstalledProject {
             title: title.to_string(),
-            filename: file.filename.clone(),
+            filename: safe_name.clone(),
             folder: folder_rel,
             version_number: version.version_number.clone(),
             icon_url,
             source: ProjectSource::Modrinth,
         },
     );
-    Ok(file.filename.clone())
+    Ok(safe_name)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1236,7 +1318,12 @@ pub fn fetch_project_versions_for_profile(
             let param = format!("[\"{slug}\"]");
             let mut list = get_versions(&client, project_id, Some(game_version), Some(&param))?;
             if list.is_empty() && matches!(loader, ModLoader::Quilt { .. }) {
-                list = get_versions(&client, project_id, Some(game_version), Some("[\"fabric\"]"))?;
+                list = get_versions(
+                    &client,
+                    project_id,
+                    Some(game_version),
+                    Some("[\"fabric\"]"),
+                )?;
             }
             Ok(list)
         }
@@ -1297,6 +1384,7 @@ pub fn install_specific_version(
     version: &ModrinthVersion,
     tx: &Sender<WorkerEvent>,
 ) -> Result<ModrinthInstallOutcome, String> {
+    check_not_cancelled()?;
     let client = build_http_client()?;
     let _ = tx.send(WorkerEvent::Progress {
         stage: format!("Installing {title} ({})...", version.version_number),
@@ -1310,6 +1398,7 @@ pub fn install_specific_version(
             if project_type == ModrinthProjectType::Mod && !profile.loader.is_modded() {
                 return Err("Mods require a modded loader (Fabric, Quilt, Forge, or NeoForge). Switch loader in Instance settings.".to_string());
             }
+            let (_, dest_folder, _) = ensure_instance_content_dir(paths, profile, project_type)?;
             let mut index = load_installed_index(paths, profile);
             let filename = install_version_single(
                 &client,
@@ -1336,11 +1425,6 @@ pub fn install_specific_version(
                 )?;
             }
             save_installed_index(paths, profile, &index);
-            let dest_folder = if project_type == ModrinthProjectType::Datapack {
-                default_datapack_rel_folder(&instance_dir(paths, profile))
-            } else {
-                folder_for(project_type).to_string()
-            };
             let _ = tx.send(WorkerEvent::Progress {
                 stage: format!("Installed: {filename}"),
                 fraction: 1.0,
@@ -1353,7 +1437,7 @@ pub fn install_specific_version(
             })
         }
         ModrinthProjectType::Plugin => {
-            return Err("Plugins can only be installed to Dedicated Servers.".to_string());
+            Err("Plugins can only be installed to Dedicated Servers.".to_string())
         }
         ModrinthProjectType::Modpack => {
             install_modpack_version(&client, paths, profile, project_id, version, tx)
@@ -1476,9 +1560,10 @@ pub fn update_all_installed_projects(
 
         for (old_sha1, latest_ver) in updates_map {
             check_not_cancelled()?;
-            let Some(local_item) = hash_to_item.get(&old_sha1.to_ascii_lowercase()).or_else(|| {
-                hash_to_item.get(&old_sha1)
-            }) else {
+            let Some(local_item) = hash_to_item
+                .get(&old_sha1.to_ascii_lowercase())
+                .or_else(|| hash_to_item.get(&old_sha1))
+            else {
                 continue;
             };
             let Some(new_file) = latest_ver
@@ -1498,12 +1583,8 @@ pub fn update_all_installed_projects(
                 continue;
             }
 
-            let safe_new_name = Path::new(&new_file.filename)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .filter(|n| !n.is_empty() && !n.contains(".."))
-                .unwrap_or(&new_file.filename)
-                .to_string();
+            let safe_new_name =
+                sanitize_mod_filename(&new_file.filename).unwrap_or_else(|_| "mod.jar".to_string());
 
             let display_title = index
                 .get(&latest_ver.project_id)
@@ -1707,6 +1788,13 @@ pub fn import_local_file(
 
     match ext.as_str() {
         "mrpack" => install_mrpack(paths, src_path, profile.username.clone(), tx),
+        "zip" if is_profile_backup_archive(src_path) => {
+            let (new_profile, files_count) = import_profile_archive(paths, src_path, tx)?;
+            Ok(ModrinthInstallOutcome::ModpackProfileCreated {
+                profile: new_profile,
+                files_count,
+            })
+        }
         "zip" if detect_zip_modpack_flavor(src_path).is_some() => import_modpack_archive(
             paths,
             src_path,
@@ -1754,10 +1842,9 @@ fn required_dependencies(
     } else {
         format!("[\"{slug}\"]")
     };
-    let Some(version) =
-        get_versions(client, project_id, Some(game_version), Some(&loader_param))?
-            .into_iter()
-            .next()
+    let Some(version) = get_versions(client, project_id, Some(game_version), Some(&loader_param))?
+        .into_iter()
+        .next()
     else {
         return Ok(Vec::new());
     };
@@ -1842,10 +1929,7 @@ pub(crate) fn path_matches_exclude(rel_posix: &str, patterns: &[String]) -> bool
             if rel_lower.starts_with(prefix) || file_lower.starts_with(prefix) {
                 return true;
             }
-        } else if rel_lower == p
-            || rel_lower.starts_with(&format!("{p}/"))
-            || file_lower == p
-        {
+        } else if rel_lower == p || rel_lower.starts_with(&format!("{p}/")) || file_lower == p {
             return true;
         }
     }
@@ -1881,8 +1965,8 @@ fn add_dir_to_zip(
                 writer
                     .start_file(&zip_name, options)
                     .map_err(|e| format!("Failed to add {zip_name}: {e}"))?;
-                let mut src = File::open(&p)
-                    .map_err(|e| format!("Failed to open {}: {e}", p.display()))?;
+                let mut src =
+                    File::open(&p).map_err(|e| format!("Failed to open {}: {e}", p.display()))?;
                 io::copy(&mut src, writer)
                     .map_err(|e| format!("Failed to copy {}: {e}", p.display()))?;
             }
@@ -2167,6 +2251,214 @@ pub fn export_instance_mrpack_with_options(
     Ok(out_path)
 }
 
+/// Marker file identifying a full profile backup archive created by Sunrise Launcher.
+const PROFILE_BACKUP_FORMAT: &str = "sunset-launcher-profile";
+const PROFILE_BACKUP_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ProfileBackupManifest {
+    format: String,
+    version: u32,
+    profile: Profile,
+}
+
+/// Exports an entire instance profile (settings/metadata plus the full game directory)
+/// into a single `.sunsetprofile.zip` archive under `paths.root/exports/`. This differs
+/// from `.mrpack` in that it captures the instance exactly as configured, including the
+/// selected account name, RAM/JVM settings, and every file under the instance directory.
+pub fn export_profile_archive(
+    paths: &LauncherPaths,
+    profile: &Profile,
+    tx: Option<&Sender<WorkerEvent>>,
+) -> Result<PathBuf, String> {
+    let inst = instance_dir(paths, profile);
+    let exports_dir = paths.root.join("exports");
+    fs::create_dir_all(&exports_dir).map_err(|e| {
+        format!(
+            "Failed to create exports dir {}: {e}",
+            exports_dir.display()
+        )
+    })?;
+
+    let safe_name = crate::storage::sanitize_instance_dir_name(&profile.name);
+    let out_path = exports_dir.join(format!("{safe_name}.sunsetprofile.zip"));
+    let file = File::create(&out_path)
+        .map_err(|e| format!("Failed to create {}: {e}", out_path.display()))?;
+    let mut zip_writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let manifest = ProfileBackupManifest {
+        format: PROFILE_BACKUP_FORMAT.to_string(),
+        version: PROFILE_BACKUP_VERSION,
+        profile: profile.clone(),
+    };
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("Failed to serialize profile backup manifest: {e}"))?;
+    zip_writer
+        .start_file("sunsetprofile.json", options)
+        .map_err(|e| format!("Failed to add sunsetprofile.json: {e}"))?;
+    io::Write::write_all(&mut zip_writer, manifest_json.as_bytes())
+        .map_err(|e| format!("Failed to write sunsetprofile.json: {e}"))?;
+
+    if let Some(tx) = tx {
+        let _ = tx.send(WorkerEvent::Progress {
+            stage: "Packaging instance files...".to_string(),
+            fraction: 0.5,
+        });
+    }
+
+    let skips = ["logs", ".cache", ".fabric", "crash-reports"];
+    let mut adds: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&inst) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if skips.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+                continue;
+            }
+            adds.push(entry.path());
+        }
+    }
+    for p in adds {
+        if p.is_dir() {
+            add_dir_to_zip(&mut zip_writer, options, &inst, &p, "instance/", &[])?;
+        } else if p.is_file() {
+            if let Ok(rel) = p.strip_prefix(&inst) {
+                let rel_posix = rel.to_string_lossy().replace('\\', "/");
+                let zip_name = format!("instance/{rel_posix}");
+                zip_writer
+                    .start_file(&zip_name, options)
+                    .map_err(|e| format!("Failed to add {zip_name}: {e}"))?;
+                let mut src =
+                    File::open(&p).map_err(|e| format!("Failed to open {}: {e}", p.display()))?;
+                io::copy(&mut src, &mut zip_writer)
+                    .map_err(|e| format!("Failed to copy {}: {e}", p.display()))?;
+            }
+        }
+    }
+
+    zip_writer
+        .finish()
+        .map_err(|e| format!("Failed to finalize profile archive: {e}"))?;
+    if let Some(tx) = tx {
+        let _ = tx.send(WorkerEvent::Progress {
+            stage: "Profile archive exported".to_string(),
+            fraction: 1.0,
+        });
+    }
+    Ok(out_path)
+}
+
+/// Returns true when `path` is a zip archive containing a Sunset profile manifest.
+pub fn is_profile_backup_archive(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    let has_manifest = archive.by_name("sunsetprofile.json").is_ok();
+    has_manifest
+}
+
+/// Imports a `.sunsetprofile.zip` archive produced by [`export_profile_archive`] as a new
+/// profile. Returns the new profile plus the number of instance files restored.
+pub fn import_profile_archive(
+    paths: &LauncherPaths,
+    archive_path: &Path,
+    tx: &Sender<WorkerEvent>,
+) -> Result<(Profile, usize), String> {
+    check_not_cancelled()?;
+    let file = File::open(archive_path)
+        .map_err(|e| format!("Failed to open {}: {e}", archive_path.display()))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Invalid profile archive: {e}"))?;
+
+    let mut profile: Option<Profile> = None;
+    if let Ok(mut entry) = archive.by_name("sunsetprofile.json") {
+        let mut buf = String::new();
+        entry
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("Failed to read sunsetprofile.json: {e}"))?;
+        let manifest: ProfileBackupManifest = serde_json::from_str(&buf)
+            .map_err(|e| format!("Failed to parse sunsetprofile.json: {e}"))?;
+        if manifest.format != PROFILE_BACKUP_FORMAT {
+            return Err("Archive is not a Sunset Launcher profile backup".to_string());
+        }
+        if manifest.version > PROFILE_BACKUP_VERSION {
+            return Err(format!(
+                "Profile backup version {} is newer than supported ({PROFILE_BACKUP_VERSION})",
+                manifest.version
+            ));
+        }
+        profile = Some(manifest.profile);
+    }
+    let mut profile = profile.ok_or_else(|| {
+        "Archive is missing sunsetprofile.json (not a profile backup)".to_string()
+    })?;
+
+    let existing = crate::storage::load_profiles(paths);
+    let base_name = if profile.name.trim().is_empty() {
+        "Imported Profile".to_string()
+    } else {
+        profile.name.clone()
+    };
+    let mut display_name = base_name.clone();
+    let mut suffix = 2;
+    while existing
+        .iter()
+        .any(|p| p.name.eq_ignore_ascii_case(&display_name))
+    {
+        display_name = format!("{base_name} ({suffix})");
+        suffix += 1;
+    }
+
+    profile.id = uuid::Uuid::new_v4().to_string();
+    profile.name = display_name;
+    profile.dir_name = unique_instance_dir_name(paths, &profile.name, &existing);
+    profile.created_at = chrono::Utc::now().to_rfc3339();
+    profile.last_played = None;
+    profile.playtime_secs = 0;
+    let inst = instance_dir(paths, &profile);
+
+    let mut restored = 0_usize;
+    let total = archive.len();
+    for i in 0..total {
+        if check_not_cancelled().is_err() {
+            return Err(crate::mojang::CANCELLED_ERR_MSG.to_string());
+        }
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Zip entry error: {e}"))?;
+        let name = entry.name().to_string();
+        let Some(rel) = name.strip_prefix("instance/") else {
+            continue;
+        };
+        if rel.is_empty() || name.ends_with('/') {
+            continue;
+        }
+        let Some(target_rel) = safe_rel_path(rel) else {
+            continue;
+        };
+        let target = inst.join(target_rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+        }
+        if let Ok(mut out) = File::create(&target) {
+            io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("Failed to write {}: {e}", target.display()))?;
+            restored += 1;
+        }
+        let _ = tx.send(WorkerEvent::Progress {
+            stage: format!("Restoring files: {restored}/{total}"),
+            fraction: 0.10 + 0.85 * ((i + 1) as f32 / total.max(1) as f32),
+        });
+    }
+
+    Ok((profile, restored))
+}
+
 /// Installs a local or downloaded `.mrpack` modpack into a new instance profile.
 pub fn install_mrpack(
     paths: &LauncherPaths,
@@ -2196,17 +2488,13 @@ pub fn install_mrpack(
     let mut new_profile = Profile::new(index.name.clone(), mc_version, loader, username);
     new_profile.dir_name = crate::storage::unique_instance_dir_name(paths, &new_profile.name, &[]);
     let inst_dir = instance_dir(paths, &new_profile);
+    let _ = fs::create_dir_all(inst_dir.join("mods"));
 
     let client = build_http_client()?;
     let client_files: Vec<_> = index
         .files
         .iter()
-        .filter(|f| {
-            f.env
-                .as_ref()
-                .and_then(|e| e.client.as_deref())
-                .map_or(true, |c| c != "unsupported")
-        })
+        .filter(|f| f.env.as_ref().and_then(|e| e.client.as_deref()) != Some("unsupported"))
         .collect();
 
     let jobs: Vec<crate::mojang::DownloadJob> = client_files
@@ -2330,7 +2618,8 @@ pub fn parse_mmc_pack_components(raw_json: &str) -> Result<(String, ModLoader), 
             _ => {}
         }
     }
-    let mc = mc_ver.ok_or_else(|| "mmc-pack.json does not specify net.minecraft version".to_string())?;
+    let mc =
+        mc_ver.ok_or_else(|| "mmc-pack.json does not specify net.minecraft version".to_string())?;
     Ok((mc, loader))
 }
 
@@ -2369,10 +2658,7 @@ pub fn install_multimc_prism_zip(
             .map_err(|e| format!("Zip entry error: {e}"))?;
         let name = entry.name().to_string();
         if name == "mmc-pack.json" || name.ends_with("/mmc-pack.json") {
-            root_prefix = name
-                .strip_suffix("mmc-pack.json")
-                .unwrap_or("")
-                .to_string();
+            root_prefix = name.strip_suffix("mmc-pack.json").unwrap_or("").to_string();
             let mut buf = String::new();
             entry
                 .read_to_string(&mut buf)
@@ -2404,6 +2690,7 @@ pub fn install_multimc_prism_zip(
     let mut new_profile = Profile::new(pack_name, mc_version, loader, username);
     new_profile.dir_name = crate::storage::unique_instance_dir_name(paths, &new_profile.name, &[]);
     let inst_dir = instance_dir(paths, &new_profile);
+    let _ = fs::create_dir_all(inst_dir.join("mods"));
 
     let dot_mc = format!("{root_prefix}.minecraft/");
     let plain_mc = format!("{root_prefix}minecraft/");
@@ -2435,7 +2722,7 @@ pub fn install_multimc_prism_zip(
         io::copy(&mut entry, &mut out)
             .map_err(|e| format!("Failed to write {}: {e}", out_path.display()))?;
         extracted_files += 1;
-        if extracted_files % 15 == 0 {
+        if extracted_files.is_multiple_of(15) {
             let _ = tx.send(WorkerEvent::Progress {
                 stage: format!("Extracting Prism/MultiMC instance ({extracted_files} files)..."),
                 fraction: 0.15 + 0.80 * (i as f32 / total_entries as f32),
@@ -2548,7 +2835,16 @@ struct CfHashEntry {
 pub(crate) fn curseforge_edge_cdn_url(file_id: u64, file_name: &str) -> String {
     let major = file_id / 1000;
     let minor = file_id % 1000;
-    format!("https://edge.forgecdn.net/files/{major}/{minor}/{file_name}")
+    let mut encoded = String::with_capacity(file_name.len());
+    for b in file_name.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(*b as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(encoded, "%{b:02X}");
+        }
+    }
+    format!("https://edge.forgecdn.net/files/{major}/{minor}/{encoded}")
 }
 
 /// Imports a CurseForge `.zip` modpack (`manifest.json` + `overrides/`).
@@ -2584,6 +2880,7 @@ pub fn install_curseforge_zip(
     let mut new_profile = Profile::new(manifest.name.clone(), mc_version, loader, username);
     new_profile.dir_name = crate::storage::unique_instance_dir_name(paths, &new_profile.name, &[]);
     let inst_dir = instance_dir(paths, &new_profile);
+    let _ = fs::create_dir_all(inst_dir.join("mods"));
 
     let required_files: Vec<&CurseForgeFileRef> =
         manifest.files.iter().filter(|f| f.required).collect();
@@ -2624,16 +2921,12 @@ pub fn install_curseforge_zip(
         let _ = fs::create_dir_all(&mods_dir);
 
         for cf in all_cf_files {
-            let safe_name = Path::new(&cf.file_name)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .filter(|n| !n.is_empty() && !n.contains(".."))
-                .unwrap_or("mod.jar")
-                .to_string();
+            let safe_name =
+                sanitize_mod_filename(&cf.file_name).unwrap_or_else(|_| "mod.jar".to_string());
             let url = cf
                 .download_url
                 .filter(|u| !u.is_empty())
-                .unwrap_or_else(|| curseforge_edge_cdn_url(cf.id, &safe_name));
+                .unwrap_or_else(|| curseforge_edge_cdn_url(cf.id, &cf.file_name));
             let sha1 = cf
                 .hashes
                 .iter()
@@ -2988,7 +3281,7 @@ pub fn list_worlds(inst_dir: &Path) -> Vec<WorldEntry> {
             })
         })
         .collect();
-    worlds.sort_by(|a, b| a.folder_name.to_lowercase().cmp(&b.folder_name.to_lowercase()));
+    worlds.sort_by_key(|a| a.folder_name.to_lowercase());
     worlds
 }
 
@@ -3007,7 +3300,13 @@ pub fn backup_world(inst_dir: &Path, folder_name: &str) -> Result<PathBuf, Strin
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let safe_base: String = folder_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let out_path = backups_dir.join(format!("{safe_base}_{stamp}.zip"));
     let out_file = File::create(&out_path)
@@ -3060,7 +3359,7 @@ pub fn list_world_backups(inst_dir: &Path) -> Vec<WorldBackupEntry> {
             })
         })
         .collect();
-    backups.sort_by(|a, b| b.file_name.to_lowercase().cmp(&a.file_name.to_lowercase()));
+    backups.sort_by_key(|b| std::cmp::Reverse(b.file_name.to_lowercase()));
     backups
 }
 
@@ -3090,8 +3389,7 @@ pub fn restore_world_backup(inst_dir: &Path, backup_file_name: &str) -> Result<S
         return Err("Refusing unsafe backup path".to_string());
     }
     let zip_path = inst_dir.join("backups").join(backup_file_name);
-    let file =
-        File::open(&zip_path).map_err(|e| format!("Failed to open backup archive: {e}"))?;
+    let file = File::open(&zip_path).map_err(|e| format!("Failed to open backup archive: {e}"))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Invalid backup archive: {e}"))?;
 
@@ -3144,8 +3442,7 @@ pub fn restore_world_backup(inst_dir: &Path, backup_file_name: &str) -> Result<S
     };
 
     let saves_dir = inst_dir.join("saves");
-    fs::create_dir_all(&saves_dir)
-        .map_err(|e| format!("Failed to create saves directory: {e}"))?;
+    fs::create_dir_all(&saves_dir).map_err(|e| format!("Failed to create saves directory: {e}"))?;
     let staging_dir = saves_dir.join(format!(".restore_{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&staging_dir)
         .map_err(|e| format!("Failed to create staging directory: {e}"))?;
@@ -3205,7 +3502,9 @@ pub fn restore_world_backup(inst_dir: &Path, backup_file_name: &str) -> Result<S
         let backup_existing = saves_dir.join(format!(".prev_{}", uuid::Uuid::new_v4()));
         if let Err(e) = fs::rename(&target_world, &backup_existing) {
             let _ = fs::remove_dir_all(&staging_dir);
-            return Err(format!("Failed to replace existing world '{world_name}': {e}"));
+            return Err(format!(
+                "Failed to replace existing world '{world_name}': {e}"
+            ));
         }
         Some(backup_existing)
     } else {
@@ -3217,7 +3516,9 @@ pub fn restore_world_backup(inst_dir: &Path, backup_file_name: &str) -> Result<S
             let _ = fs::rename(&prev, &target_world);
         }
         let _ = fs::remove_dir_all(&staging_dir);
-        return Err(format!("Failed to install restored world '{world_name}': {e}"));
+        return Err(format!(
+            "Failed to install restored world '{world_name}': {e}"
+        ));
     }
     if let Some(prev) = prev_tmp {
         let _ = fs::remove_dir_all(&prev);
@@ -3235,8 +3536,7 @@ pub fn delete_world_backup(inst_dir: &Path, backup_file_name: &str) -> Result<()
     if !path.exists() {
         return Ok(());
     }
-    fs::remove_file(&path)
-        .map_err(|e| format!("Failed to delete backup '{backup_file_name}': {e}"))
+    fs::remove_file(&path).map_err(|e| format!("Failed to delete backup '{backup_file_name}': {e}"))
 }
 
 /// Lists screenshots inside `inst_dir/screenshots`, newest/reverse-alphabetical first.
@@ -3269,14 +3569,13 @@ pub fn list_screenshots(inst_dir: &Path) -> Vec<ScreenshotEntry> {
             })
         })
         .collect();
-    shots.sort_by(|a, b| b.filename.to_lowercase().cmp(&a.filename.to_lowercase()));
+    shots.sort_by_key(|s| std::cmp::Reverse(s.filename.to_lowercase()));
     shots
 }
 
 /// Decodes a local screenshot image into a crisp 16:9 thumbnail (`240x135` max) for the UI gallery.
 pub fn decode_screenshot_thumbnail(path: &Path) -> Result<IconImage, String> {
-    let bytes =
-        fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let bytes = fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     let img = image::load_from_memory(&bytes)
         .map_err(|e| format!("Failed to decode screenshot: {e}"))?
         .thumbnail(240, 135)
@@ -3638,7 +3937,8 @@ mod tests {
 
     #[test]
     fn toggle_and_bulk_enable_mods() {
-        let dir = std::env::temp_dir().join(format!("mc_launcher_mod_toggle_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mc_launcher_mod_toggle_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("sodium.jar"), b"jar").unwrap();
@@ -3646,8 +3946,12 @@ mod tests {
 
         let items = list_content_items(&dir);
         assert_eq!(items.len(), 2);
-        assert!(items.iter().any(|i| i.base_name == "sodium.jar" && i.enabled));
-        assert!(items.iter().any(|i| i.base_name == "iris.jar" && !i.enabled));
+        assert!(items
+            .iter()
+            .any(|i| i.base_name == "sodium.jar" && i.enabled));
+        assert!(items
+            .iter()
+            .any(|i| i.base_name == "iris.jar" && !i.enabled));
 
         let enabled_now = toggle_content_file(&dir, "sodium.jar").unwrap();
         assert!(!enabled_now);
@@ -3878,10 +4182,16 @@ mod tests {
         let mods_dir = paths.instances_dir.join(&profile.id).join("mods");
         fs::create_dir_all(&mods_dir).unwrap();
 
-        write_test_jar(&mods_dir.join("sodium-fabric.jar"), &[("fabric.mod.json", "{}")]);
+        write_test_jar(
+            &mods_dir.join("sodium-fabric.jar"),
+            &[("fabric.mod.json", "{}")],
+        );
         write_test_jar(
             &mods_dir.join("jei-forge.jar"),
-            &[("META-INF/mods.toml", "[[dependencies.jei]]\nmodId = \"forge\"\n")],
+            &[(
+                "META-INF/mods.toml",
+                "[[dependencies.jei]]\nmodId = \"forge\"\n",
+            )],
         );
         write_test_jar(
             &mods_dir.join("iris-neoforge.jar"),
@@ -3891,7 +4201,10 @@ mod tests {
             &mods_dir.join("architectury-multi.jar"),
             &[
                 ("fabric.mod.json", "{}"),
-                ("META-INF/mods.toml", "[[dependencies.arch]]\nmodId=\"forge\"\n"),
+                (
+                    "META-INF/mods.toml",
+                    "[[dependencies.arch]]\nmodId=\"forge\"\n",
+                ),
             ],
         );
 
@@ -3965,10 +4278,8 @@ mod tests {
         use crate::models::{LauncherPaths, ModLoader, ModrinthInstallOutcome};
         use std::io::Write;
 
-        let root = std::env::temp_dir().join(format!(
-            "mc_launcher_pack_formats_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("mc_launcher_pack_formats_{}", uuid::Uuid::new_v4()));
         let paths = LauncherPaths {
             versions_dir: root.join("versions"),
             libraries_dir: root.join("libraries"),
@@ -4005,7 +4316,10 @@ mod tests {
         let outcome =
             super::import_modpack_archive(&paths, &mmc_zip, "Steve".into(), "", &tx).unwrap();
         match outcome {
-            ModrinthInstallOutcome::ModpackProfileCreated { profile, files_count } => {
+            ModrinthInstallOutcome::ModpackProfileCreated {
+                profile,
+                files_count,
+            } => {
                 assert_eq!(profile.name, "Prism Cobblemon");
                 assert_eq!(profile.version_id, "1.21.1");
                 assert_eq!(
@@ -4052,7 +4366,10 @@ mod tests {
                     }
                 );
                 let inst = crate::storage::instance_dir(&paths, &profile);
-                assert_eq!(fs::read_to_string(inst.join("options.txt")).unwrap(), "fov:1.0\n");
+                assert_eq!(
+                    fs::read_to_string(inst.join("options.txt")).unwrap(),
+                    "fov:1.0\n"
+                );
 
                 // 3. World datapacks roundtrip
                 fs::create_dir_all(inst.join("saves/WorldA")).unwrap();
@@ -4139,5 +4456,144 @@ mod tests {
         assert!(!names.iter().any(|n| n.starts_with("overrides/saves/")));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sanitize_mod_filename_and_content_dir_and_cdn_url() {
+        assert_eq!(
+            super::sanitize_mod_filename("sodium-fabric-0.6.13+mc1.21.4.jar").unwrap(),
+            "sodium-fabric-0.6.13+mc1.21.4.jar"
+        );
+        assert_eq!(
+            super::sanitize_mod_filename("[1.20.1..1.20.4]-mod.jar").unwrap(),
+            "[1.20.1..1.20.4]-mod.jar"
+        );
+        assert_eq!(
+            super::sanitize_mod_filename("mod:name*test?.jar ").unwrap(),
+            "mod_name_test_.jar"
+        );
+        assert_eq!(super::sanitize_mod_filename("CON.jar").unwrap(), "_CON.jar");
+        assert!(super::sanitize_mod_filename("../evil.jar").is_err());
+        assert!(super::sanitize_mod_filename("sub/mod.jar").is_err());
+
+        assert_eq!(
+            super::curseforge_edge_cdn_url(5123456, "My Mod+1.20 [Fabric].jar"),
+            "https://edge.forgecdn.net/files/5123/456/My%20Mod%2B1.20%20%5BFabric%5D.jar"
+        );
+
+        let root =
+            std::env::temp_dir().join(format!("mc_launcher_content_dir_{}", uuid::Uuid::new_v4()));
+        let paths = crate::models::LauncherPaths {
+            versions_dir: root.join("versions"),
+            libraries_dir: root.join("libraries"),
+            assets_dir: root.join("assets"),
+            instances_dir: root.join("instances"),
+            servers_dir: root.join("servers"),
+            profiles_file: root.join("profiles.json"),
+            servers_file: root.join("servers.json"),
+            accounts_file: root.join("accounts.json"),
+            root: root.clone(),
+        };
+        let mut profile = crate::models::Profile::new(
+            "FreshFabric".into(),
+            "1.21.4".into(),
+            crate::models::ModLoader::Fabric {
+                loader_version: String::new(),
+            },
+            "Player".into(),
+        );
+        profile.dir_name = "FreshFabric".into();
+
+        let (inst, folder_rel, dest_dir) =
+            super::ensure_instance_content_dir(&paths, &profile, ModrinthProjectType::Mod).unwrap();
+        assert_eq!(folder_rel, "mods");
+        assert!(inst.join("mods").is_dir());
+        assert!(dest_dir.is_dir());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod profile_backup_tests {
+    use super::*;
+
+    fn temp_paths(tag: &str) -> (LauncherPaths, PathBuf) {
+        let root = std::env::temp_dir().join(format!("sl-export-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = LauncherPaths {
+            root: root.clone(),
+            versions_dir: root.join("versions"),
+            libraries_dir: root.join("libraries"),
+            assets_dir: root.join("assets"),
+            instances_dir: root.join("instances"),
+            servers_dir: root.join("servers"),
+            profiles_file: root.join("profiles.json"),
+            servers_file: root.join("servers.json"),
+            accounts_file: root.join("accounts.json"),
+        };
+        (paths, root)
+    }
+
+    #[test]
+    fn export_and_import_profile_archive_roundtrip() {
+        let (paths, root) = temp_paths("roundtrip");
+        let mut profile = Profile::new(
+            "My Pack".to_string(),
+            "1.20.1".to_string(),
+            ModLoader::Fabric {
+                loader_version: "0.15.0".to_string(),
+            },
+            "Steve".to_string(),
+        );
+        profile.max_ram_mb = 4096;
+        profile.min_ram_mb = 1024;
+        profile.dir_name = "My Pack".to_string();
+
+        let inst = instance_dir(&paths, &profile);
+        std::fs::create_dir_all(inst.join("mods")).unwrap();
+        std::fs::write(inst.join("mods").join("sodium.jar"), b"modjar").unwrap();
+        std::fs::create_dir_all(inst.join("config")).unwrap();
+        std::fs::write(inst.join("config").join("opts.toml"), b"k = 1").unwrap();
+        std::fs::create_dir_all(inst.join("logs")).unwrap();
+        std::fs::write(inst.join("logs").join("latest.log"), b"skip me").unwrap();
+
+        let archive = export_profile_archive(&paths, &profile, None).unwrap();
+        assert!(archive.is_file());
+        assert!(is_profile_backup_archive(&archive));
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let (imported, restored) = import_profile_archive(&paths, &archive, &tx).unwrap();
+        assert_ne!(imported.id, profile.id);
+        assert_eq!(imported.version_id, "1.20.1");
+        assert_eq!(imported.loader.kind(), LoaderKind::Fabric);
+        assert_eq!(imported.max_ram_mb, 4096);
+        assert!(restored >= 2);
+
+        let new_inst = instance_dir(&paths, &imported);
+        assert!(new_inst.join("mods").join("sodium.jar").is_file());
+        assert_eq!(
+            std::fs::read(new_inst.join("config").join("opts.toml")).unwrap(),
+            b"k = 1"
+        );
+        assert!(!new_inst.join("logs").join("latest.log").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn import_rejects_non_backup_zip() {
+        let (paths, root) = temp_paths("reject");
+        let bogus = root.join("bogus.zip");
+        let file = std::fs::File::create(&bogus).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("modrinth.index.json", opts).unwrap();
+        io::Write::write_all(&mut w, b"{}").unwrap();
+        w.finish().unwrap();
+        assert!(!is_profile_backup_archive(&bogus));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        assert!(import_profile_archive(&paths, &bogus, &tx).is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

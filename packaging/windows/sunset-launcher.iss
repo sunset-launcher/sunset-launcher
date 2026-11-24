@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.0"
+  #define MyAppVersion "0.2.1"
 #endif
 
 [Setup]
@@ -40,7 +40,7 @@ Name: "turkish"; MessagesFile: "compiler:Languages\Turkish.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\..\dist\sunset-launcher-windows-x64.exe"; DestDir: "{app}"; DestName: "sunset-launcher.exe"; Flags: ignoreversion
+Source: "..\..\staging\sunset-launcher-windows-x64.exe"; DestDir: "{app}"; DestName: "sunset-launcher.exe"; Flags: ignoreversion
 Source: "..\..\logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

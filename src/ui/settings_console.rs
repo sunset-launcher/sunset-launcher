@@ -88,11 +88,8 @@ impl McLauncherApp {
                         let target = self.settings.effective_palette();
                         transition_theme_palette(ctx, &target);
                         let _ = save_launcher_settings(&self.paths, &self.settings);
-                        let target_accent = Color32::from_rgb(
-                            target.accent[0],
-                            target.accent[1],
-                            target.accent[2],
-                        );
+                        let target_accent =
+                            Color32::from_rgb(target.accent[0], target.accent[1], target.accent[2]);
                         anim::emit_edge_pulse(ctx, target_accent);
                         anim::emit_ring(ctx, anim::pointer_or_center(ctx), target_accent, 34.0);
                     }
@@ -112,11 +109,8 @@ impl McLauncherApp {
                         let target = self.settings.effective_palette();
                         transition_theme_palette(ctx, &target);
                         let _ = save_launcher_settings(&self.paths, &self.settings);
-                        let target_accent = Color32::from_rgb(
-                            target.accent[0],
-                            target.accent[1],
-                            target.accent[2],
-                        );
+                        let target_accent =
+                            Color32::from_rgb(target.accent[0], target.accent[1], target.accent[2]);
                         anim::emit_edge_pulse(ctx, target_accent);
                         anim::emit_ring(ctx, anim::pointer_or_center(ctx), target_accent, 34.0);
                     }
@@ -130,7 +124,13 @@ impl McLauncherApp {
                 ui.add_space(6.0);
                 let mut pal = self.settings.effective_palette();
                 let mut pal_changed = false;
-                let cols: usize = if card_w >= 720.0 { 3 } else if card_w >= 460.0 { 2 } else { 1 };
+                let cols: usize = if card_w >= 720.0 {
+                    3
+                } else if card_w >= 460.0 {
+                    2
+                } else {
+                    1
+                };
                 let slots: [(&str, &mut [u8; 3]); 12] = [
                     ("settings.theme.c_accent", &mut pal.accent),
                     ("settings.theme.c_bg_void", &mut pal.bg_void),
@@ -145,7 +145,8 @@ impl McLauncherApp {
                     ("settings.theme.c_text_secondary", &mut pal.text_secondary),
                     ("settings.theme.c_text_muted", &mut pal.text_muted),
                 ];
-                let cell_w = ((card_w - 16.0 - 12.0 * (cols.saturating_sub(1) as f32)) / cols as f32)
+                let cell_w = ((card_w - 16.0 - 12.0 * (cols.saturating_sub(1) as f32))
+                    / cols as f32)
                     .clamp(130.0, (card_w - 16.0).max(130.0));
                 egui::Grid::new("full_palette_grid")
                     .num_columns(cols)
@@ -262,7 +263,12 @@ impl McLauncherApp {
                                     apply_ui_font(ctx, &self.settings.ui_font_path);
                                     let _ = save_launcher_settings(&self.paths, &self.settings);
                                     anim::trigger_screen_veil(ctx);
-                                    anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 30.0);
+                                    anim::emit_ring(
+                                        ctx,
+                                        anim::pointer_or_center(ctx),
+                                        accent(),
+                                        30.0,
+                                    );
                                 }
                             }
                         });
@@ -333,8 +339,7 @@ impl McLauncherApp {
                 });
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new(tr(lang, "settings.font.preview"))
-                        .color(text_primary()),
+                    egui::RichText::new(tr(lang, "settings.font.preview")).color(text_primary()),
                 );
             });
             ui.add_space(12.0);
@@ -482,16 +487,19 @@ impl McLauncherApp {
                             {
                                 to_remove = Some(j.path.clone());
                             }
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(j.path.to_string_lossy().as_ref())
-                                            .small()
-                                            .color(text_muted()),
-                                    )
-                                    .truncate(),
-                                );
-                            });
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(j.path.to_string_lossy().as_ref())
+                                                .small()
+                                                .color(text_muted()),
+                                        )
+                                        .truncate(),
+                                    );
+                                },
+                            );
                         });
                     });
                     ui.add_space(3.0);
@@ -642,10 +650,7 @@ impl McLauncherApp {
                     ui_alert_banner(
                         ui,
                         AlertKind::Success,
-                        &format!(
-                            "{}: v{ver}",
-                            tr(lang, "settings.updates.available")
-                        ),
+                        &format!("{}: v{ver}", tr(lang, "settings.updates.available")),
                         (card_w - 28.0).max(160.0),
                     );
                     let notes = upd.notes.trim();
@@ -659,12 +664,7 @@ impl McLauncherApp {
                     badge(ui, tr(lang, "settings.updates.up_to_date"), true);
                 } else if let Some(err) = self.update_error.clone() {
                     ui.add_space(6.0);
-                    ui_alert_banner(
-                        ui,
-                        AlertKind::Warning,
-                        &err,
-                        (card_w - 28.0).max(160.0),
-                    );
+                    ui_alert_banner(ui, AlertKind::Warning, &err, (card_w - 28.0).max(160.0));
                 }
             });
 
@@ -702,8 +702,13 @@ impl McLauncherApp {
                 ui.add_space(4.0);
                 if stack_sliders {
                     ui.label(egui::RichText::new(tr(lang, "inst.min_ram")).small());
-                    if ui_ram_slider(ui, &mut self.settings.default_min_ram_mb, 256..=16384, slider_w)
-                        .changed()
+                    if ui_ram_slider(
+                        ui,
+                        &mut self.settings.default_min_ram_mb,
+                        256..=16384,
+                        slider_w,
+                    )
+                    .changed()
                     {
                         if self.settings.default_max_ram_mb < self.settings.default_min_ram_mb {
                             self.settings.default_max_ram_mb = self.settings.default_min_ram_mb;
@@ -712,8 +717,13 @@ impl McLauncherApp {
                     }
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new(tr(lang, "inst.max_ram")).small());
-                    if ui_ram_slider(ui, &mut self.settings.default_max_ram_mb, 512..=32768, slider_w)
-                        .changed()
+                    if ui_ram_slider(
+                        ui,
+                        &mut self.settings.default_max_ram_mb,
+                        512..=32768,
+                        slider_w,
+                    )
+                    .changed()
                     {
                         if self.settings.default_min_ram_mb > self.settings.default_max_ram_mb {
                             self.settings.default_min_ram_mb = self.settings.default_max_ram_mb;
@@ -882,7 +892,8 @@ impl McLauncherApp {
             Some(pid) => self.running_games.contains_key(pid),
             None => self.any_game_running(),
         };
-        let logs_snapshot: VecDeque<LogEntry> = self.current_console_logs().iter().cloned().collect();
+        let logs_snapshot: VecDeque<LogEntry> =
+            self.current_console_logs().iter().cloned().collect();
         let logs_empty = logs_snapshot.is_empty();
         let logs_len = logs_snapshot.len();
         if self.log_cache.diag_revision != self.log_revision {
@@ -913,7 +924,8 @@ impl McLauncherApp {
                         .color(text_primary()),
                 );
                 if is_running {
-                    let (dot_r, dot_resp) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                    let (dot_r, dot_resp) =
+                        ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
                     draw_running_pulse_dot(ui, dot_r.center(), 3.2, accent(), bg_void());
                     dot_resp.on_hover_text(tr(lang, "console.live"));
                 }
@@ -970,7 +982,12 @@ impl McLauncherApp {
                     )
                     .clicked()
                     {
-                        anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), text_secondary(), 28.0);
+                        anim::emit_ring(
+                            ui.ctx(),
+                            anim::pointer_or_center(ui.ctx()),
+                            text_secondary(),
+                            28.0,
+                        );
                         do_clear = true;
                     }
                     if ui_button_icon(
@@ -1037,7 +1054,8 @@ impl McLauncherApp {
                         .color(text_primary()),
                 );
                 if is_running {
-                    let (dot_r, dot_resp) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                    let (dot_r, dot_resp) =
+                        ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
                     draw_running_pulse_dot(ui, dot_r.center(), 3.2, accent(), bg_void());
                     dot_resp.on_hover_text(tr(lang, "console.live"));
                 }
@@ -1109,7 +1127,12 @@ impl McLauncherApp {
                 )
                 .clicked()
                 {
-                    anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), text_secondary(), 28.0);
+                    anim::emit_ring(
+                        ui.ctx(),
+                        anim::pointer_or_center(ui.ctx()),
+                        text_secondary(),
+                        28.0,
+                    );
                     do_clear = true;
                 }
                 if (self.last_crash_code.is_some() || diag_summary.is_some())
@@ -1180,7 +1203,12 @@ impl McLauncherApp {
                 }
                 let src_text = active_pid
                     .as_deref()
-                    .and_then(|pid| seen_pids.iter().find(|(id, _)| id == pid).map(|(_, l)| l.clone()))
+                    .and_then(|pid| {
+                        seen_pids
+                            .iter()
+                            .find(|(id, _)| id == pid)
+                            .map(|(_, l)| l.clone())
+                    })
                     .unwrap_or_else(|| tr(lang, "console.src_launcher").to_string());
                 egui::ComboBox::from_id_salt("console_src_combo")
                     .selected_text(src_text)
@@ -1188,7 +1216,10 @@ impl McLauncherApp {
                     .truncate()
                     .show_ui(ui, |ui| {
                         if ui
-                            .selectable_label(active_pid.is_none(), tr(lang, "console.src_launcher"))
+                            .selectable_label(
+                                active_pid.is_none(),
+                                tr(lang, "console.src_launcher"),
+                            )
                             .clicked()
                             && active_pid.is_some()
                         {
@@ -1278,8 +1309,7 @@ impl McLauncherApp {
                         draw_icon(ui.painter(), ic_r, Icon::Terminal, text_muted());
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new(tr(lang, "console.empty"))
-                                .color(text_muted()),
+                            egui::RichText::new(tr(lang, "console.empty")).color(text_muted()),
                         );
                     });
                     return;
@@ -1305,15 +1335,14 @@ impl McLauncherApp {
                             )
                             .size()
                             .x;
-                        let tag_w = f
-                            .layout_no_wrap(
+                        let tag_w =
+                            f.layout_no_wrap(
                                 "WARN".to_string(),
                                 egui::FontId::monospace(10.0),
                                 Color32::WHITE,
                             )
                             .size()
-                            .x
-                            + 10.0;
+                            .x + 10.0;
                         (row_w - 12.0 - ts_w - tag_w - 14.0).max(60.0)
                     });
 
@@ -1364,7 +1393,12 @@ impl McLauncherApp {
                     );
                     let top_h = self.log_cache.y_offsets.get(first).copied().unwrap_or(0.0);
                     let bottom_h = (total_h
-                        - self.log_cache.y_offsets.get(last).copied().unwrap_or(total_h))
+                        - self
+                            .log_cache
+                            .y_offsets
+                            .get(last)
+                            .copied()
+                            .unwrap_or(total_h))
                     .max(0.0);
 
                     if top_h > 0.0 {
@@ -1400,9 +1434,15 @@ impl McLauncherApp {
                                 },
                             ),
                         };
-                        let row_id = ui.make_persistent_id(("console_row", self.log_cache.indices[vis_idx]));
-                        let prev_hov = ui.ctx().data(|d| d.get_temp::<bool>(row_id)).unwrap_or(false);
-                        let row_hov = ui.ctx().animate_bool_with_time(row_id.with("h"), prev_hov, 0.10);
+                        let row_id =
+                            ui.make_persistent_id(("console_row", self.log_cache.indices[vis_idx]));
+                        let prev_hov = ui
+                            .ctx()
+                            .data(|d| d.get_temp::<bool>(row_id))
+                            .unwrap_or(false);
+                        let row_hov =
+                            ui.ctx()
+                                .animate_bool_with_time(row_id.with("h"), prev_hov, 0.10);
                         if row_hov > 0.01 && row_hov < 0.99 {
                             ui.ctx().request_repaint();
                         }
@@ -1449,7 +1489,8 @@ impl McLauncherApp {
                             .response
                             .interact(Sense::click())
                             .on_hover_text("Click to copy line");
-                        ui.ctx().data_mut(|d| d.insert_temp(row_id, row_resp.hovered()));
+                        ui.ctx()
+                            .data_mut(|d| d.insert_temp(row_id, row_resp.hovered()));
                         if let Some((ct, origin)) = track_click_anim(
                             ui.ctx(),
                             row_id,
@@ -1474,7 +1515,13 @@ impl McLauncherApp {
                         if row_resp.clicked() {
                             let pos = anim::pointer_or_center(ui.ctx());
                             anim::emit_ring(ui.ctx(), pos, accent(), 26.0);
-                            anim::emit_floating_badge(ui.ctx(), pos, Some(Icon::Check), "", accent());
+                            anim::emit_floating_badge(
+                                ui.ctx(),
+                                pos,
+                                Some(Icon::Check),
+                                "",
+                                accent(),
+                            );
                             copied_line = Some(format!("[{}] {}", entry.timestamp, entry.text));
                         }
                         ui.add_space(CONSOLE_ROW_GAP);

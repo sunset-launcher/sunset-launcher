@@ -53,25 +53,19 @@
 
 ## Quick Start (Releases)
 
-Download the prebuilt package or binary for your OS from [GitHub Releases](https://github.com/sunset-launcher/sunset-launcher/releases):
+Download the prebuilt package for your OS from [GitHub Releases](https://github.com/sunset-launcher/sunset-launcher/releases):
 
 - **Linux (`x64` / `ARM64`)**:
   - **`.deb` package** (`sunset-launcher_<ver>_amd64.deb` / `arm64.deb`) for Debian, Ubuntu, and Mint: `sudo apt install ~/Downloads/sunset-launcher_*.deb`
   - **`.rpm` package** (`sunset-launcher-<ver>-1.x86_64.rpm` / `aarch64.rpm`) for Fedora, RHEL, and openSUSE: `sudo dnf install ~/Downloads/sunset-launcher-*.rpm`
-  - **`.AppImage`** (`sunset-launcher-<ver>-x86_64.AppImage` / `aarch64.AppImage`) portable bundle: `chmod +x sunset-launcher-*.AppImage && ./sunset-launcher-*.AppImage`
-  - **Standalone binary** (`sunset-launcher-linux-x64` / `sunset-launcher-linux-arm64`):
-    ```bash
-    chmod +x ~/Downloads/sunset-launcher-linux-x64
-    ~/Downloads/sunset-launcher-linux-x64
-    ```
-    On first run, the launcher automatically installs its icon and application menu entry (`~/.local/share/applications/sunset-launcher.desktop`).
+  - **`.AppImage`** (`sunset-launcher-<ver>-x86_64.AppImage` / `aarch64.AppImage`) portable bundle for any distro: `chmod +x sunset-launcher-*.AppImage && ./sunset-launcher-*.AppImage`
 - **Windows (`x64`)**:
   - **Installer wizard** (`sunset-launcher-windows-x64-setup.exe`): standard Windows Setup wizard with Start Menu & optional Desktop shortcuts and uninstaller.
-  - **Standalone `.exe` or portable `.zip`** (`sunset-launcher-windows-x64.exe` / `sunset-launcher-windows-x64-portable.zip`): run the `.exe` directly (automatically creates a Start Menu shortcut and icon on first launch).
-  > **Note on Windows SmartScreen**: Release binaries are currently unsigned open-source builds, so Windows may show an *"Unknown publisher"* SmartScreen prompt on first launch (`More info` → `Run anyway`). You can verify binary integrity with the published `.sha256` checksum or build directly from source.
+  - **Portable `.zip`** (`sunset-launcher-windows-x64-portable.zip`): extract and run `sunset-launcher-windows-x64.exe`.
+  > **Note on Windows SmartScreen**: Release binaries are currently unsigned open-source builds, so Windows may show an *"Unknown publisher"* SmartScreen prompt on first launch (`More info` → `Run anyway`). You can verify binary integrity with the SHA-256 digest on the GitHub Release page or build directly from source.
 - **macOS (`Apple Silicon` / `Intel x64`)**:
   - **`.dmg` disk image** (`sunset-launcher-macos-arm64.dmg` / `sunset-launcher-macos-x64.dmg`): open the `.dmg` and drag **Sunset Launcher** into `Applications`.
-  - **`.app.zip` bundle** (`sunset-launcher-macos-arm64.app.zip` / `sunset-launcher-macos-x64.app.zip`) or **standalone binary** (`sunset-launcher-macos-arm64` / `sunset-launcher-macos-x64`).
+  - **`.app.zip` bundle** (`sunset-launcher-macos-arm64.app.zip` / `sunset-launcher-macos-x64.app.zip`).
   > **Note on macOS Gatekeeper**: Release builds are currently unsigned, so clear the quarantine attribute before first launch if needed: `xattr -cr "/Applications/Sunset Launcher.app"`.
 
 ## Build & Run

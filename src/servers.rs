@@ -126,7 +126,11 @@ pub fn write_eula_and_properties(dir: &Path, server: &DedicatedServer) -> Result
         .map_err(|e| format!("Failed to create server directory {}: {e}", dir.display()))?;
 
     let eula_path = dir.join("eula.txt");
-    let eula_val = if server.eula_accepted { "true" } else { "false" };
+    let eula_val = if server.eula_accepted {
+        "true"
+    } else {
+        "false"
+    };
     let eula_body = format!(
         "#By changing the setting below to TRUE you are indicating your agreement to Mojang's EULA (https://aka.ms/MinecraftEULA).\neula={eula_val}\n"
     );
@@ -206,8 +210,7 @@ pub fn write_server_properties_entries(
     dir: &Path,
     entries: &[(String, String)],
 ) -> Result<(), String> {
-    fs::create_dir_all(dir)
-        .map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+    fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
     let props_path = dir.join("server.properties");
     let existing = fs::read_to_string(&props_path).unwrap_or_default();
 
@@ -249,8 +252,7 @@ pub fn write_server_properties_entries(
 
 /// Resizes and center-crops `src_image` into a standard `64x64` `server-icon.png` inside `dir`.
 pub fn save_server_icon_png(dir: &Path, src_image: &Path) -> Result<PathBuf, String> {
-    fs::create_dir_all(dir)
-        .map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+    fs::create_dir_all(dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
     let img = image::open(src_image)
         .map_err(|e| format!("Failed to decode image {}: {e}", src_image.display()))?;
     let resized = img.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3);
@@ -488,7 +490,10 @@ fn find_legacy_forge_jar(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Resolves how a provisioned server should be launched (`-jar ...` or `@.../unix_args.txt`).
-pub fn resolve_server_launch_target(dir: &Path, software: ServerSoftware) -> Option<ServerLaunchTarget> {
+pub fn resolve_server_launch_target(
+    dir: &Path,
+    software: ServerSoftware,
+) -> Option<ServerLaunchTarget> {
     match software {
         ServerSoftware::Forge | ServerSoftware::NeoForge => {
             if let Some(args) = find_forge_args_file(dir) {
@@ -589,7 +594,9 @@ fn provision_papermc_project(
         )
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("{display_name} does not have a build for Minecraft {mc_version} ({e})"))?
+        .map_err(|e| {
+            format!("{display_name} does not have a build for Minecraft {mc_version} ({e})")
+        })?
         .json()
         .map_err(|e| format!("Failed to parse {display_name} builds: {e}"))?;
     let latest = builds
@@ -661,9 +668,7 @@ fn select_arclight_asset<'a>(
     for rel in releases {
         for prefix in preferred_prefixes {
             if let Some(asset) = rel.assets.iter().find(|a| {
-                a.name.starts_with(prefix)
-                    && a.name.contains(&needle)
-                    && a.name.ends_with(".jar")
+                a.name.starts_with(prefix) && a.name.contains(&needle) && a.name.ends_with(".jar")
             }) {
                 return Some((rel.tag_name.as_str(), asset));
             }
@@ -838,7 +843,11 @@ pub fn provision_server_jar(
                 "https://meta.fabricmc.net/v2/versions/loader/{}/{}/{}/server/jar",
                 updated.mc_version, loader_ver, installer_ver
             );
-            emit_progress(tx, format!("Downloading Fabric {loader_ver} server..."), 0.5);
+            emit_progress(
+                tx,
+                format!("Downloading Fabric {loader_ver} server..."),
+                0.5,
+            );
             download_file(&client, &dl_url, &jar_path, None)?;
             updated.loader_version = loader_ver;
         }
@@ -947,7 +956,10 @@ pub fn provision_server_jar(
             let installer_path = dir.join(&installer_name);
             emit_progress(
                 tx,
-                format!("Downloading {} {chosen} installer...", updated.software.label()),
+                format!(
+                    "Downloading {} {chosen} installer...",
+                    updated.software.label()
+                ),
                 0.4,
             );
             download_file(&client, &installer_url, &installer_path, None)?;
@@ -976,8 +988,8 @@ pub fn provision_server_jar(
                 .map_err(|e| format!("Failed to fetch Arclight releases: {e}"))?
                 .json()
                 .map_err(|e| format!("Failed to parse Arclight releases: {e}"))?;
-            let (tag, asset) = select_arclight_asset(&releases, &updated.mc_version)
-                .ok_or_else(|| {
+            let (tag, asset) =
+                select_arclight_asset(&releases, &updated.mc_version).ok_or_else(|| {
                     format!(
                         "No Arclight server release found for Minecraft {}",
                         updated.mc_version
@@ -1023,16 +1035,20 @@ pub fn start_dedicated_server(
         server.clone()
     };
 
-    let launch_target = resolve_server_launch_target(&dir, effective.software).ok_or_else(|| {
-        format!(
-            "No runnable server artifact found in {} after provisioning",
-            dir.display()
-        )
-    })?;
+    let launch_target =
+        resolve_server_launch_target(&dir, effective.software).ok_or_else(|| {
+            format!(
+                "No runnable server artifact found in {} after provisioning",
+                dir.display()
+            )
+        })?;
 
     emit_progress(
         tx,
-        format!("Checking Java {}...", required_java_major_for_mc(&effective.mc_version)),
+        format!(
+            "Checking Java {}...",
+            required_java_major_for_mc(&effective.mc_version)
+        ),
         0.75,
     );
     let java_bin = ensure_server_java(paths, &effective, tx)?;
@@ -1337,7 +1353,9 @@ fn connect_bore_control() -> Result<(TcpStream, SocketAddr), String> {
             Err(e) => last_err = e.to_string(),
         }
     }
-    Err(format!("Failed to connect {BORE_CONTROL_HOST}:{BORE_CONTROL_PORT}: {last_err}"))
+    Err(format!(
+        "Failed to connect {BORE_CONTROL_HOST}:{BORE_CONTROL_PORT}: {last_err}"
+    ))
 }
 
 fn forward_bore_connection(server_addr: SocketAddr, conn_id: String, local_port: u16) {
@@ -1445,9 +1463,8 @@ fn start_bore_tunnel(
                                 )));
                             }
                         } else if let Some(tx) = &tx_owned {
-                            let _ = tx.send(WorkerEvent::ServerLog(format!(
-                                "[Tunnel] bore error: {e}"
-                            )));
+                            let _ = tx
+                                .send(WorkerEvent::ServerLog(format!("[Tunnel] bore error: {e}")));
                         }
                         break;
                     }
@@ -1759,8 +1776,8 @@ fn soap_call(
 
 /// Discovers a UPnP IGD router on the local network and forwards TCP `port`.
 pub fn open_upnp_port(port: u16, tx: Option<&Sender<WorkerEvent>>) -> Result<UpnpMapping, String> {
-    let local_ip = detect_local_lan_ip()
-        .ok_or_else(|| "could not determine local LAN IP".to_string())?;
+    let local_ip =
+        detect_local_lan_ip().ok_or_else(|| "could not determine local LAN IP".to_string())?;
 
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("SSDP bind failed: {e}"))?;
     sock.set_read_timeout(Some(Duration::from_millis(1200)))
@@ -1810,7 +1827,13 @@ pub fn open_upnp_port(port: u16, tx: Option<&Sender<WorkerEvent>>) -> Result<Upn
          <NewPortMappingDescription>Sunset Launcher MC Server</NewPortMappingDescription>\
          <NewLeaseDuration>0</NewLeaseDuration>"
     );
-    soap_call(&client, &control_url, &service_type, "AddPortMapping", &add_body)?;
+    soap_call(
+        &client,
+        &control_url,
+        &service_type,
+        "AddPortMapping",
+        &add_body,
+    )?;
 
     let public_ip = soap_call(
         &client,
@@ -1998,8 +2021,10 @@ online-mode=true
     #[test]
     fn parse_bore_and_upnp_helpers_work() {
         assert_eq!(
-            parse_bore_listening_address("2026-11-19T20:20:00Z INFO bore_cli::client: listening at bore.pub:41923")
-                .as_deref(),
+            parse_bore_listening_address(
+                "2026-11-19T20:20:00Z INFO bore_cli::client: listening at bore.pub:41923"
+            )
+            .as_deref(),
             Some("bore.pub:41923")
         );
         assert_eq!(
@@ -2067,4 +2092,3 @@ online-mode=true
         assert_eq!(segs[2], (" world".to_string(), None, false));
     }
 }
-

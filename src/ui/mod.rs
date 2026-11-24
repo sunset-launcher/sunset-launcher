@@ -7,25 +7,27 @@ mod servers;
 mod settings_console;
 mod widgets;
 
-use self::widgets::*;
 use self::anim::{
     compute_icon_anim, ease_out_back, ease_out_cubic, paint_click_ripple, paint_fade_veil,
     paint_shimmer_sweep, pulse_01, track_click_anim,
 };
+use self::widgets::*;
 use crate::auth::{
     account_skin_cache_key, check_github_latest_release, download_and_apply_update,
     ensure_authlib_injector, ensure_valid_account_with_mode, fetch_account_skin, login_ely_by,
     start_microsoft_device_login, DEFAULT_MS_CLIENT_ID,
 };
 use crate::curseforge::{
-    fetch_curseforge_versions_for_profile, install_curseforge_project, parse_cf_project_id,
-    search_curseforge_projects,
+    fetch_curseforge_versions_for_profile, install_curseforge_project,
+    install_curseforge_server_project, parse_cf_project_id, search_curseforge_projects,
 };
 use crate::discord::{
     format_presence, unix_now_secs, DiscordActivityKind, DiscordRpc, PresenceState,
 };
 use crate::i18n::{tr, Language};
-use crate::icons::{draw_brand_logo_animated, draw_icon, draw_icon_animated, draw_player_pixel_avatar, Icon};
+use crate::icons::{
+    draw_brand_logo_animated, draw_icon, draw_icon_animated, draw_player_pixel_avatar, Icon,
+};
 use crate::launcher::{
     detect_java_installations, download_java_major, ensure_java_runtime_with_mode,
     is_managed_java_path, launch_game, open_in_file_manager, remove_managed_java,
@@ -65,24 +67,24 @@ use crate::servers::{
     write_server_properties_entries,
 };
 use crate::storage::{
-    delete_account_secret, instance_dir, load_selected_profile_id, load_servers,
-    rename_instance_dir_for_profile, resolve_selected_profile_index, save_accounts,
+    delete_account_secret, ensure_instance_mods_dir, instance_dir, load_selected_profile_id,
+    load_servers, rename_instance_dir_for_profile, resolve_selected_profile_index, save_accounts,
     save_launcher_settings, save_profiles, save_selected_profile_id, save_servers, server_dir,
     unique_instance_dir_name, unique_server_dir_name,
 };
 use crate::theme::{
-    self, animated_card, animated_progress_bar, apply_modrinth_theme, apply_ui_font, badge,
-    badge_sized, card_frame, discover_system_fonts, draw_icon_placeholder, draw_instance_avatar,
-    draw_instance_image_avatar, draw_ram_allocation_bar, draw_running_pulse_dot,
-    draw_server_avatar, draw_skeleton_card, lerp_color, loader_badge, loader_badge_sized,
-    mod_toggle_switch, mono_spinner, primary_action_button, section_header,
-    server_software_badge, set_theme_palette, solid_accent_badge, tick_theme_transition,
+    self, accent, accent_text, animated_card, animated_progress_bar, apply_modrinth_theme,
+    apply_ui_font, badge, badge_sized, bg_card, bg_card_active, bg_card_hover, bg_elevated,
+    bg_input, bg_sidebar, bg_void, border_subtle, card_frame, discover_system_fonts,
+    draw_icon_placeholder, draw_instance_avatar, draw_instance_image_avatar,
+    draw_ram_allocation_bar, draw_running_pulse_dot, draw_server_avatar, draw_skeleton_card,
+    lerp_color, loader_badge, loader_badge_sized, mod_toggle_switch, mono_spinner,
+    primary_action_button, section_header, server_software_badge, set_theme_palette,
+    solid_accent_badge, text_muted, text_primary, text_secondary, tick_theme_transition,
     transition_theme_palette, ui_alert_banner, ui_button, ui_button_icon, ui_button_sized,
-    ui_checkbox, ui_flow_row, ui_icon_button, ui_int_slider, ui_pill_tab,
-    ui_pill_tab_icon, ui_ram_slider, ui_search_input, ui_text_input, ui_toolbar_row, ui_wrap_row,
-    with_alpha, AlertKind, ButtonVariant, SystemFont, accent, accent_text, bg_card,
-    bg_card_active, bg_card_hover, bg_elevated, bg_input, bg_sidebar, bg_void, border_subtle,
-    DANGER, INFO, text_muted, text_primary, text_secondary, WARNING,
+    ui_checkbox, ui_flow_row, ui_icon_button, ui_int_slider, ui_pill_tab, ui_pill_tab_icon,
+    ui_ram_slider, ui_search_input, ui_text_input, ui_toolbar_row, ui_wrap_row, with_alpha,
+    AlertKind, ButtonVariant, SystemFont, DANGER, INFO, WARNING,
 };
 use eframe::egui::{self, Color32, Margin, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -353,7 +355,11 @@ struct ConsoleLayoutCache {
 
 const CONSOLE_ROW_GAP: f32 = 2.0;
 
-fn visible_console_range(y_offsets: &[f32], viewport_min_y: f32, viewport_max_y: f32) -> (usize, usize) {
+fn visible_console_range(
+    y_offsets: &[f32],
+    viewport_min_y: f32,
+    viewport_max_y: f32,
+) -> (usize, usize) {
     let count = y_offsets.len().saturating_sub(1);
     if count == 0 {
         return (0, 0);
@@ -375,7 +381,12 @@ struct FsUiCache {
     mod_counts: HashMap<String, (usize, usize, std::time::Instant)>,
     server_counts: HashMap<String, (usize, usize, std::time::Instant)>,
     folder_counts: HashMap<(String, &'static str), (usize, std::time::Instant)>,
-    content_items: Option<(String, &'static str, Vec<InstalledContentItem>, std::time::Instant)>,
+    content_items: Option<(
+        String,
+        &'static str,
+        Vec<InstalledContentItem>,
+        std::time::Instant,
+    )>,
     worlds: Option<(String, Vec<WorldEntry>, std::time::Instant)>,
     world_backups: Option<(String, Vec<WorldBackupEntry>, std::time::Instant)>,
     screenshots: Option<(String, Vec<ScreenshotEntry>, std::time::Instant)>,
@@ -606,8 +617,7 @@ impl McLauncherApp {
         }
         let servers = load_servers(&paths);
         let saved_profile_id = load_selected_profile_id(&paths);
-        let selected_idx =
-            resolve_selected_profile_index(&profiles, saved_profile_id.as_deref());
+        let selected_idx = resolve_selected_profile_index(&profiles, saved_profile_id.as_deref());
         let mut app = Self {
             paths,
             profiles,
@@ -1115,15 +1125,22 @@ impl McLauncherApp {
         };
         let mut copy = orig.clone();
         copy.id = uuid::Uuid::new_v4().to_string();
-        copy.name = format!("{} (Copy)", orig.name);
+        copy.name = disambiguate_profile_name(&format!("{} (Copy)", orig.name), &self.profiles);
         copy.dir_name = unique_instance_dir_name(&self.paths, &copy.name, &self.profiles);
+        if copy.loader.is_modded() {
+            let _ = ensure_instance_mods_dir(&self.paths, &copy);
+        }
         copy.created_at = chrono::Utc::now().to_rfc3339();
         copy.last_played = None;
         self.profiles.push(copy);
         let new_idx = self.profiles.len() - 1;
         let _ = save_profiles(&self.paths, &self.profiles);
         self.select_profile(new_idx);
-        let msg = format!("{}: '{}'", tr(self.settings.language, "toast.duplicated"), orig.name);
+        let msg = format!(
+            "{}: '{}'",
+            tr(self.settings.language, "toast.duplicated"),
+            orig.name
+        );
         self.show_toast(ctx, msg);
     }
 
@@ -1239,7 +1256,8 @@ impl McLauncherApp {
     }
 
     fn request_icon(&mut self, url: &str) {
-        if url.is_empty() || self.mr_icons.contains_key(url) || self.mr_icons_pending.contains(url) {
+        if url.is_empty() || self.mr_icons.contains_key(url) || self.mr_icons_pending.contains(url)
+        {
             return;
         }
         self.mr_icons_pending.insert(url.to_string());
@@ -1377,7 +1395,8 @@ impl McLauncherApp {
             return;
         };
         if info.download_url.is_none() {
-            self.update_error = Some("No downloadable binary asset found for this platform".to_string());
+            self.update_error =
+                Some("No downloadable binary asset found for this platform".to_string());
             return;
         }
         self.update_installing = true;
@@ -1399,7 +1418,8 @@ impl McLauncherApp {
 
     fn request_account_skin(&mut self, acc: &Account, force_refresh: bool) {
         let key = account_skin_cache_key(acc);
-        if !force_refresh && (self.skin_heads.contains_key(&key) || self.skin_pending.contains(&key))
+        if !force_refresh
+            && (self.skin_heads.contains_key(&key) || self.skin_pending.contains(&key))
         {
             return;
         }
@@ -1574,10 +1594,8 @@ impl McLauncherApp {
                             {
                                 if let Some(ver_slot) = profile.loader.loader_version_mut() {
                                     if ver_slot.is_empty() {
-                                        if let Some(first) = list
-                                            .iter()
-                                            .find(|v| v.stable)
-                                            .or_else(|| list.first())
+                                        if let Some(first) =
+                                            list.iter().find(|v| v.stable).or_else(|| list.first())
                                         {
                                             *ver_slot = first.version.clone();
                                             let _ = save_profiles(&self.paths, &self.profiles);
@@ -1637,22 +1655,19 @@ impl McLauncherApp {
                                 },
                             );
                             self.last_crash_code = None;
-                            self.status_text = format!(
-                                "{} ({})",
-                                tr(lang, "status.running"),
-                                prof_name
-                            );
+                            self.status_text =
+                                format!("{} ({})", tr(lang, "status.running"), prof_name);
                             self.push_instance_log(
                                 &profile_id,
                                 "[Launcher] Minecraft process started".to_string(),
                             );
-                            let launched_msg = format!(
-                                "{}: {prof_name}",
-                                tr(lang, "toast.game_launched")
-                            );
+                            let launched_msg =
+                                format!("{}: {prof_name}", tr(lang, "toast.game_launched"));
                             self.show_toast(ctx, launched_msg);
                             anim::emit_edge_pulse(ctx, accent());
-                            self.scan_java();
+                            if self.java_installs.is_empty() {
+                                self.scan_java();
+                            }
                             self.sync_discord_presence();
                             if self.settings.hide_on_launch {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
@@ -1725,8 +1740,7 @@ impl McLauncherApp {
                     Ok(info) => {
                         self.ms_device_code = Some(info);
                         self.auth_error = None;
-                        self.auth_status =
-                            Some("Waiting for browser confirmation...".to_string());
+                        self.auth_status = Some("Waiting for browser confirmation...".to_string());
                     }
                     Err(e) => {
                         self.ms_busy = false;
@@ -1851,17 +1865,22 @@ impl McLauncherApp {
                         }) => {
                             // Apply global default instance settings when pack didn't specify custom values
                             if profile.min_ram_mb == 512 && profile.max_ram_mb == 2048 {
-                                profile.min_ram_mb = self.settings.default_min_ram_mb.clamp(256, 32768);
+                                profile.min_ram_mb =
+                                    self.settings.default_min_ram_mb.clamp(256, 32768);
                                 profile.max_ram_mb = self
                                     .settings
                                     .default_max_ram_mb
                                     .max(profile.min_ram_mb)
                                     .clamp(512, 32768);
                             }
-                            if profile.jvm_args.is_empty() && !self.settings.default_jvm_args.is_empty() {
+                            if profile.jvm_args.is_empty()
+                                && !self.settings.default_jvm_args.is_empty()
+                            {
                                 profile.jvm_args = self.settings.default_jvm_args.clone();
                             }
-                            if profile.java_path.is_empty() && !self.settings.default_java_path.is_empty() {
+                            if profile.java_path.is_empty()
+                                && !self.settings.default_java_path.is_empty()
+                            {
                                 profile.java_path = self.settings.default_java_path.clone();
                             }
                             if profile.window_width.is_none() {
@@ -1874,9 +1893,20 @@ impl McLauncherApp {
                                 profile.fullscreen = self.settings.default_fullscreen;
                             }
                             if !profile.prefer_discrete_gpu {
-                                profile.prefer_discrete_gpu = self.settings.default_prefer_discrete_gpu;
+                                profile.prefer_discrete_gpu =
+                                    self.settings.default_prefer_discrete_gpu;
                             }
                             let lang = self.settings.language;
+                            let unique_name =
+                                disambiguate_profile_name(&profile.name, &self.profiles);
+                            if unique_name != profile.name {
+                                profile.name = unique_name;
+                                let _ = rename_instance_dir_for_profile(
+                                    &self.paths,
+                                    &mut profile,
+                                    &self.profiles,
+                                );
+                            }
                             let name = profile.name.clone();
                             self.profiles.push(profile);
                             let new_idx = self.profiles.len() - 1;
@@ -1897,7 +1927,10 @@ impl McLauncherApp {
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "modpack.mrpack".to_string());
-                            let msg = format!("{}: {fname}", tr(self.settings.language, "toast.exported"));
+                            let msg = format!(
+                                "{}: {fname}",
+                                tr(self.settings.language, "toast.exported")
+                            );
                             self.status_text = msg.clone();
                             self.show_toast(ctx, msg);
                             anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 10);
@@ -1935,11 +1968,8 @@ impl McLauncherApp {
                             anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 34.0);
                         }
                         Ok(updated) => {
-                            let msg = format!(
-                                "{}: {}",
-                                tr(lang, "toast.installed"),
-                                updated.join(", ")
-                            );
+                            let msg =
+                                format!("{}: {}", tr(lang, "toast.installed"), updated.join(", "));
                             self.status_text = msg.clone();
                             self.show_toast(ctx, msg);
                             anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 10);
@@ -1986,7 +2016,10 @@ impl McLauncherApp {
                             self.mclogs_last_url = Some(url.clone());
                             self.show_toast(
                                 ctx,
-                                format!("{} {url}", tr(self.settings.language, "logs.uploaded_toast")),
+                                format!(
+                                    "{} {url}",
+                                    tr(self.settings.language, "logs.uploaded_toast")
+                                ),
                             );
                             anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 8);
                         }
@@ -2369,7 +2402,8 @@ impl McLauncherApp {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let k_pressed = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::K));
+        let k_pressed =
+            ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::K));
         if k_pressed {
             self.show_cmd_palette = !self.show_cmd_palette;
             if self.show_cmd_palette {
@@ -2577,15 +2611,18 @@ impl McLauncherApp {
                 let foot_pad_x = 6.0;
                 let foot_inner_w = (ui.available_width() - foot_pad_x * 2.0 - 4.0).max(28.0);
                 let foot_id = ui.make_persistent_id("nav_acc_footer_card");
-                let prev_hov = ui.ctx().data(|d| d.get_temp::<bool>(foot_id)).unwrap_or(false);
+                let prev_hov = ui
+                    .ctx()
+                    .data(|d| d.get_temp::<bool>(foot_id))
+                    .unwrap_or(false);
                 let hov_t = ui.ctx().animate_bool_with_time(foot_id, prev_hov, 0.12);
                 let prev_prs = ui
                     .ctx()
                     .data(|d| d.get_temp::<bool>(foot_id.with("prs_state")))
                     .unwrap_or(false);
-                let prs_t = ui
-                    .ctx()
-                    .animate_bool_with_time(foot_id.with("prs_anim"), prev_prs, 0.07);
+                let prs_t =
+                    ui.ctx()
+                        .animate_bool_with_time(foot_id.with("prs_anim"), prev_prs, 0.07);
                 if (hov_t > 0.01 && hov_t < 0.99) || (prs_t > 0.01 && prs_t < 0.99) {
                     ui.ctx().request_repaint();
                 }
@@ -2641,15 +2678,16 @@ impl McLauncherApp {
                         }
                     });
                 let foot_rect = frame_resp.response.rect;
-                let hovered_now = frame_resp.response.hovered()
-                    || ui.rect_contains_pointer(foot_rect);
+                let hovered_now =
+                    frame_resp.response.hovered() || ui.rect_contains_pointer(foot_rect);
                 ui.ctx().data_mut(|d| d.insert_temp(foot_id, hovered_now));
                 let resp = frame_resp
                     .response
                     .interact(Sense::click())
                     .on_hover_text(format!("Account: {acc_name} ({acc_kind})"));
-                ui.ctx()
-                    .data_mut(|d| d.insert_temp(foot_id.with("prs_state"), resp.is_pointer_button_down_on()));
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(foot_id.with("prs_state"), resp.is_pointer_button_down_on())
+                });
                 if let Some((ct, origin)) = track_click_anim(
                     ui.ctx(),
                     foot_id,
@@ -2700,21 +2738,23 @@ impl McLauncherApp {
         // Brand + vertical navigation
         ui.vertical(|ui| {
             let brand_id = ui.make_persistent_id("nav_brand_lockup");
-            let brand_hov_prev = ui.ctx().data_mut(|d| d.get_temp::<bool>(brand_id).unwrap_or(false));
-            let brand_prs_prev = ui.ctx().data_mut(|d| d.get_temp::<bool>(brand_id.with("prs")).unwrap_or(false));
-            let brand_ht = ui.ctx().animate_bool_with_time(brand_id, brand_hov_prev, 0.14);
-            let brand_pt = ui.ctx().animate_bool_with_time(brand_id.with("prs_anim"), brand_prs_prev, 0.07);
+            let brand_hov_prev = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<bool>(brand_id).unwrap_or(false));
+            let brand_prs_prev = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<bool>(brand_id.with("prs")).unwrap_or(false));
+            let brand_ht = ui
+                .ctx()
+                .animate_bool_with_time(brand_id, brand_hov_prev, 0.14);
+            let brand_pt =
+                ui.ctx()
+                    .animate_bool_with_time(brand_id.with("prs_anim"), brand_prs_prev, 0.07);
             if (brand_ht > 0.01 && brand_ht < 0.99) || (brand_pt > 0.01 && brand_pt < 0.99) {
                 ui.ctx().request_repaint();
             }
-            let brand_click_info = track_click_anim(
-                ui.ctx(),
-                brand_id,
-                Rect::NOTHING,
-                false,
-                None,
-                0.42,
-            );
+            let brand_click_info =
+                track_click_anim(ui.ctx(), brand_id, Rect::NOTHING, false, None, 0.42);
             let brand_click_t = brand_click_info.map(|(t, _)| t);
             let brand_fill = if brand_ht > 0.01 {
                 with_alpha(accent(), (brand_ht * 18.0) as u8)
@@ -2727,16 +2767,18 @@ impl McLauncherApp {
                 Stroke::NONE
             };
             if self.brand_logo_tex.is_none() {
-                let loaded = decode_icon_bytes(include_bytes!("../../logo.png")).ok().map(|img| {
-                    ui.ctx().load_texture(
-                        "brand_logo_sunset",
-                        egui::ColorImage::from_rgba_unmultiplied(
-                            [img.width, img.height],
-                            &img.rgba,
-                        ),
-                        egui::TextureOptions::LINEAR,
-                    )
-                });
+                let loaded = decode_icon_bytes(include_bytes!("../../logo.png"))
+                    .ok()
+                    .map(|img| {
+                        ui.ctx().load_texture(
+                            "brand_logo_sunset",
+                            egui::ColorImage::from_rgba_unmultiplied(
+                                [img.width, img.height],
+                                &img.rgba,
+                            ),
+                            egui::TextureOptions::LINEAR,
+                        )
+                    });
                 self.brand_logo_tex = Some(loaded);
             }
             let brand_resp = egui::Frame::none()
@@ -2748,10 +2790,14 @@ impl McLauncherApp {
                     let row_w = ui.available_width().max(36.0);
                     let (row_rect, _) =
                         ui.allocate_exact_size(Vec2::new(row_w, 36.0), Sense::hover());
-                    let pop = brand_click_t.map_or(0.0, |t| (t * std::f32::consts::PI).sin() * 0.08);
+                    let pop =
+                        brand_click_t.map_or(0.0, |t| (t * std::f32::consts::PI).sin() * 0.08);
                     let scale = (1.0 + brand_ht * 0.04 - brand_pt * 0.06 + pop).max(0.85);
                     let base_icon_rect = Rect::from_min_size(row_rect.min, Vec2::splat(36.0));
-                    let icon_rect = Rect::from_center_size(base_icon_rect.center(), base_icon_rect.size() * scale);
+                    let icon_rect = Rect::from_center_size(
+                        base_icon_rect.center(),
+                        base_icon_rect.size() * scale,
+                    );
                     if let Some(Some(tex)) = &self.brand_logo_tex {
                         if brand_ht > 0.02 {
                             ui.painter().rect_filled(
@@ -2772,11 +2818,19 @@ impl McLauncherApp {
                             ui.painter().rect_stroke(
                                 icon_rect.expand(expand),
                                 Rounding::same(9.0 + expand * 0.4),
-                                Stroke::new(1.5_f32, with_alpha(accent(), (inv * inv * 180.0) as u8)),
+                                Stroke::new(
+                                    1.5_f32,
+                                    with_alpha(accent(), (inv * inv * 180.0) as u8),
+                                ),
                             );
                         }
                     } else {
-                        draw_brand_logo_animated(ui.painter(), base_icon_rect, brand_ht, brand_click_t);
+                        draw_brand_logo_animated(
+                            ui.painter(),
+                            base_icon_rect,
+                            brand_ht,
+                            brand_click_t,
+                        );
                     }
                     if row_rect.width() > 42.0 {
                         let clipped = ui.painter().with_clip_rect(row_rect);
@@ -2791,9 +2845,10 @@ impl McLauncherApp {
                     }
                 });
             let brand_rect = brand_resp.response.rect;
-            let brand_hov_now = brand_resp.response.hovered()
-                || ui.rect_contains_pointer(brand_rect);
-            ui.ctx().data_mut(|d| d.insert_temp(brand_id, brand_hov_now));
+            let brand_hov_now =
+                brand_resp.response.hovered() || ui.rect_contains_pointer(brand_rect);
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(brand_id, brand_hov_now));
             let brand_click = brand_resp
                 .response
                 .interact(Sense::click())
@@ -2802,7 +2857,12 @@ impl McLauncherApp {
                     env!("CARGO_PKG_VERSION"),
                     " • by svarka (@sunset-launcher)"
                 ));
-            ui.ctx().data_mut(|d| d.insert_temp(brand_id.with("prs"), brand_click.is_pointer_button_down_on()));
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    brand_id.with("prs"),
+                    brand_click.is_pointer_button_down_on(),
+                )
+            });
             if let Some((ct, origin)) = track_click_anim(
                 ui.ctx(),
                 brand_id,
@@ -2903,7 +2963,10 @@ impl McLauncherApp {
                                 painter.rect_stroke(
                                     draw_rect,
                                     Rounding::same(8.0),
-                                    Stroke::new(1.0_f32, with_alpha(accent(), (active_t * 95.0) as u8)),
+                                    Stroke::new(
+                                        1.0_f32,
+                                        with_alpha(accent(), (active_t * 95.0) as u8),
+                                    ),
                                 );
                             }
                             if let Some((ct, origin)) = click_info {
@@ -2918,8 +2981,11 @@ impl McLauncherApp {
                                 );
                             }
 
-                            let fg =
-                                lerp_color(text_secondary(), text_primary(), active_t.max(hover_t * 0.7));
+                            let fg = lerp_color(
+                                text_secondary(),
+                                text_primary(),
+                                active_t.max(hover_t * 0.7),
+                            );
                             let icon_col = lerp_color(
                                 lerp_color(text_muted(), text_secondary(), hover_t),
                                 accent(),
@@ -2931,7 +2997,10 @@ impl McLauncherApp {
                                 hover_t * 2.2
                             };
                             let ic_rect = Rect::from_center_size(
-                                Pos2::new(draw_rect.left() + 20.0 + slide_x * 0.5, draw_rect.center().y),
+                                Pos2::new(
+                                    draw_rect.left() + 20.0 + slide_x * 0.5,
+                                    draw_rect.center().y,
+                                ),
                                 Vec2::splat(16.0),
                             );
                             let ic_anim = compute_icon_anim(
@@ -2968,7 +3037,8 @@ impl McLauncherApp {
                                     );
                                 }
                             } else if rect.width() > 48.0 {
-                                let clipped = painter.with_clip_rect(rect.shrink2(Vec2::new(6.0, 0.0)));
+                                let clipped =
+                                    painter.with_clip_rect(rect.shrink2(Vec2::new(6.0, 0.0)));
                                 clipped.text(
                                     Pos2::new(rect.left() + 38.0 + slide_x, rect.center().y),
                                     egui::Align2::LEFT_CENTER,
@@ -2999,12 +3069,21 @@ impl McLauncherApp {
                                                 painter.rect_filled(
                                                     pill,
                                                     Rounding::same(8.0),
-                                                    with_alpha(DANGER, (185.0 + pulse * 65.0) as u8),
+                                                    with_alpha(
+                                                        DANGER,
+                                                        (185.0 + pulse * 65.0) as u8,
+                                                    ),
                                                 );
                                                 painter.rect_stroke(
                                                     pill.expand(pulse * 1.5),
                                                     Rounding::same(9.0),
-                                                    Stroke::new(1.0_f32, with_alpha(DANGER, ((1.0 - pulse) * 140.0) as u8)),
+                                                    Stroke::new(
+                                                        1.0_f32,
+                                                        with_alpha(
+                                                            DANGER,
+                                                            ((1.0 - pulse) * 140.0) as u8,
+                                                        ),
+                                                    ),
                                                 );
                                                 painter.text(
                                                     pill.center(),
@@ -3075,8 +3154,15 @@ impl McLauncherApp {
         let show_update_btn = self.update_available.is_some() && avail_w >= 540.0;
         let right_reserve = btn_w
             + if show_status_badges {
-                (if self.settings.offline_mode { 84.0 } else { 0.0 })
-                    + (if self.running_games.len() > 1 { 92.0 } else { 0.0 })
+                (if self.settings.offline_mode {
+                    84.0
+                } else {
+                    0.0
+                }) + (if self.running_games.len() > 1 {
+                    92.0
+                } else {
+                    0.0
+                })
             } else {
                 0.0
             }
@@ -3154,7 +3240,8 @@ impl McLauncherApp {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let is_launching = self.is_selected_launching();
                 let is_running = self.is_selected_running();
-                let (btn_text, icon, enabled, stop_style, pulsing) = if is_launching || self.is_busy {
+                let (btn_text, icon, enabled, stop_style, pulsing) = if is_launching || self.is_busy
+                {
                     (
                         tr(self.settings.language, "top.loading"),
                         None,
@@ -3163,9 +3250,21 @@ impl McLauncherApp {
                         true,
                     )
                 } else if is_running {
-                    (tr(self.settings.language, "top.stop"), Some(Icon::Stop), true, true, true)
+                    (
+                        tr(self.settings.language, "top.stop"),
+                        Some(Icon::Stop),
+                        true,
+                        true,
+                        true,
+                    )
                 } else {
-                    (tr(self.settings.language, "top.play"), Some(Icon::Play), true, false, false)
+                    (
+                        tr(self.settings.language, "top.play"),
+                        Some(Icon::Play),
+                        true,
+                        false,
+                        false,
+                    )
                 };
 
                 let play_btn_resp = primary_action_button(
@@ -3234,7 +3333,10 @@ impl McLauncherApp {
                         ui.painter().rect_stroke(
                             resp.rect.expand(pulse * 1.8),
                             Rounding::same(8.5),
-                            Stroke::new(1.1_f32, with_alpha(accent(), (90.0 + (1.0 - pulse) * 110.0) as u8)),
+                            Stroke::new(
+                                1.1_f32,
+                                with_alpha(accent(), (90.0 + (1.0 - pulse) * 110.0) as u8),
+                            ),
                         );
                         paint_shimmer_sweep(
                             ui.painter(),
@@ -3256,7 +3358,8 @@ impl McLauncherApp {
     }
 
     fn render_bottom_bar(&mut self, ui: &mut egui::Ui) {
-        let can_cancel = ((!self.launching_profiles.is_empty() || self.is_busy) && !self.update_installing)
+        let can_cancel = ((!self.launching_profiles.is_empty() || self.is_busy)
+            && !self.update_installing)
             || self.mr_installing
             || self.server_busy
             || self.java_downloading_major.is_some();
@@ -3317,7 +3420,10 @@ impl McLauncherApp {
                 .map(|img| {
                     ctx.load_texture(
                         format!("profile_icon:{path}"),
-                        egui::ColorImage::from_rgba_unmultiplied([img.width, img.height], &img.rgba),
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [img.width, img.height],
+                            &img.rgba,
+                        ),
                         egui::TextureOptions::LINEAR,
                     )
                 });
@@ -3392,7 +3498,10 @@ impl eframe::App for McLauncherApp {
                 egui::Frame::none()
                     .fill(bg_sidebar())
                     .stroke(Stroke::new(1.0_f32, border_subtle()))
-                    .inner_margin(Margin::symmetric(if compact_pad { 10.0 } else { 14.0 }, 9.0)),
+                    .inner_margin(Margin::symmetric(
+                        if compact_pad { 10.0 } else { 14.0 },
+                        9.0,
+                    )),
             )
             .show(ctx, |ui| {
                 self.render_top_bar(ui);
@@ -3489,6 +3598,25 @@ impl eframe::App for McLauncherApp {
         self.render_toast(ctx);
         anim::render_action_fx(ctx);
     }
+}
+
+pub(super) fn disambiguate_profile_name(desired: &str, existing: &[Profile]) -> String {
+    let base = desired.trim();
+    let is_taken = |candidate: &str| {
+        let low = candidate.to_lowercase();
+        existing.iter().any(|p| p.name.trim().to_lowercase() == low)
+    };
+    if !base.is_empty() && !is_taken(base) {
+        return base.to_string();
+    }
+    let stem = if base.is_empty() { "Instance" } else { base };
+    for n in 2..=9999 {
+        let candidate = format!("{stem} ({n})");
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{stem} ({})", uuid::Uuid::new_v4())
 }
 
 #[cfg(test)]
@@ -3597,5 +3725,30 @@ mod tests {
         assert_eq!(visible_console_range(&offsets, 0.0, 50.0), (0, 3));
         assert_eq!(visible_console_range(&offsets, 22.0, 80.0), (1, 3));
         assert_eq!(visible_console_range(&offsets, 45.0, 124.0), (2, 5));
+    }
+
+    #[test]
+    fn test_disambiguate_profile_name() {
+        let settings = LauncherSettings::default();
+        let p1 = Profile::new_with_defaults(
+            "Survival".to_string(),
+            "1.21.4".to_string(),
+            ModLoader::Vanilla,
+            "Steve".to_string(),
+            &settings,
+        );
+        let p2 = Profile::new_with_defaults(
+            "Survival (2)".to_string(),
+            "1.21.4".to_string(),
+            ModLoader::Vanilla,
+            "Steve".to_string(),
+            &settings,
+        );
+        let existing = vec![p1, p2];
+        assert_eq!(disambiguate_profile_name("Creative", &existing), "Creative");
+        assert_eq!(
+            disambiguate_profile_name("  survival  ", &existing),
+            "survival (3)"
+        );
     }
 }

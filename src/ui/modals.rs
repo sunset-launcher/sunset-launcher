@@ -88,7 +88,8 @@ impl McLauncherApp {
                                                     .iter()
                                                     .filter(|v| {
                                                         self.new_show_snapshots
-                                                            || v.version_type == VersionType::Release
+                                                            || v.version_type
+                                                                == VersionType::Release
                                                     })
                                                     .take(80)
                                                 {
@@ -152,7 +153,22 @@ impl McLauncherApp {
                     });
 
                 ui.add_space(12.0);
-                let name_valid = !self.new_name.trim().is_empty();
+                let trimmed_inst_name = self.new_name.trim();
+                let inst_name_taken = !trimmed_inst_name.is_empty()
+                    && self
+                        .profiles
+                        .iter()
+                        .any(|p| p.name.trim().to_lowercase() == trimmed_inst_name.to_lowercase());
+                if inst_name_taken {
+                    ui_alert_banner(
+                        ui,
+                        AlertKind::Error,
+                        tr(self.settings.language, "err.duplicate_instance_name"),
+                        (ui.available_width() - 8.0).max(160.0),
+                    );
+                    ui.add_space(6.0);
+                }
+                let name_valid = !trimmed_inst_name.is_empty() && !inst_name_taken;
                 ui_toolbar_row(ui, 30.0, |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     if (ui_button_icon(
@@ -180,6 +196,9 @@ impl McLauncherApp {
                         profile.min_ram_mb = profile.min_ram_mb.min(profile.max_ram_mb);
                         profile.dir_name =
                             unique_instance_dir_name(&self.paths, &profile.name, &self.profiles);
+                        if profile.loader.is_modded() {
+                            let _ = ensure_instance_mods_dir(&self.paths, &profile);
+                        }
                         self.profiles.push(profile);
                         let new_idx = self.profiles.len() - 1;
                         let _ = save_profiles(&self.paths, &self.profiles);
@@ -293,9 +312,13 @@ impl McLauncherApp {
             .anchor(egui::Align2::CENTER_CENTER, Vec2::new(0.0, offset_y))
             .show(ctx, |ui| {
                 ui.label(
-                    egui::RichText::new(format!("{} ({})", tr(self.settings.language, "modal.delete_confirm"), target.name))
-                        .strong()
-                        .color(text_primary()),
+                    egui::RichText::new(format!(
+                        "{} ({})",
+                        tr(self.settings.language, "modal.delete_confirm"),
+                        target.name
+                    ))
+                    .strong()
+                    .color(text_primary()),
                 );
                 ui.add_space(4.0);
                 ui.label(
@@ -392,8 +415,8 @@ impl McLauncherApp {
             let alpha = enter_eased.min(exit_eased);
             let slide_y = (1.0 - enter_eased) * 18.0 + (1.0 - exit_eased) * 10.0;
             let rem_frac = (1.0 - (age / 3.8)).clamp(0.0, 1.0) as f32;
-            let is_err = text.to_lowercase().contains("error")
-                || text.to_lowercase().contains("failed");
+            let is_err =
+                text.to_lowercase().contains("error") || text.to_lowercase().contains("failed");
             let accent_col = if is_err { DANGER } else { accent() };
             let bg_col = if is_err {
                 Color32::from_rgb(46, 24, 28)
@@ -405,7 +428,10 @@ impl McLauncherApp {
 
             egui::Area::new(egui::Id::new("toast_overlay"))
                 .order(egui::Order::Tooltip)
-                .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -44.0 + slide_y))
+                .anchor(
+                    egui::Align2::RIGHT_BOTTOM,
+                    Vec2::new(-16.0, -44.0 + slide_y),
+                )
                 .show(ctx, |ui| {
                     ui.set_max_width(max_w);
                     let a = (alpha * 255.0) as u8;
@@ -433,7 +459,8 @@ impl McLauncherApp {
                                 );
                                 ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(text).color(with_alpha(text_primary(), a)),
+                                        egui::RichText::new(text)
+                                            .color(with_alpha(text_primary(), a)),
                                     )
                                     .wrap(),
                                 );
@@ -469,11 +496,35 @@ impl McLauncherApp {
         self.mr_detail_loading = true;
         self.mr_detail_versions = None;
 
-        let (game_version, loader) = self
-            .profiles
-            .get(self.selected_idx)
-            .map(|p| (p.version_id.clone(), p.loader.clone()))
-            .unwrap_or_else(|| ("1.21.4".to_string(), ModLoader::Vanilla));
+        let target_srv = self
+            .discover_target_server_id
+            .as_ref()
+            .and_then(|id| self.servers.iter().find(|s| &s.id == id))
+            .or_else(|| {
+                if self.mr_type == ModrinthProjectType::Plugin {
+                    self.servers.get(self.selected_server_idx)
+                } else {
+                    None
+                }
+            });
+        let (game_version, loader) = if let Some(srv) = target_srv {
+            let l = if self.mr_type == ModrinthProjectType::Mod {
+                ModLoader::from_kind(
+                    srv.software
+                        .modrinth_mod_loader()
+                        .unwrap_or(LoaderKind::Vanilla),
+                    String::new(),
+                )
+            } else {
+                ModLoader::Vanilla
+            };
+            (srv.mc_version.clone(), l)
+        } else {
+            self.profiles
+                .get(self.selected_idx)
+                .map(|p| (p.version_id.clone(), p.loader.clone()))
+                .unwrap_or_else(|| ("1.21.4".to_string(), ModLoader::Vanilla))
+        };
         let project_id = hit.project_id.clone();
         let mr_type = self.mr_type;
         let cf_key = self.settings.curseforge_api_key.clone();
@@ -496,11 +547,8 @@ impl McLauncherApp {
 
     pub(super) fn handle_file_drop(&mut self, ctx: &egui::Context) {
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
-        let drop_t = ctx.animate_bool_with_time(
-            egui::Id::new("file_drop_overlay_anim"),
-            hovering,
-            0.14,
-        );
+        let drop_t =
+            ctx.animate_bool_with_time(egui::Id::new("file_drop_overlay_anim"), hovering, 0.14);
         if drop_t > 0.01 && drop_t < 0.99 {
             ctx.request_repaint();
         }
@@ -534,7 +582,10 @@ impl McLauncherApp {
                     ui.painter().rect_stroke(
                         box_rect.expand(pulse * 4.0),
                         Rounding::same(16.0),
-                        Stroke::new(1.5_f32, with_alpha(accent(), ((1.0 - pulse) * eased * 135.0) as u8)),
+                        Stroke::new(
+                            1.5_f32,
+                            with_alpha(accent(), ((1.0 - pulse) * eased * 135.0) as u8),
+                        ),
                     );
                     ui.painter().rect(
                         box_rect,
@@ -575,8 +626,13 @@ impl McLauncherApp {
                 });
         }
 
-        let dropped: Vec<std::path::PathBuf> =
-            ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
         if dropped.is_empty() {
             return;
         }
@@ -777,8 +833,11 @@ impl McLauncherApp {
                             ui.horizontal(|ui| {
                                 mono_spinner(ui, 20.0);
                                 ui.label(
-                                    egui::RichText::new(tr(self.settings.language, "mr.loading_versions"))
-                                        .color(text_secondary()),
+                                    egui::RichText::new(tr(
+                                        self.settings.language,
+                                        "mr.loading_versions",
+                                    ))
+                                    .color(text_secondary()),
                                 );
                             });
                         },
@@ -802,7 +861,8 @@ impl McLauncherApp {
                             .show(ui, |ui| {
                                 ui.set_max_width((scroll_w - 14.0).max(160.0));
                                 for ver in versions.iter().take(45) {
-                                    let ver_card_id = ui.make_persistent_id(("mr_ver_row", &ver.id));
+                                    let ver_card_id =
+                                        ui.make_persistent_id(("mr_ver_row", &ver.id));
                                     animated_card(ui, ver_card_id, false, |ui| {
                                         ui.set_min_width(inner_w);
                                         ui.set_max_width(inner_w);
@@ -909,7 +969,10 @@ impl McLauncherApp {
                 ctx.layer_painter(ir.response.layer_id).rect_stroke(
                     win_r,
                     Rounding::same(12.0),
-                    Stroke::new(1.5_f32, with_alpha(accent(), ((1.0 - modal_t) * 165.0) as u8)),
+                    Stroke::new(
+                        1.5_f32,
+                        with_alpha(accent(), ((1.0 - modal_t) * 165.0) as u8),
+                    ),
                 );
                 paint_fade_veil(
                     &ctx.layer_painter(ir.response.layer_id),
@@ -924,6 +987,7 @@ impl McLauncherApp {
             self.mr_detail_hit = None;
         }
         if let Some(version) = install_version_req {
+            reset_download_cancel();
             let target_srv = self
                 .discover_target_server_id
                 .as_ref()
@@ -955,17 +1019,32 @@ impl McLauncherApp {
                 let pid = hit.project_id.clone();
                 let title = hit.title.clone();
                 let icon_url = hit.icon_url.clone();
+                let cf_key = self.settings.curseforge_api_key.clone();
                 thread::spawn(move || {
-                    let res = install_server_specific_version(
-                        &paths,
-                        &srv,
-                        &pid,
-                        mr_type,
-                        &title,
-                        icon_url.as_deref(),
-                        &version,
-                        &tx,
-                    );
+                    let res = if let Some(cf_mod_id) = parse_cf_project_id(&pid) {
+                        install_curseforge_server_project(
+                            &cf_key,
+                            &paths,
+                            &srv,
+                            cf_mod_id,
+                            mr_type,
+                            &title,
+                            icon_url.as_deref(),
+                            Some(&version),
+                            &tx,
+                        )
+                    } else {
+                        install_server_specific_version(
+                            &paths,
+                            &srv,
+                            &pid,
+                            mr_type,
+                            &title,
+                            icon_url.as_deref(),
+                            &version,
+                            &tx,
+                        )
+                    };
                     let _ = tx.send(WorkerEvent::ServerProjectInstalled(res));
                 });
             } else if let Some(profile) = self.profiles.get(self.selected_idx).cloned() {
@@ -1372,7 +1451,8 @@ impl McLauncherApp {
                 // Top styled search input bar
                 let bar_w = ui.available_width();
                 let mut clear_clicked = false;
-                let mut refocus_input = self.cmd_palette_just_opened || key_tab || key_up || key_down;
+                let mut refocus_input =
+                    self.cmd_palette_just_opened || key_tab || key_up || key_down;
                 egui::Frame::none()
                     .fill(bg_input())
                     .stroke(Stroke::new(1.2_f32, with_alpha(accent(), 185)))
@@ -1480,14 +1560,18 @@ impl McLauncherApp {
                             ui.add_space(16.0);
                             ui.vertical_centered(|ui| {
                                 ui.label(
-                                    egui::RichText::new(tr(self.settings.language, "palette.empty"))
-                                        .color(text_secondary()),
+                                    egui::RichText::new(tr(
+                                        self.settings.language,
+                                        "palette.empty",
+                                    ))
+                                    .color(text_secondary()),
                                 );
                                 ui.add_space(4.0);
                                 ui.label(
-                                    egui::RichText::new(
-                                        tr(self.settings.language, "palette.empty_sub"),
-                                    )
+                                    egui::RichText::new(tr(
+                                        self.settings.language,
+                                        "palette.empty_sub",
+                                    ))
                                     .small()
                                     .color(text_muted()),
                                 );
@@ -1527,8 +1611,10 @@ impl McLauncherApp {
                                         if is_sel { accent() } else { text_secondary() },
                                     );
 
-                                    let shortcut_reserve = if it.shortcut.is_empty() { 70.0 } else { 130.0 };
-                                    let text_w = (ui.available_width() - shortcut_reserve).max(100.0);
+                                    let shortcut_reserve =
+                                        if it.shortcut.is_empty() { 70.0 } else { 130.0 };
+                                    let text_w =
+                                        (ui.available_width() - shortcut_reserve).max(100.0);
                                     ui.allocate_ui(Vec2::new(text_w, 34.0), |ui| {
                                         ui.vertical(|ui| {
                                             ui.spacing_mut().item_spacing.y = 0.0;
@@ -1559,7 +1645,8 @@ impl McLauncherApp {
                                             }
                                             ui.label(
                                                 egui::RichText::new(
-                                                    it.category.translated_badge(self.settings.language),
+                                                    it.category
+                                                        .translated_badge(self.settings.language),
                                                 )
                                                 .small()
                                                 .color(text_muted()),
@@ -1602,7 +1689,10 @@ impl McLauncherApp {
                 ctx.layer_painter(ir.response.layer_id).rect_stroke(
                     win_r,
                     Rounding::same(12.0),
-                    Stroke::new(1.5_f32, with_alpha(accent(), ((1.0 - modal_t) * 165.0) as u8)),
+                    Stroke::new(
+                        1.5_f32,
+                        with_alpha(accent(), ((1.0 - modal_t) * 165.0) as u8),
+                    ),
                 );
                 paint_fade_veil(
                     &ctx.layer_painter(ir.response.layer_id),
@@ -1642,7 +1732,8 @@ impl McLauncherApp {
                     if let Some(profile) = self.profiles.get(self.selected_idx).cloned() {
                         self.mr_installing = true;
                         self.progress = 0.08;
-                        self.status_text = tr(self.settings.language, "content.checking_updates").to_string();
+                        self.status_text =
+                            tr(self.settings.language, "content.checking_updates").to_string();
                         let paths = self.paths.clone();
                         let tx = self.tx.clone();
                         thread::spawn(move || {

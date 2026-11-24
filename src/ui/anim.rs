@@ -108,15 +108,7 @@ pub fn track_click_anim(
     let stamp_id = id.with("click_stamp_v2");
     if clicked {
         let pos = pointer_pos.unwrap_or_else(|| rect.center());
-        ctx.data_mut(|d| {
-            d.insert_temp(
-                stamp_id,
-                ClickStamp {
-                    time: now,
-                    pos,
-                },
-            )
-        });
+        ctx.data_mut(|d| d.insert_temp(stamp_id, ClickStamp { time: now, pos }));
         ctx.request_repaint();
         return Some((0.001, pos));
     }
@@ -287,12 +279,7 @@ impl Default for IconAnim {
 
 /// Computes a semantic, icon-specific animation transform driven by hover (`0..1`),
 /// press (`0..1`), and click impulse (`Option<0..1>`).
-pub fn compute_icon_anim(
-    icon: Icon,
-    hover_t: f32,
-    press_t: f32,
-    click_t: Option<f32>,
-) -> IconAnim {
+pub fn compute_icon_anim(icon: Icon, hover_t: f32, press_t: f32, click_t: Option<f32>) -> IconAnim {
     let hover_eased = ease_out_cubic(hover_t);
     let click_p = click_t.unwrap_or(1.0);
     let impulse = click_t.map(impulse_wave).unwrap_or(0.0);
@@ -374,7 +361,13 @@ pub fn compute_icon_anim(
             scale += impulse * 0.12;
             rotation = hover_eased * 0.18 + impulse * 0.35;
         }
-        Icon::Terminal | Icon::User | Icon::Layers | Icon::Grid | Icon::Server | Icon::List | Icon::Alert => {
+        Icon::Terminal
+        | Icon::User
+        | Icon::Layers
+        | Icon::Grid
+        | Icon::Server
+        | Icon::List
+        | Icon::Alert => {
             offset.y = -hover_eased * 0.6 - impulse * 1.1;
         }
     }
@@ -437,9 +430,7 @@ fn fx_state_id() -> Id {
 fn with_fx_state<R>(ctx: &egui::Context, f: impl FnOnce(&mut ActionFxState, f64) -> R) -> R {
     let now = ctx.input(|i| i.time);
     let id = fx_state_id();
-    let mut state: ActionFxState = ctx
-        .data_mut(|d| d.get_temp(id))
-        .unwrap_or_default();
+    let mut state: ActionFxState = ctx.data_mut(|d| d.get_temp(id)).unwrap_or_default();
     state.prune_expired(now);
     let out = f(&mut state, now);
     ctx.data_mut(|d| d.insert_temp(id, state));
@@ -560,7 +551,10 @@ mod tests {
         assert!((ease_out_expo(0.0) - 0.0).abs() < 1e-5);
         assert!((ease_out_expo(1.0) - 1.0).abs() < 1e-5);
         assert!((ease_in_out_cubic(0.5) - 0.5).abs() < 1e-5);
-        assert!(ease_out_back(0.65) > 1.0, "ease_out_back must overshoot 1.0");
+        assert!(
+            ease_out_back(0.65) > 1.0,
+            "ease_out_back must overshoot 1.0"
+        );
         assert!((ease_out_back(1.0) - 1.0).abs() < 1e-5);
         assert!(impulse_wave(0.28) > 0.5);
         assert!(impulse_wave(1.0) < 0.15);
@@ -572,7 +566,10 @@ mod tests {
         assert!(refresh_click.rotation > 1.5, "Refresh should spin on click");
 
         let play_hover = compute_icon_anim(Icon::Play, 1.0, 0.0, None);
-        assert!(play_hover.offset.x > 0.5, "Play icon should nudge right on hover");
+        assert!(
+            play_hover.offset.x > 0.5,
+            "Play icon should nudge right on hover"
+        );
 
         let trash_click = compute_icon_anim(Icon::Trash, 1.0, 0.0, Some(0.25));
         assert!(trash_click.scale > 1.0);

@@ -33,7 +33,12 @@ fn find_windows_rc() -> Option<PathBuf> {
     }
     for env_key in ["ProgramFiles(x86)", "ProgramFiles"] {
         if let Ok(pf) = env::var(env_key) {
-            bases.push(PathBuf::from(pf).join("Windows Kits").join("10").join("bin"));
+            bases.push(
+                PathBuf::from(pf)
+                    .join("Windows Kits")
+                    .join("10")
+                    .join("bin"),
+            );
         }
     }
     for base in bases {
@@ -129,4 +134,3 @@ END
         );
     }
 }
-

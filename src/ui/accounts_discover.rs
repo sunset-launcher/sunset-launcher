@@ -39,7 +39,12 @@ impl McLauncherApp {
             let inner_w = card_inner_w.clamp(120.0, 460.0);
 
             if let Some(err) = &self.auth_error {
-                ui_alert_banner(ui, AlertKind::Error, &format!("Error: {err}"), card_inner_w + 22.0);
+                ui_alert_banner(
+                    ui,
+                    AlertKind::Error,
+                    &format!("Error: {err}"),
+                    card_inner_w + 22.0,
+                );
                 ui.add_space(6.0);
             }
             if let Some(msg) = &self.auth_status {
@@ -159,8 +164,16 @@ impl McLauncherApp {
                                 acc_col,
                                 &self.skin_heads,
                             );
-                            ui.strong(egui::RichText::new(&acc.username).size(14.5).color(text_primary()));
-                            ui.label(egui::RichText::new(acc.kind_label()).small().color(text_muted()));
+                            ui.strong(
+                                egui::RichText::new(&acc.username)
+                                    .size(14.5)
+                                    .color(text_primary()),
+                            );
+                            ui.label(
+                                egui::RichText::new(acc.kind_label())
+                                    .small()
+                                    .color(text_muted()),
+                            );
                             if is_active {
                                 badge(ui, tr(self.settings.language, "acc.active"), true);
                             }
@@ -221,7 +234,11 @@ impl McLauncherApp {
                                 &self.skin_heads,
                             );
                             ui.strong(&acc.username);
-                            ui.label(egui::RichText::new(acc.kind_label()).small().color(text_muted()));
+                            ui.label(
+                                egui::RichText::new(acc.kind_label())
+                                    .small()
+                                    .color(text_muted()),
+                            );
                             if is_active {
                                 badge(ui, tr(self.settings.language, "acc.active"), true);
                             }
@@ -281,8 +298,15 @@ impl McLauncherApp {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
                 ui_toolbar_row(ui, 24.0, |ui| {
-                    ui.strong(egui::RichText::new(tr(self.settings.language, "acc.ms_title")).color(text_primary()));
-                    ui.label(egui::RichText::new("OAuth Device Code").small().color(text_muted()));
+                    ui.strong(
+                        egui::RichText::new(tr(self.settings.language, "acc.ms_title"))
+                            .color(text_primary()),
+                    );
+                    ui.label(
+                        egui::RichText::new("OAuth Device Code")
+                            .small()
+                            .color(text_muted()),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let toggle_lbl = if self.ms_show_custom_id {
                             tr(self.settings.language, "acc.hide")
@@ -310,8 +334,19 @@ impl McLauncherApp {
                 );
                 if self.ms_show_custom_id {
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new(tr(self.settings.language, "acc.client_id")).small().color(text_secondary()));
-                    ui_text_input(ui, "ms_cid_input", &mut self.ms_client_id, DEFAULT_MS_CLIENT_ID, inner_w, false);
+                    ui.label(
+                        egui::RichText::new(tr(self.settings.language, "acc.client_id"))
+                            .small()
+                            .color(text_secondary()),
+                    );
+                    ui_text_input(
+                        ui,
+                        "ms_cid_input",
+                        &mut self.ms_client_id,
+                        DEFAULT_MS_CLIENT_ID,
+                        inner_w,
+                        false,
+                    );
                 }
                 ui.add_space(8.0);
 
@@ -335,7 +370,13 @@ impl McLauncherApp {
                             ui.ctx().copy_text(dc.user_code.clone());
                             let pos = anim::pointer_or_center(ui.ctx());
                             anim::emit_ring(ui.ctx(), pos, accent(), 28.0);
-                            anim::emit_floating_badge(ui.ctx(), pos, Some(Icon::Check), "", accent());
+                            anim::emit_floating_badge(
+                                ui.ctx(),
+                                pos,
+                                Some(Icon::Check),
+                                "",
+                                accent(),
+                            );
                             self.show_toast(ui.ctx(), "Code copied to clipboard");
                         }
                         if ui_button_icon(
@@ -349,7 +390,12 @@ impl McLauncherApp {
                         )
                         .clicked()
                         {
-                            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 30.0);
+                            anim::emit_ring(
+                                ui.ctx(),
+                                anim::pointer_or_center(ui.ctx()),
+                                accent(),
+                                30.0,
+                            );
                             ui.ctx()
                                 .open_url(egui::OpenUrl::new_tab(&dc.verification_uri));
                         }
@@ -368,7 +414,12 @@ impl McLauncherApp {
                         )
                         .clicked()
                         {
-                            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 30.0);
+                            anim::emit_ring(
+                                ui.ctx(),
+                                anim::pointer_or_center(ui.ctx()),
+                                accent(),
+                                30.0,
+                            );
                             self.ms_busy = true;
                             self.auth_error = None;
                             self.auth_status =
@@ -393,22 +444,39 @@ impl McLauncherApp {
                 ui.set_max_width(card_inner_w);
                 ui_wrap_row(ui, 22.0, |ui| {
                     ui.strong(egui::RichText::new("Ely.by").color(text_primary()));
-                    ui.label(egui::RichText::new("authlib-injector").small().color(text_muted()));
+                    ui.label(
+                        egui::RichText::new("authlib-injector")
+                            .small()
+                            .color(text_muted()),
+                    );
                 });
                 ui.label(
-                    egui::RichText::new(
-                        tr(self.settings.language, "acc.ely_desc"),
-                    )
-                    .small()
-                    .color(text_secondary()),
+                    egui::RichText::new(tr(self.settings.language, "acc.ely_desc"))
+                        .small()
+                        .color(text_secondary()),
                 );
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new(tr(self.settings.language, "acc.login_label")).small().color(text_secondary()));
+                ui.label(
+                    egui::RichText::new(tr(self.settings.language, "acc.login_label"))
+                        .small()
+                        .color(text_secondary()),
+                );
                 ui_toolbar_row(ui, 30.0, |ui| {
-                    ui_text_input(ui, "ely_login_in", &mut self.ely_login, tr(self.settings.language, "acc.login_hint"), inner_w, false);
+                    ui_text_input(
+                        ui,
+                        "ely_login_in",
+                        &mut self.ely_login,
+                        tr(self.settings.language, "acc.login_hint"),
+                        inner_w,
+                        false,
+                    );
                 });
                 ui.add_space(5.0);
-                ui.label(egui::RichText::new(tr(self.settings.language, "acc.password")).small().color(text_secondary()));
+                ui.label(
+                    egui::RichText::new(tr(self.settings.language, "acc.password"))
+                        .small()
+                        .color(text_secondary()),
+                );
                 ui_toolbar_row(ui, 30.0, |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui_text_input(
@@ -422,7 +490,11 @@ impl McLauncherApp {
                     if ui_button(
                         ui,
                         "ely_show_pw",
-                        if self.ely_show_password { tr(self.settings.language, "acc.hide") } else { tr(self.settings.language, "acc.show") },
+                        if self.ely_show_password {
+                            tr(self.settings.language, "acc.hide")
+                        } else {
+                            tr(self.settings.language, "acc.show")
+                        },
                         ButtonVariant::Subtle,
                         true,
                         30.0,
@@ -433,8 +505,19 @@ impl McLauncherApp {
                     }
                 });
                 ui.add_space(5.0);
-                ui.label(egui::RichText::new(tr(self.settings.language, "acc.2fa_label")).small().color(text_secondary()));
-                ui_text_input(ui, "ely_totp_in", &mut self.ely_totp, tr(self.settings.language, "acc.2fa_hint"), inner_w, false);
+                ui.label(
+                    egui::RichText::new(tr(self.settings.language, "acc.2fa_label"))
+                        .small()
+                        .color(text_secondary()),
+                );
+                ui_text_input(
+                    ui,
+                    "ely_totp_in",
+                    &mut self.ely_totp,
+                    tr(self.settings.language, "acc.2fa_hint"),
+                    inner_w,
+                    false,
+                );
                 ui.add_space(8.0);
                 ui_toolbar_row(ui, 28.0, |ui| {
                     let ely_valid = !self.ely_busy
@@ -476,7 +559,10 @@ impl McLauncherApp {
             card_frame(false, 0.0).show(ui, |ui| {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
-                ui.strong(egui::RichText::new(tr(self.settings.language, "acc.offline_title")).color(text_primary()));
+                ui.strong(
+                    egui::RichText::new(tr(self.settings.language, "acc.offline_title"))
+                        .color(text_primary()),
+                );
                 ui.add_space(6.0);
                 ui_wrap_row(ui, 30.0, |ui| {
                     ui.label(tr(self.settings.language, "acc.username"));
@@ -488,8 +574,8 @@ impl McLauncherApp {
                         (card_inner_w - 150.0).clamp(110.0, 260.0),
                         false,
                     );
-                    let enter = edit_resp.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let enter =
+                        edit_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let valid = !self.offline_input.trim().is_empty();
                     if (ui_button_icon(
                         ui,
@@ -531,15 +617,29 @@ impl McLauncherApp {
             && cur_loader == Some(LoaderKind::Vanilla)
             && self.mr_type == ModrinthProjectType::Mod;
         let target_label = if let Some(srv) = &target_server {
-            format!("Server: {} ({} {})", srv.name, srv.software.label(), srv.mc_version)
+            format!(
+                "Server: {} ({} {})",
+                srv.name,
+                srv.software.label(),
+                srv.mc_version
+            )
         } else {
             cur_profile
                 .as_ref()
                 .map(|p| {
                     if is_vanilla_mods {
-                        format!("Vanilla {} ({})", p.version_id, tr(self.settings.language, "mr.no_loader"))
+                        format!(
+                            "Vanilla {} ({})",
+                            p.version_id,
+                            tr(self.settings.language, "mr.no_loader")
+                        )
                     } else {
-                        format!("{} {} • {}", tr(self.settings.language, "mr.only_for"), p.version_id, p.loader.short_name())
+                        format!(
+                            "{} {} • {}",
+                            tr(self.settings.language, "mr.only_for"),
+                            p.version_id,
+                            p.loader.short_name()
+                        )
                     }
                 })
                 .unwrap_or_else(|| tr(self.settings.language, "mr.no_instance").to_string())
@@ -715,25 +815,23 @@ impl McLauncherApp {
             ui.add_space(6.0);
         }
         ui_wrap_row(ui, 30.0, |ui| {
-            if target_server.is_none() {
-                let prev_src = self.discover_source;
-                egui::ComboBox::from_id_salt("discover_src_combo")
-                    .selected_text(self.discover_source.label())
-                    .width(122.0)
-                    .show_ui(ui, |ui| {
-                        for src in [ProjectSource::Modrinth, ProjectSource::CurseForge] {
-                            ui.selectable_value(&mut self.discover_source, src, src.label());
-                        }
-                    });
-                if self.discover_source != prev_src {
-                    self.mr_results.clear();
-                    self.mr_total_hits = 0;
-                    self.mr_next_offset = 0;
-                    self.mr_has_more = false;
-                    self.mr_error = None;
-                    self.mark_subtab_switch(ui.ctx());
-                    self.trigger_modrinth_search(false);
-                }
+            let prev_src = self.discover_source;
+            egui::ComboBox::from_id_salt("discover_src_combo")
+                .selected_text(self.discover_source.label())
+                .width(122.0)
+                .show_ui(ui, |ui| {
+                    for src in [ProjectSource::Modrinth, ProjectSource::CurseForge] {
+                        ui.selectable_value(&mut self.discover_source, src, src.label());
+                    }
+                });
+            if self.discover_source != prev_src {
+                self.mr_results.clear();
+                self.mr_total_hits = 0;
+                self.mr_next_offset = 0;
+                self.mr_has_more = false;
+                self.mr_error = None;
+                self.mark_subtab_switch(ui.ctx());
+                self.trigger_modrinth_search(false);
             }
             let (allow_srv_mods, allow_srv_plugins) = if let Some(srv) = &target_server {
                 let srv_dir = server_dir(&self.paths, srv);
@@ -802,7 +900,10 @@ impl McLauncherApp {
                         ModrinthSort::Newest,
                         ModrinthSort::Updated,
                     ] {
-                        if ui.selectable_value(&mut self.mr_sort, s, sort_label(s)).changed() {
+                        if ui
+                            .selectable_value(&mut self.mr_sort, s, sort_label(s))
+                            .changed()
+                        {
                             self.mark_subtab_switch(ui.ctx());
                             self.trigger_modrinth_search(false);
                         }
@@ -818,11 +919,15 @@ impl McLauncherApp {
         };
         ui_wrap_row(ui, 30.0, |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
+            let search_placeholder = match self.discover_source {
+                ProjectSource::Modrinth => tr(self.settings.language, "mr.search_placeholder"),
+                ProjectSource::CurseForge => tr(self.settings.language, "cf.search_placeholder"),
+            };
             let enter_or_cleared = ui_search_input(
                 ui,
                 "mr_search_input",
                 &mut self.mr_query,
-                tr(self.settings.language, "mr.search_placeholder"),
+                search_placeholder,
                 search_w,
             );
             if (ui_button_icon(
@@ -872,123 +977,393 @@ impl McLauncherApp {
         let mut open_inst_settings_req = false;
 
         Self::apply_subtab_transition(ui, subtab_t, |ui| {
-        bounded_scroll(ui, "modrinth_scroll", |ui| {
-            let usable_w = (ui.available_width() - 12.0).max(160.0);
-            let card_inner_w = (usable_w - 22.0).max(140.0);
+            bounded_scroll(ui, "modrinth_scroll", |ui| {
+                let usable_w = (ui.available_width() - 12.0).max(160.0);
+                let card_inner_w = (usable_w - 22.0).max(140.0);
 
-            if self.mr_results.is_empty() && self.mr_searching {
-                for _ in 0..4 {
-                    draw_skeleton_card(ui, card_inner_w);
-                    ui.add_space(6.0);
-                }
-                return;
-            } else if self.mr_results.is_empty() && !self.mr_searching {
-                let mut open_inst_settings = false;
-                card_frame(false, 0.0).show(ui, |ui| {
-                    ui.set_min_width(card_inner_w);
-                    ui.set_max_width(card_inner_w);
-                    if is_vanilla_mods {
-                        ui_wrap_row(ui, 30.0, |ui| {
-                            ui.label(
-                                egui::RichText::new(
-                                    tr(self.settings.language, "mr.vanilla_warning"),
-                                )
-                                .color(text_muted()),
-                            );
-                            if ui_button_icon(
-                                ui,
-                                "mr_open_inst_settings",
-                                Some(Icon::Sliders),
-                                tr(self.settings.language, "inst.settings_btn"),
-                                ButtonVariant::Primary,
-                                true,
-                                28.0,
-                            )
-                            .clicked()
-                            {
-                                open_inst_settings = true;
-                            }
-                        });
-                    } else {
-                        ui.label(
-                            egui::RichText::new(
-                                tr(self.settings.language, "mr.no_results"),
-                            )
-                            .color(text_muted()),
-                        );
+                if self.mr_results.is_empty() && self.mr_searching {
+                    for _ in 0..4 {
+                        draw_skeleton_card(ui, card_inner_w);
+                        ui.add_space(6.0);
                     }
-                });
-                if open_inst_settings {
-                    open_inst_settings_req = true;
+                    return;
+                } else if self.mr_results.is_empty() && !self.mr_searching {
+                    let mut open_inst_settings = false;
+                    card_frame(false, 0.0).show(ui, |ui| {
+                        ui.set_min_width(card_inner_w);
+                        ui.set_max_width(card_inner_w);
+                        if is_vanilla_mods {
+                            ui_wrap_row(ui, 30.0, |ui| {
+                                ui.label(
+                                    egui::RichText::new(tr(
+                                        self.settings.language,
+                                        "mr.vanilla_warning",
+                                    ))
+                                    .color(text_muted()),
+                                );
+                                if ui_button_icon(
+                                    ui,
+                                    "mr_open_inst_settings",
+                                    Some(Icon::Sliders),
+                                    tr(self.settings.language, "inst.settings_btn"),
+                                    ButtonVariant::Primary,
+                                    true,
+                                    28.0,
+                                )
+                                .clicked()
+                                {
+                                    open_inst_settings = true;
+                                }
+                            });
+                        } else {
+                            ui.label(
+                                egui::RichText::new(tr(self.settings.language, "mr.no_results"))
+                                    .color(text_muted()),
+                            );
+                        }
+                    });
+                    if open_inst_settings {
+                        open_inst_settings_req = true;
+                    }
+                    return;
                 }
-                return;
-            }
 
-            let results = self.mr_results.clone();
-            let active_loader_slug = cur_loader.and_then(|l| l.modrinth_slug());
-            let wide_card = card_inner_w >= 540.0;
-            for hit in &results {
-                let is_installed = self.mr_installed_cache.contains_key(&hit.project_id);
-                let is_this_installing = mr_installing
-                    && mr_installing_id.as_deref() == Some(hit.project_id.as_str());
-                let btn_lbl = if is_this_installing {
-                    tr(self.settings.language, "mr.installing")
-                } else if mr_type == ModrinthProjectType::Modpack {
-                    tr(self.settings.language, "modal.create_instance")
-                } else if is_installed {
-                    tr(self.settings.language, "mr.update")
-                } else {
-                    tr(self.settings.language, "mr.install")
-                };
-                let btn_variant = if is_installed {
-                    ButtonVariant::Secondary
-                } else {
-                    ButtonVariant::Primary
-                };
-                let btn_icon = if is_installed {
-                    Icon::Refresh
-                } else {
-                    Icon::Download
-                };
+                let results = self.mr_results.clone();
+                let active_loader_slug = cur_loader.and_then(|l| l.modrinth_slug());
+                let wide_card = card_inner_w >= 540.0;
+                for hit in &results {
+                    let is_installed = self.mr_installed_cache.contains_key(&hit.project_id);
+                    let is_this_installing = mr_installing
+                        && mr_installing_id.as_deref() == Some(hit.project_id.as_str());
+                    let btn_lbl = if is_this_installing {
+                        tr(self.settings.language, "mr.installing")
+                    } else if mr_type == ModrinthProjectType::Modpack {
+                        tr(self.settings.language, "modal.create_instance")
+                    } else if is_installed {
+                        tr(self.settings.language, "mr.update")
+                    } else {
+                        tr(self.settings.language, "mr.install")
+                    };
+                    let btn_variant = if is_installed {
+                        ButtonVariant::Secondary
+                    } else {
+                        ButtonVariant::Primary
+                    };
+                    let btn_icon = if is_installed {
+                        Icon::Refresh
+                    } else {
+                        Icon::Download
+                    };
 
-                let card_id = ui.make_persistent_id(("mr_card_hover", &hit.project_id));
-                animated_card(ui, card_id, is_installed, |ui| {
-                    ui.set_min_width(card_inner_w);
-                    ui.set_max_width(card_inner_w);
+                    let card_id = ui.make_persistent_id(("mr_card_hover", &hit.project_id));
+                    animated_card(ui, card_id, is_installed, |ui| {
+                        ui.set_min_width(card_inner_w);
+                        ui.set_max_width(card_inner_w);
 
-                    let tex_opt = hit
-                        .icon_url
-                        .as_ref()
-                        .and_then(|u| self.mr_icons.get(u))
-                        .and_then(|o| o.as_ref());
-                    let is_icon_loading = hit
-                        .icon_url
-                        .as_ref()
-                        .is_some_and(|u| self.mr_icons_pending.contains(u.as_str()));
+                        let tex_opt = hit
+                            .icon_url
+                            .as_ref()
+                            .and_then(|u| self.mr_icons.get(u))
+                            .and_then(|o| o.as_ref());
+                        let is_icon_loading = hit
+                            .icon_url
+                            .as_ref()
+                            .is_some_and(|u| self.mr_icons_pending.contains(u.as_str()));
 
-                    if wide_card {
-                        let icon_px = 52.0;
-                        let action_w = 206.0;
-                        let btn_w = 132.0;
-                        let gap_x = 12.0;
-                        let info_w = (card_inner_w - icon_px - action_w - gap_x * 2.0).max(120.0);
-                        let max_desc_chars = ((info_w / 6.3) * 1.85).clamp(48.0, 145.0) as usize;
-                        let desc = clamp_summary(&hit.description, max_desc_chars);
+                        if wide_card {
+                            let icon_px = 52.0;
+                            let action_w = 206.0;
+                            let btn_w = 132.0;
+                            let gap_x = 12.0;
+                            let info_w =
+                                (card_inner_w - icon_px - action_w - gap_x * 2.0).max(120.0);
+                            let max_desc_chars =
+                                ((info_w / 6.3) * 1.85).clamp(48.0, 145.0) as usize;
+                            let desc = clamp_summary(&hit.description, max_desc_chars);
 
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(card_inner_w, 72.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.set_min_size(Vec2::new(card_inner_w, 72.0));
-                                ui.set_max_size(Vec2::new(card_inner_w, 72.0));
-                                ui.spacing_mut().item_spacing.x = gap_x;
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(card_inner_w, 72.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_min_size(Vec2::new(card_inner_w, 72.0));
+                                    ui.set_max_size(Vec2::new(card_inner_w, 72.0));
+                                    ui.spacing_mut().item_spacing.x = gap_x;
 
+                                    let icon_size = Vec2::splat(icon_px);
+                                    if let Some(tex) = tex_opt {
+                                        ui.add(
+                                            egui::Image::new(tex)
+                                                .fit_to_exact_size(icon_size)
+                                                .rounding(Rounding::same(10.0)),
+                                        );
+                                    } else {
+                                        let (rect, _) =
+                                            ui.allocate_exact_size(icon_size, Sense::hover());
+                                        draw_icon_placeholder(
+                                            ui,
+                                            rect,
+                                            10.0,
+                                            &hit.title,
+                                            is_icon_loading,
+                                        );
+                                    }
+
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(info_w, 72.0),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            ui.set_min_size(Vec2::new(info_w, 72.0));
+                                            ui.set_max_size(Vec2::new(info_w, 72.0));
+                                            ui.spacing_mut().item_spacing.y = 2.0;
+
+                                            // Line 1: Title + Installed/CF badge
+                                            ui_toolbar_row(ui, 20.0, |ui| {
+                                                ui.spacing_mut().item_spacing.x = 6.0;
+                                                let badge_w = if is_installed { 76.0 } else { 0.0 }
+                                                    + if hit.source == ProjectSource::CurseForge {
+                                                        38.0
+                                                    } else {
+                                                        0.0
+                                                    };
+                                                ui.allocate_ui(
+                                                    Vec2::new((info_w - badge_w).max(60.0), 20.0),
+                                                    |ui| {
+                                                        let title_id = ui.make_persistent_id((
+                                                            "mr_title_w",
+                                                            &hit.project_id,
+                                                        ));
+                                                        let prev_hov = ui
+                                                            .ctx()
+                                                            .data(|d| d.get_temp::<bool>(title_id))
+                                                            .unwrap_or(false);
+                                                        let title_hov =
+                                                            ui.ctx().animate_bool_with_time(
+                                                                title_id.with("h"),
+                                                                prev_hov,
+                                                                0.11,
+                                                            );
+                                                        if title_hov > 0.01 && title_hov < 0.99 {
+                                                            ui.ctx().request_repaint();
+                                                        }
+                                                        let title_col = lerp_color(
+                                                            text_primary(),
+                                                            accent_text(),
+                                                            title_hov,
+                                                        );
+                                                        let title_resp = ui
+                                                            .add(
+                                                                egui::Label::new(
+                                                                    egui::RichText::new(&hit.title)
+                                                                        .strong()
+                                                                        .size(14.5)
+                                                                        .color(title_col),
+                                                                )
+                                                                .truncate()
+                                                                .sense(Sense::click()),
+                                                            )
+                                                            .on_hover_cursor(
+                                                                egui::CursorIcon::PointingHand,
+                                                            )
+                                                            .on_hover_text(tr(
+                                                                self.settings.language,
+                                                                "mr.click_versions",
+                                                            ));
+                                                        ui.ctx().data_mut(|d| {
+                                                            d.insert_temp(
+                                                                title_id,
+                                                                title_resp.hovered(),
+                                                            )
+                                                        });
+                                                        if title_resp.clicked() {
+                                                            open_detail = Some(hit.clone());
+                                                        }
+                                                    },
+                                                );
+                                                if hit.source == ProjectSource::CurseForge {
+                                                    badge(ui, "CF", false);
+                                                }
+                                                if is_installed {
+                                                    badge(
+                                                        ui,
+                                                        tr(self.settings.language, "mr.installed"),
+                                                        true,
+                                                    );
+                                                }
+                                            });
+
+                                            // Line 2: Uniform 28px summary slot so all rows have equal height
+                                            ui.allocate_ui_with_layout(
+                                                Vec2::new(info_w, 28.0),
+                                                egui::Layout::top_down(egui::Align::Min),
+                                                |ui| {
+                                                    ui.set_min_size(Vec2::new(info_w, 28.0));
+                                                    ui.set_max_size(Vec2::new(info_w, 28.0));
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(&desc)
+                                                                .small()
+                                                                .color(text_secondary()),
+                                                        )
+                                                        .wrap(),
+                                                    );
+                                                },
+                                            );
+
+                                            // Line 3: Single-line stats + category chips
+                                            ui_toolbar_row(ui, 20.0, |ui| {
+                                                ui.spacing_mut().item_spacing.x = 6.0;
+                                                let display_cats: Vec<&str> = hit
+                                                    .categories
+                                                    .iter()
+                                                    .map(String::as_str)
+                                                    .filter(|c| match *c {
+                                                        "fabric" | "quilt" | "forge"
+                                                        | "neoforge" => {
+                                                            active_loader_slug == Some(*c)
+                                                        }
+                                                        _ => true,
+                                                    })
+                                                    .collect();
+                                                let cats_count = if info_w >= 380.0 {
+                                                    display_cats.len().min(3)
+                                                } else if info_w >= 300.0 {
+                                                    display_cats.len().min(2)
+                                                } else {
+                                                    0
+                                                };
+                                                let cats_reserve = if cats_count > 0 {
+                                                    cats_count as f32 * 76.0
+                                                } else {
+                                                    0.0
+                                                };
+                                                let meta_w =
+                                                    (info_w - cats_reserve - 18.0).max(80.0);
+                                                let (dl_r, _) = ui.allocate_exact_size(
+                                                    Vec2::splat(11.0),
+                                                    Sense::hover(),
+                                                );
+                                                draw_icon(
+                                                    ui.painter(),
+                                                    dl_r,
+                                                    Icon::Download,
+                                                    text_muted(),
+                                                );
+                                                ui.allocate_ui(Vec2::new(meta_w, 20.0), |ui| {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(format!(
+                                                                "{} • {} {}",
+                                                                format_downloads(hit.downloads),
+                                                                tr(self.settings.language, "mr.by"),
+                                                                hit.author
+                                                            ))
+                                                            .small()
+                                                            .color(text_muted()),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                });
+                                                let cats_text: String = display_cats
+                                                    .iter()
+                                                    .take(cats_count)
+                                                    .copied()
+                                                    .collect::<Vec<_>>()
+                                                    .join(" • ");
+                                                if !cats_text.is_empty() {
+                                                    ui.label(
+                                                        egui::RichText::new(cats_text)
+                                                            .small()
+                                                            .color(text_muted()),
+                                                    );
+                                                }
+                                            });
+                                        },
+                                    );
+
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(action_w, 72.0),
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            if ui_icon_button(
+                                                ui,
+                                                ("mr_ext_w", &hit.project_id),
+                                                Icon::External,
+                                                hit.source.label(),
+                                                ButtonVariant::Subtle,
+                                                true,
+                                                30.0,
+                                            )
+                                            .clicked()
+                                            {
+                                                let url =
+                                                    hit.website_url.clone().unwrap_or_else(|| {
+                                                        format!(
+                                                            "https://modrinth.com/{}/{}",
+                                                            mr_type.api_str(),
+                                                            hit.project_id
+                                                        )
+                                                    });
+                                                anim::emit_ring(
+                                                    ui.ctx(),
+                                                    anim::pointer_or_center(ui.ctx()),
+                                                    accent(),
+                                                    28.0,
+                                                );
+                                                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                            }
+                                            if ui_icon_button(
+                                                ui,
+                                                ("mr_vers_w", &hit.project_id),
+                                                Icon::List,
+                                                tr(self.settings.language, "mr.browse_versions"),
+                                                ButtonVariant::Subtle,
+                                                true,
+                                                30.0,
+                                            )
+                                            .clicked()
+                                            {
+                                                open_detail = Some(hit.clone());
+                                            }
+                                            if is_this_installing {
+                                                ui.allocate_ui_with_layout(
+                                                    Vec2::new(btn_w, 30.0),
+                                                    egui::Layout::centered_and_justified(
+                                                        egui::Direction::LeftToRight,
+                                                    ),
+                                                    |ui| mono_spinner(ui, 18.0),
+                                                );
+                                            } else if ui_button_sized(
+                                                ui,
+                                                ("mr_inst_w", &hit.project_id),
+                                                Some(btn_icon),
+                                                btn_lbl,
+                                                btn_variant,
+                                                !mr_installing,
+                                                Vec2::new(btn_w, 30.0),
+                                            )
+                                            .clicked()
+                                            {
+                                                install_req = Some((
+                                                    hit.project_id.clone(),
+                                                    hit.title.clone(),
+                                                    hit.icon_url.clone(),
+                                                ));
+                                            }
+                                        },
+                                    );
+                                },
+                            );
+                        } else {
+                            let icon_px = 42.0;
+                            let info_w = (card_inner_w - icon_px - 10.0).max(80.0);
+                            ui_toolbar_row(ui, 44.0, |ui| {
                                 let icon_size = Vec2::splat(icon_px);
                                 if let Some(tex) = tex_opt {
                                     ui.add(
                                         egui::Image::new(tex)
                                             .fit_to_exact_size(icon_size)
-                                            .rounding(Rounding::same(10.0)),
+                                            .rounding(Rounding::same(9.0)),
                                     );
                                 } else {
                                     let (rect, _) =
@@ -996,41 +1371,52 @@ impl McLauncherApp {
                                     draw_icon_placeholder(
                                         ui,
                                         rect,
-                                        10.0,
+                                        9.0,
                                         &hit.title,
                                         is_icon_loading,
                                     );
                                 }
-
                                 ui.allocate_ui_with_layout(
-                                    Vec2::new(info_w, 72.0),
+                                    Vec2::new(info_w, 42.0),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        ui.set_min_size(Vec2::new(info_w, 72.0));
-                                        ui.set_max_size(Vec2::new(info_w, 72.0));
-                                        ui.spacing_mut().item_spacing.y = 2.0;
-
-                                        // Line 1: Title + Installed/CF badge
                                         ui_toolbar_row(ui, 20.0, |ui| {
-                                            ui.spacing_mut().item_spacing.x = 6.0;
-                                            let badge_w = if is_installed { 76.0 } else { 0.0 }
-                                                + if hit.source == ProjectSource::CurseForge { 38.0 } else { 0.0 };
+                                            let badge_w = if is_installed { 72.0 } else { 0.0 }
+                                                + if hit.source == ProjectSource::CurseForge {
+                                                    36.0
+                                                } else {
+                                                    0.0
+                                                };
                                             ui.allocate_ui(
-                                                Vec2::new((info_w - badge_w).max(60.0), 20.0),
+                                                Vec2::new((info_w - badge_w).max(40.0), 20.0),
                                                 |ui| {
-                                                    let title_id = ui.make_persistent_id(("mr_title_w", &hit.project_id));
-                                                    let prev_hov = ui.ctx().data(|d| d.get_temp::<bool>(title_id)).unwrap_or(false);
-                                                    let title_hov = ui.ctx().animate_bool_with_time(title_id.with("h"), prev_hov, 0.11);
+                                                    let title_id = ui.make_persistent_id((
+                                                        "mr_title_n",
+                                                        &hit.project_id,
+                                                    ));
+                                                    let prev_hov = ui
+                                                        .ctx()
+                                                        .data(|d| d.get_temp::<bool>(title_id))
+                                                        .unwrap_or(false);
+                                                    let title_hov =
+                                                        ui.ctx().animate_bool_with_time(
+                                                            title_id.with("h"),
+                                                            prev_hov,
+                                                            0.11,
+                                                        );
                                                     if title_hov > 0.01 && title_hov < 0.99 {
                                                         ui.ctx().request_repaint();
                                                     }
-                                                    let title_col = lerp_color(text_primary(), accent_text(), title_hov);
+                                                    let title_col = lerp_color(
+                                                        text_primary(),
+                                                        accent_text(),
+                                                        title_hov,
+                                                    );
                                                     let title_resp = ui
                                                         .add(
                                                             egui::Label::new(
                                                                 egui::RichText::new(&hit.title)
                                                                     .strong()
-                                                                    .size(14.5)
                                                                     .color(title_col),
                                                             )
                                                             .truncate()
@@ -1039,10 +1425,16 @@ impl McLauncherApp {
                                                         .on_hover_cursor(
                                                             egui::CursorIcon::PointingHand,
                                                         )
-                                                        .on_hover_text(
-                                                            tr(self.settings.language, "mr.click_versions"),
-                                                        );
-                                                    ui.ctx().data_mut(|d| d.insert_temp(title_id, title_resp.hovered()));
+                                                        .on_hover_text(tr(
+                                                            self.settings.language,
+                                                            "mr.click_versions",
+                                                        ));
+                                                    ui.ctx().data_mut(|d| {
+                                                        d.insert_temp(
+                                                            title_id,
+                                                            title_resp.hovered(),
+                                                        )
+                                                    });
                                                     if title_resp.clicked() {
                                                         open_detail = Some(hit.clone());
                                                     }
@@ -1052,322 +1444,105 @@ impl McLauncherApp {
                                                 badge(ui, "CF", false);
                                             }
                                             if is_installed {
-                                                badge(ui, tr(self.settings.language, "mr.installed"), true);
-                                            }
-                                        });
-
-                                        // Line 2: Uniform 28px summary slot so all rows have equal height
-                                        ui.allocate_ui_with_layout(
-                                            Vec2::new(info_w, 28.0),
-                                            egui::Layout::top_down(egui::Align::Min),
-                                            |ui| {
-                                                ui.set_min_size(Vec2::new(info_w, 28.0));
-                                                ui.set_max_size(Vec2::new(info_w, 28.0));
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        egui::RichText::new(&desc)
-                                                            .small()
-                                                            .color(text_secondary()),
-                                                    )
-                                                    .wrap(),
-                                                );
-                                            },
-                                        );
-
-                                        // Line 3: Single-line stats + category chips
-                                        ui_toolbar_row(ui, 20.0, |ui| {
-                                            ui.spacing_mut().item_spacing.x = 6.0;
-                                            let display_cats: Vec<&str> = hit
-                                                .categories
-                                                .iter()
-                                                .map(String::as_str)
-                                                .filter(|c| match *c {
-                                                    "fabric" | "quilt" | "forge" | "neoforge" => {
-                                                        active_loader_slug == Some(*c)
-                                                    }
-                                                    _ => true,
-                                                })
-                                                .collect();
-                                            let cats_count = if info_w >= 380.0 {
-                                                display_cats.len().min(3)
-                                            } else if info_w >= 300.0 {
-                                                display_cats.len().min(2)
-                                            } else {
-                                                0
-                                            };
-                                            let cats_reserve = if cats_count > 0 {
-                                                cats_count as f32 * 76.0
-                                            } else {
-                                                0.0
-                                            };
-                                            let meta_w = (info_w - cats_reserve - 18.0).max(80.0);
-                                            let (dl_r, _) = ui.allocate_exact_size(
-                                                Vec2::splat(11.0),
-                                                Sense::hover(),
-                                            );
-                                            draw_icon(
-                                                ui.painter(),
-                                                dl_r,
-                                                Icon::Download,
-                                                text_muted(),
-                                            );
-                                            ui.allocate_ui(Vec2::new(meta_w, 20.0), |ui| {
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        egui::RichText::new(format!(
-                                                            "{} • {} {}",
-                                                            format_downloads(hit.downloads),
-                                                            tr(self.settings.language, "mr.by"),
-                                                            hit.author
-                                                        ))
-                                                        .small()
-                                                        .color(text_muted()),
-                                                    )
-                                                    .truncate(),
-                                                );
-                                            });
-                                            let cats_text: String = display_cats
-                                                .iter()
-                                                .take(cats_count)
-                                                .copied()
-                                                .collect::<Vec<_>>()
-                                                .join(" • ");
-                                            if !cats_text.is_empty() {
-                                                ui.label(
-                                                    egui::RichText::new(cats_text)
-                                                        .small()
-                                                        .color(text_muted()),
+                                                badge(
+                                                    ui,
+                                                    tr(self.settings.language, "mr.installed"),
+                                                    true,
                                                 );
                                             }
                                         });
-                                    },
-                                );
-
-                                ui.allocate_ui_with_layout(
-                                    Vec2::new(action_w, 72.0),
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.0;
-                                        if ui_icon_button(
-                                            ui,
-                                            ("mr_ext_w", &hit.project_id),
-                                            Icon::External,
-                                            hit.source.label(),
-                                            ButtonVariant::Subtle,
-                                            true,
-                                            30.0,
-                                        )
-                                        .clicked()
-                                        {
-                                            let url = hit.website_url.clone().unwrap_or_else(|| {
-                                                format!(
-                                                    "https://modrinth.com/{}/{}",
-                                                    mr_type.api_str(),
-                                                    hit.project_id
-                                                )
-                                            });
-                                            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 28.0);
-                                            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
-                                        }
-                                        if ui_icon_button(
-                                            ui,
-                                            ("mr_vers_w", &hit.project_id),
-                                            Icon::List,
-                                            tr(self.settings.language, "mr.browse_versions"),
-                                            ButtonVariant::Subtle,
-                                            true,
-                                            30.0,
-                                        )
-                                        .clicked()
-                                        {
-                                            open_detail = Some(hit.clone());
-                                        }
-                                        if is_this_installing {
-                                            ui.allocate_ui_with_layout(
-                                                Vec2::new(btn_w, 30.0),
-                                                egui::Layout::centered_and_justified(
-                                                    egui::Direction::LeftToRight,
-                                                ),
-                                                |ui| mono_spinner(ui, 18.0),
-                                            );
-                                        } else if ui_button_sized(
-                                            ui,
-                                            ("mr_inst_w", &hit.project_id),
-                                            Some(btn_icon),
-                                            btn_lbl,
-                                            btn_variant,
-                                            !mr_installing,
-                                            Vec2::new(btn_w, 30.0),
-                                        )
-                                        .clicked()
-                                        {
-                                            install_req = Some((
-                                                hit.project_id.clone(),
-                                                hit.title.clone(),
-                                                hit.icon_url.clone(),
-                                            ));
-                                        }
-                                    },
-                                );
-                            },
-                        );
-                    } else {
-                        let icon_px = 42.0;
-                        let info_w = (card_inner_w - icon_px - 10.0).max(80.0);
-                        ui_toolbar_row(ui, 44.0, |ui| {
-                            let icon_size = Vec2::splat(icon_px);
-                            if let Some(tex) = tex_opt {
-                                ui.add(
-                                    egui::Image::new(tex)
-                                        .fit_to_exact_size(icon_size)
-                                        .rounding(Rounding::same(9.0)),
-                                );
-                            } else {
-                                let (rect, _) = ui.allocate_exact_size(icon_size, Sense::hover());
-                                draw_icon_placeholder(
-                                    ui,
-                                    rect,
-                                    9.0,
-                                    &hit.title,
-                                    is_icon_loading,
-                                );
-                            }
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(info_w, 42.0),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    ui_toolbar_row(ui, 20.0, |ui| {
-                                        let badge_w = if is_installed { 72.0 } else { 0.0 }
-                                            + if hit.source == ProjectSource::CurseForge { 36.0 } else { 0.0 };
-                                        ui.allocate_ui(
-                                            Vec2::new((info_w - badge_w).max(40.0), 20.0),
-                                            |ui| {
-                                                let title_id = ui.make_persistent_id(("mr_title_n", &hit.project_id));
-                                                let prev_hov = ui.ctx().data(|d| d.get_temp::<bool>(title_id)).unwrap_or(false);
-                                                let title_hov = ui.ctx().animate_bool_with_time(title_id.with("h"), prev_hov, 0.11);
-                                                if title_hov > 0.01 && title_hov < 0.99 {
-                                                    ui.ctx().request_repaint();
-                                                }
-                                                let title_col = lerp_color(text_primary(), accent_text(), title_hov);
-                                                let title_resp = ui
-                                                    .add(
-                                                        egui::Label::new(
-                                                            egui::RichText::new(&hit.title)
-                                                                .strong()
-                                                                .color(title_col),
-                                                        )
-                                                        .truncate()
-                                                        .sense(Sense::click()),
-                                                    )
-                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                                    .on_hover_text(
-                                                        tr(self.settings.language, "mr.click_versions"),
-                                                    );
-                                                ui.ctx().data_mut(|d| d.insert_temp(title_id, title_resp.hovered()));
-                                                if title_resp.clicked() {
-                                                    open_detail = Some(hit.clone());
-                                                }
-                                            },
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(format!(
+                                                    "{} • {}",
+                                                    format_downloads(hit.downloads),
+                                                    hit.author
+                                                ))
+                                                .small()
+                                                .color(text_muted()),
+                                            )
+                                            .truncate(),
                                         );
-                                        if hit.source == ProjectSource::CurseForge {
-                                            badge(ui, "CF", false);
-                                        }
-                                        if is_installed {
-                                            badge(ui, tr(self.settings.language, "mr.installed"), true);
-                                        }
-                                    });
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(format!(
-                                                "{} • {}",
-                                                format_downloads(hit.downloads),
-                                                hit.author
-                                            ))
-                                            .small()
-                                            .color(text_muted()),
-                                        )
-                                        .truncate(),
-                                    );
-                                },
+                                    },
+                                );
+                            });
+                            ui.add_space(5.0);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(clamp_summary(&hit.description, 90))
+                                        .small()
+                                        .color(text_secondary()),
+                                )
+                                .wrap(),
                             );
-                        });
-                        ui.add_space(5.0);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(clamp_summary(&hit.description, 90))
-                                    .small()
-                                    .color(text_secondary()),
-                            )
-                            .wrap(),
-                        );
-                        ui.add_space(6.0);
-                        ui_toolbar_row(ui, 30.0, |ui| {
-                            if is_this_installing {
-                                mono_spinner(ui, 16.0);
-                            } else if ui_button_sized(
-                                ui,
-                                ("mr_inst_n", &hit.project_id),
-                                Some(btn_icon),
-                                btn_lbl,
-                                btn_variant,
-                                !mr_installing,
-                                Vec2::new((card_inner_w - 44.0).max(60.0), 30.0),
-                            )
-                            .clicked()
-                            {
-                                install_req = Some((
-                                    hit.project_id.clone(),
-                                    hit.title.clone(),
-                                    hit.icon_url.clone(),
-                                ));
-                            }
-                            if ui_icon_button(
-                                ui,
-                                ("mr_vers_n", &hit.project_id),
-                                Icon::List,
-                                tr(self.settings.language, "mr.browse_versions"),
-                                ButtonVariant::Subtle,
-                                true,
-                                30.0,
-                            )
-                            .clicked()
-                            {
-                                open_detail = Some(hit.clone());
-                            }
-                        });
-                    }
-                });
-                ui.add_space(6.0);
-            }
+                            ui.add_space(6.0);
+                            ui_toolbar_row(ui, 30.0, |ui| {
+                                if is_this_installing {
+                                    mono_spinner(ui, 16.0);
+                                } else if ui_button_sized(
+                                    ui,
+                                    ("mr_inst_n", &hit.project_id),
+                                    Some(btn_icon),
+                                    btn_lbl,
+                                    btn_variant,
+                                    !mr_installing,
+                                    Vec2::new((card_inner_w - 44.0).max(60.0), 30.0),
+                                )
+                                .clicked()
+                                {
+                                    install_req = Some((
+                                        hit.project_id.clone(),
+                                        hit.title.clone(),
+                                        hit.icon_url.clone(),
+                                    ));
+                                }
+                                if ui_icon_button(
+                                    ui,
+                                    ("mr_vers_n", &hit.project_id),
+                                    Icon::List,
+                                    tr(self.settings.language, "mr.browse_versions"),
+                                    ButtonVariant::Subtle,
+                                    true,
+                                    30.0,
+                                )
+                                .clicked()
+                                {
+                                    open_detail = Some(hit.clone());
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
 
-            if !self.mr_results.is_empty() && self.mr_has_more {
-                ui.add_space(4.0);
-                ui_wrap_row(ui, 30.0, |ui| {
-                    if ui_button_icon(
-                        ui,
-                        "mr_load_more_btn",
-                        Some(Icon::Plus),
-                        tr(self.settings.language, "btn.load_more"),
-                        ButtonVariant::Secondary,
-                        !self.mr_searching,
-                        30.0,
-                    )
-                    .clicked()
-                    {
-                        load_more = true;
-                    }
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} {}",
-                            self.mr_results.len(),
-                            tr(self.settings.language, "mr.compatible"),
-                        ))
-                        .small()
-                        .color(text_muted()),
-                    );
-                });
-            }
-        });
+                if !self.mr_results.is_empty() && self.mr_has_more {
+                    ui.add_space(4.0);
+                    ui_wrap_row(ui, 30.0, |ui| {
+                        if ui_button_icon(
+                            ui,
+                            "mr_load_more_btn",
+                            Some(Icon::Plus),
+                            tr(self.settings.language, "btn.load_more"),
+                            ButtonVariant::Secondary,
+                            !self.mr_searching,
+                            30.0,
+                        )
+                        .clicked()
+                        {
+                            load_more = true;
+                        }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} {}",
+                                self.mr_results.len(),
+                                tr(self.settings.language, "mr.compatible"),
+                            ))
+                            .small()
+                            .color(text_muted()),
+                        );
+                    });
+                }
+            });
         });
 
         if open_inst_settings_req {
@@ -1386,6 +1561,7 @@ impl McLauncherApp {
         }
 
         if let Some((project_id, title, icon_url)) = install_req {
+            reset_download_cancel();
             anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 34.0);
             if let Some(srv) = target_server.or_else(|| {
                 if mr_type == ModrinthProjectType::Plugin {
@@ -1401,16 +1577,31 @@ impl McLauncherApp {
                 self.progress = 0.05;
                 let paths = self.paths.clone();
                 let tx = self.tx.clone();
+                let cf_key = self.settings.curseforge_api_key.clone();
                 thread::spawn(move || {
-                    let res = install_server_project(
-                        &paths,
-                        &srv,
-                        &project_id,
-                        mr_type,
-                        &title,
-                        icon_url.as_deref(),
-                        &tx,
-                    );
+                    let res = if let Some(cf_mod_id) = parse_cf_project_id(&project_id) {
+                        install_curseforge_server_project(
+                            &cf_key,
+                            &paths,
+                            &srv,
+                            cf_mod_id,
+                            mr_type,
+                            &title,
+                            icon_url.as_deref(),
+                            None,
+                            &tx,
+                        )
+                    } else {
+                        install_server_project(
+                            &paths,
+                            &srv,
+                            &project_id,
+                            mr_type,
+                            &title,
+                            icon_url.as_deref(),
+                            &tx,
+                        )
+                    };
                     let _ = tx.send(WorkerEvent::ServerProjectInstalled(res));
                 });
             } else if let Some(profile) = self.profiles.get(self.selected_idx).cloned() {

@@ -4,33 +4,33 @@ use eframe::egui::{self, Color32, Pos2, Rect, Rounding, Stroke, Vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
-    Grid,       // Instances / Library
-    Layers,     // My Mods / Content
-    Compass,    // Discover / Modrinth
-    Sliders,    // Instance Settings
-    Terminal,   // Console / Logs
-    User,       // Accounts
-    Play,       // Launch triangle
-    Stop,       // Stop square
-    Plus,       // Create / Add
-    Search,     // Magnifying glass
-    Close,      // X / Remove / Clear
-    Check,      // Checkmark
-    Folder,     // Folder
+    Grid,     // Instances / Library
+    Layers,   // My Mods / Content
+    Compass,  // Discover / Modrinth
+    Sliders,  // Instance Settings
+    Terminal, // Console / Logs
+    User,     // Accounts
+    Play,     // Launch triangle
+    Stop,     // Stop square
+    Plus,     // Create / Add
+    Search,   // Magnifying glass
+    Close,    // X / Remove / Clear
+    Check,    // Checkmark
+    Folder,   // Folder
     ChevronLeft,
     #[allow(dead_code)]
     ChevronRight,
-    Download,   // Download arrow
-    Refresh,    // Reload / Rescan
-    Copy,       // Copy to clipboard
-    External,   // External link
-    Duplicate,  // Clone instance
-    Alert,      // Warning / Error triangle or circle
-    Trash,      // Delete bin
-    Sparkle,    // Modrinth / Featured
-    List,       // List view toggle
-    Star,       // Pin / Favorite
-    Server,     // Dedicated servers
+    Download,  // Download arrow
+    Refresh,   // Reload / Rescan
+    Copy,      // Copy to clipboard
+    External,  // External link
+    Duplicate, // Clone instance
+    Alert,     // Warning / Error triangle or circle
+    Trash,     // Delete bin
+    Sparkle,   // Modrinth / Featured
+    List,      // List view toggle
+    Star,      // Pin / Favorite
+    Server,    // Dedicated servers
 }
 
 /// Draws a crisp vector icon centered inside `rect` with `color`.
@@ -209,22 +209,34 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
         Icon::ChevronLeft => {
             let r = u * 0.42;
             painter.line_segment(
-                [Pos2::new(c.x + r * 0.45, c.y - r), Pos2::new(c.x - r * 0.55, c.y)],
+                [
+                    Pos2::new(c.x + r * 0.45, c.y - r),
+                    Pos2::new(c.x - r * 0.55, c.y),
+                ],
                 st,
             );
             painter.line_segment(
-                [Pos2::new(c.x - r * 0.55, c.y), Pos2::new(c.x + r * 0.45, c.y + r)],
+                [
+                    Pos2::new(c.x - r * 0.55, c.y),
+                    Pos2::new(c.x + r * 0.45, c.y + r),
+                ],
                 st,
             );
         }
         Icon::ChevronRight => {
             let r = u * 0.42;
             painter.line_segment(
-                [Pos2::new(c.x - r * 0.45, c.y - r), Pos2::new(c.x + r * 0.55, c.y)],
+                [
+                    Pos2::new(c.x - r * 0.45, c.y - r),
+                    Pos2::new(c.x + r * 0.55, c.y),
+                ],
                 st,
             );
             painter.line_segment(
-                [Pos2::new(c.x + r * 0.55, c.y), Pos2::new(c.x - r * 0.45, c.y + r)],
+                [
+                    Pos2::new(c.x + r * 0.55, c.y),
+                    Pos2::new(c.x - r * 0.45, c.y + r),
+                ],
                 st,
             );
         }
@@ -238,7 +250,10 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             let tray_y = c.y + u * 0.58;
             let tw = u * 0.62;
             painter.line_segment(
-                [Pos2::new(c.x - tw, tray_y - u * 0.16), Pos2::new(c.x - tw, tray_y)],
+                [
+                    Pos2::new(c.x - tw, tray_y - u * 0.16),
+                    Pos2::new(c.x - tw, tray_y),
+                ],
                 st,
             );
             painter.line_segment(
@@ -246,7 +261,10 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
                 st,
             );
             painter.line_segment(
-                [Pos2::new(c.x + tw, tray_y), Pos2::new(c.x + tw, tray_y - u * 0.16)],
+                [
+                    Pos2::new(c.x + tw, tray_y),
+                    Pos2::new(c.x + tw, tray_y - u * 0.16),
+                ],
                 st,
             );
         }
@@ -265,22 +283,14 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             }
             // Arrowhead at start_ang
             let tip = Pos2::new(c.x + start_ang.cos() * rad, c.y + start_ang.sin() * rad);
-            painter.line_segment(
-                [tip, Pos2::new(tip.x - u * 0.30, tip.y - u * 0.08)],
-                st,
-            );
-            painter.line_segment(
-                [tip, Pos2::new(tip.x + u * 0.04, tip.y - u * 0.32)],
-                st,
-            );
+            painter.line_segment([tip, Pos2::new(tip.x - u * 0.30, tip.y - u * 0.08)], st);
+            painter.line_segment([tip, Pos2::new(tip.x + u * 0.04, tip.y - u * 0.32)], st);
         }
         Icon::Copy => {
             let sz = s * 0.52;
             let r = Rounding::same((s * 0.09).max(1.5));
-            let front = Rect::from_min_size(
-                Pos2::new(c.x - u * 0.54, c.y - u * 0.24),
-                Vec2::splat(sz),
-            );
+            let front =
+                Rect::from_min_size(Pos2::new(c.x - u * 0.54, c.y - u * 0.24), Vec2::splat(sz));
             painter.rect_stroke(front, r, st);
             let b_min = Pos2::new(c.x - u * 0.16, c.y - u * 0.58);
             let b_max = Pos2::new(b_min.x + sz, b_min.y + sz);
@@ -302,15 +312,11 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
         Icon::Duplicate => {
             let sz = s * 0.52;
             let r = Rounding::same((s * 0.09).max(1.5));
-            let back = Rect::from_min_size(
-                Pos2::new(c.x - u * 0.56, c.y - u * 0.56),
-                Vec2::splat(sz),
-            );
+            let back =
+                Rect::from_min_size(Pos2::new(c.x - u * 0.56, c.y - u * 0.56), Vec2::splat(sz));
             painter.rect_stroke(back, r, st);
-            let front = Rect::from_min_size(
-                Pos2::new(c.x - u * 0.08, c.y - u * 0.08),
-                Vec2::splat(sz),
-            );
+            let front =
+                Rect::from_min_size(Pos2::new(c.x - u * 0.08, c.y - u * 0.08), Vec2::splat(sz));
             painter.rect_stroke(front, r, st);
         }
         Icon::Alert => {
@@ -321,10 +327,17 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             painter.line_segment([right, left], st);
             painter.line_segment([left, top], st);
             painter.line_segment(
-                [Pos2::new(c.x, c.y - u * 0.22), Pos2::new(c.x, c.y + u * 0.16)],
+                [
+                    Pos2::new(c.x, c.y - u * 0.22),
+                    Pos2::new(c.x, c.y + u * 0.16),
+                ],
                 st,
             );
-            painter.circle_filled(Pos2::new(c.x, c.y + u * 0.36), (stroke_w * 0.65).max(1.0), color);
+            painter.circle_filled(
+                Pos2::new(c.x, c.y + u * 0.36),
+                (stroke_w * 0.65).max(1.0),
+                color,
+            );
         }
         Icon::Trash => {
             let top_y = c.y - u * 0.42;
@@ -332,7 +345,10 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             let w = u * 0.52;
             // Lid
             painter.line_segment(
-                [Pos2::new(c.x - w * 1.2, top_y), Pos2::new(c.x + w * 1.2, top_y)],
+                [
+                    Pos2::new(c.x - w * 1.2, top_y),
+                    Pos2::new(c.x + w * 1.2, top_y),
+                ],
                 st,
             );
             painter.line_segment(
@@ -441,7 +457,10 @@ pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
         rect,
         rounding,
         Color32::from_rgb(30, 21, 46),
-        Stroke::new(1.25_f32, Color32::from_rgba_unmultiplied(sun_gold.r(), sun_gold.g(), sun_gold.b(), 190)),
+        Stroke::new(
+            1.25_f32,
+            Color32::from_rgba_unmultiplied(sun_gold.r(), sun_gold.g(), sun_gold.b(), 190),
+        ),
     );
 
     let c = Pos2::new(rect.center().x, rect.center().y + s * 0.03);
@@ -555,13 +574,19 @@ pub fn draw_icon_animated(
             }
             let tip = Pos2::new(c.x + start_ang.cos() * rad, c.y + start_ang.sin() * rad);
             let wing_a = rot_pos(
-                Pos2::new(c.x + (-0.35_f32).cos() * rad - u * 0.30, c.y + (-0.35_f32).sin() * rad - u * 0.08),
+                Pos2::new(
+                    c.x + (-0.35_f32).cos() * rad - u * 0.30,
+                    c.y + (-0.35_f32).sin() * rad - u * 0.08,
+                ),
                 c,
                 sin_a,
                 cos_a,
             );
             let wing_b = rot_pos(
-                Pos2::new(c.x + (-0.35_f32).cos() * rad + u * 0.04, c.y + (-0.35_f32).sin() * rad - u * 0.32),
+                Pos2::new(
+                    c.x + (-0.35_f32).cos() * rad + u * 0.04,
+                    c.y + (-0.35_f32).sin() * rad - u * 0.32,
+                ),
                 c,
                 sin_a,
                 cos_a,
@@ -615,7 +640,10 @@ pub fn draw_icon_animated(
                 Pos2::new(c.x - r, c.y),
                 Pos2::new(c.x - inner, c.y - inner),
             ];
-            let pts: Vec<Pos2> = base.into_iter().map(|p| rot_pos(p, c, sin_a, cos_a)).collect();
+            let pts: Vec<Pos2> = base
+                .into_iter()
+                .map(|p| rot_pos(p, c, sin_a, cos_a))
+                .collect();
             for i in 0..8 {
                 painter.line_segment([pts[i], pts[(i + 1) % 8]], st);
             }
@@ -639,7 +667,10 @@ pub fn draw_icon_animated(
             let w = u * 0.52;
             let r_pt = |p: Pos2| rot_pos(p, c, sin_a, cos_a);
             painter.line_segment(
-                [r_pt(Pos2::new(c.x - w * 1.2, top_y)), r_pt(Pos2::new(c.x + w * 1.2, top_y))],
+                [
+                    r_pt(Pos2::new(c.x - w * 1.2, top_y)),
+                    r_pt(Pos2::new(c.x + w * 1.2, top_y)),
+                ],
                 st,
             );
             painter.line_segment(
@@ -685,7 +716,10 @@ pub fn draw_brand_logo_animated(
 ) {
     let pop = click_t.map_or(0.0, |t| (t * std::f32::consts::PI).sin());
     let s = rect.width().min(rect.height());
-    let draw_rect = Rect::from_center_size(rect.center(), rect.size() * (1.0 + hover_t * 0.04 + pop * 0.08));
+    let draw_rect = Rect::from_center_size(
+        rect.center(),
+        rect.size() * (1.0 + hover_t * 0.04 + pop * 0.08),
+    );
     if hover_t > 0.02 {
         let halo_a = (hover_t * 48.0).round() as u8;
         painter.rect_filled(
@@ -703,7 +737,10 @@ pub fn draw_brand_logo_animated(
             painter.rect_stroke(
                 draw_rect.expand(expand),
                 Rounding::same((s * 0.28 + expand * 0.4).clamp(7.0, 16.0)),
-                Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(255, 198, 92, ring_a)),
+                Stroke::new(
+                    1.5_f32,
+                    Color32::from_rgba_unmultiplied(255, 198, 92, ring_a),
+                ),
             );
         }
     }
@@ -761,10 +798,22 @@ pub fn draw_player_pixel_avatar(
     }
 
     let skin_palettes = [
-        (Color32::from_rgb(206, 156, 118), Color32::from_rgb(176, 126, 88)),
-        (Color32::from_rgb(235, 194, 158), Color32::from_rgb(204, 162, 126)),
-        (Color32::from_rgb(166, 112, 74), Color32::from_rgb(138, 88, 54)),
-        (Color32::from_rgb(112, 72, 48), Color32::from_rgb(88, 54, 34)),
+        (
+            Color32::from_rgb(206, 156, 118),
+            Color32::from_rgb(176, 126, 88),
+        ),
+        (
+            Color32::from_rgb(235, 194, 158),
+            Color32::from_rgb(204, 162, 126),
+        ),
+        (
+            Color32::from_rgb(166, 112, 74),
+            Color32::from_rgb(138, 88, 54),
+        ),
+        (
+            Color32::from_rgb(112, 72, 48),
+            Color32::from_rgb(88, 54, 34),
+        ),
     ];
     let hair_palettes = [
         Color32::from_rgb(66, 46, 32),
@@ -789,7 +838,10 @@ pub fn draw_player_pixel_avatar(
     let cell = rect.width() / 8.0;
     let draw_px = |gx: usize, gy: usize, col: Color32| {
         let r = Rect::from_min_size(
-            Pos2::new(rect.left() + gx as f32 * cell, rect.top() + gy as f32 * cell),
+            Pos2::new(
+                rect.left() + gx as f32 * cell,
+                rect.top() + gy as f32 * cell,
+            ),
             Vec2::splat(cell + 0.35),
         );
         painter.rect_filled(r, Rounding::ZERO, col);
@@ -822,7 +874,9 @@ pub fn draw_player_pixel_avatar(
     painter.rect_stroke(
         rect,
         rounding,
-        Stroke::new(1.1_f32, Color32::from_rgba_unmultiplied(accent_tint.r(), accent_tint.g(), accent_tint.b(), 170)),
+        Stroke::new(
+            1.1_f32,
+            Color32::from_rgba_unmultiplied(accent_tint.r(), accent_tint.g(), accent_tint.b(), 170),
+        ),
     );
 }
-

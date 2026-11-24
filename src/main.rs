@@ -1,22 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod auth;
-mod curseforge;
-mod discord;
-mod i18n;
-mod icons;
-mod launcher;
-mod models;
-mod modrinth;
-mod mojang;
-mod servers;
-mod storage;
-mod theme;
-mod ui;
-
 use eframe::egui;
-use storage::{get_launcher_paths, load_accounts, load_launcher_settings, load_profiles};
-use ui::McLauncherApp;
+use mc_launcher::auth;
+use mc_launcher::icons;
+use mc_launcher::storage::{
+    self, get_launcher_paths, load_accounts, load_launcher_settings, load_profiles,
+};
+use mc_launcher::theme;
+use mc_launcher::ui::McLauncherApp;
 
 fn main() -> eframe::Result<()> {
     auth::cleanup_stale_update_files();
@@ -61,9 +52,9 @@ fn main() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::launcher::offline_uuid;
-    use super::models::{OsRule, Rule};
-    use super::mojang::{current_os_name, maven_to_path, rules_allow};
+    use mc_launcher::launcher::offline_uuid;
+    use mc_launcher::models::{OsRule, Rule};
+    use mc_launcher::mojang::{current_os_name, maven_to_path, rules_allow};
 
     #[test]
     fn test_maven_to_path_basic() {
@@ -117,4 +108,3 @@ mod tests {
         assert!(!rules_allow(Some(&deny_rules)));
     }
 }
-

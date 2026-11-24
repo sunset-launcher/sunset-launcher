@@ -100,7 +100,7 @@ impl SecretBackend for OsKeyringBackend {
         #[cfg(test)]
         {
             let _ = (account_id, secret_json);
-            return false;
+            false
         }
         #[cfg(all(not(test), target_os = "linux"))]
         {
@@ -169,13 +169,11 @@ impl SecretBackend for OsKeyringBackend {
         #[cfg(test)]
         {
             let _ = account_id;
-            return None;
+            None
         }
         #[cfg(all(not(test), target_os = "linux"))]
         {
-            if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
-                return None;
-            }
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS")?;
             let out = std::process::Command::new("secret-tool")
                 .args([
                     "lookup",
@@ -236,13 +234,7 @@ impl SecretBackend for OsKeyringBackend {
         {
             if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() {
                 let _ = std::process::Command::new("secret-tool")
-                    .args([
-                        "clear",
-                        "service",
-                        "sunset-launcher",
-                        "account",
-                        account_id,
-                    ])
+                    .args(["clear", "service", "sunset-launcher", "account", account_id])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
@@ -587,11 +579,7 @@ fn is_dir_name_taken(
 }
 
 /// Picks a unique, human-readable folder name inside `instances/` for a profile.
-pub fn unique_instance_dir_name(
-    paths: &LauncherPaths,
-    name: &str,
-    existing: &[Profile],
-) -> String {
+pub fn unique_instance_dir_name(paths: &LauncherPaths, name: &str, existing: &[Profile]) -> String {
     unique_instance_dir_name_excluding(paths, name, existing, None)
 }
 
@@ -675,12 +663,8 @@ pub fn rename_instance_dir_for_profile(
     profile: &mut Profile,
     all_profiles: &[Profile],
 ) -> bool {
-    let target = unique_instance_dir_name_excluding(
-        paths,
-        &profile.name,
-        all_profiles,
-        Some(&profile.id),
-    );
+    let target =
+        unique_instance_dir_name_excluding(paths, &profile.name, all_profiles, Some(&profile.id));
     if profile.dir_name == target {
         return false;
     }
@@ -749,7 +733,26 @@ pub fn instance_dir(paths: &LauncherPaths, profile: &Profile) -> PathBuf {
         }
     };
     let _ = fs::create_dir_all(&dir);
+    if profile.loader.is_modded() {
+        let _ = fs::create_dir_all(dir.join("mods"));
+    }
     dir
+}
+
+/// Ensures the instance directory and its `mods/` subfolder exist on disk.
+pub fn ensure_instance_mods_dir(
+    paths: &LauncherPaths,
+    profile: &Profile,
+) -> Result<PathBuf, String> {
+    let inst = instance_dir(paths, profile);
+    let mods_dir = inst.join("mods");
+    fs::create_dir_all(&mods_dir).map_err(|e| {
+        format!(
+            "Failed to create mods directory {}: {e}",
+            mods_dir.display()
+        )
+    })?;
+    Ok(mods_dir)
 }
 
 /// Picks a unique, human-readable folder name inside `servers/` for a dedicated server.
@@ -1164,8 +1167,18 @@ mod tests {
         let paths = test_paths("selected_profile");
         assert_eq!(load_selected_profile_id(&paths), None);
 
-        let p1 = Profile::new("One".into(), "1.21.4".into(), ModLoader::Vanilla, "A".into());
-        let p2 = Profile::new("Two".into(), "1.20.1".into(), ModLoader::Vanilla, "B".into());
+        let p1 = Profile::new(
+            "One".into(),
+            "1.21.4".into(),
+            ModLoader::Vanilla,
+            "A".into(),
+        );
+        let p2 = Profile::new(
+            "Two".into(),
+            "1.20.1".into(),
+            ModLoader::Vanilla,
+            "B".into(),
+        );
         let profiles = vec![p1.clone(), p2.clone()];
 
         save_selected_profile_id(&paths, Some(&p2.id)).unwrap();
@@ -1196,8 +1209,7 @@ mod tests {
         assert!(bytes.len() > 22);
         assert_eq!(&bytes[0..6], &[0, 0, 1, 0, 5, 0]);
 
-        let decoded =
-            image::load_from_memory_with_format(&bytes, image::ImageFormat::Ico).unwrap();
+        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Ico).unwrap();
         assert_eq!(decoded.width(), 256);
         assert_eq!(decoded.height(), 256);
 
@@ -1254,16 +1266,32 @@ mod tests {
 
     #[test]
     fn sanitize_and_unique_instance_dir_names() {
-        assert_eq!(sanitize_instance_dir_name("My Instance 1.21"), "My Instance 1.21");
-        assert_eq!(sanitize_instance_dir_name("Ванилла / Тест: 1.21*"), "Ванилла - Тест- 1.21-");
+        assert_eq!(
+            sanitize_instance_dir_name("My Instance 1.21"),
+            "My Instance 1.21"
+        );
+        assert_eq!(
+            sanitize_instance_dir_name("Ванилла / Тест: 1.21*"),
+            "Ванилла - Тест- 1.21-"
+        );
         assert_eq!(sanitize_instance_dir_name("  ...  "), "instance");
         assert_eq!(sanitize_instance_dir_name("CON"), "CON_instance");
 
         let paths = test_paths("unique_names");
         fs::create_dir_all(paths.instances_dir.join("Survival")).unwrap();
-        let mut p1 = Profile::new("Survival".into(), "1.21.4".into(), ModLoader::Vanilla, "P".into());
+        let mut p1 = Profile::new(
+            "Survival".into(),
+            "1.21.4".into(),
+            ModLoader::Vanilla,
+            "P".into(),
+        );
         p1.dir_name = "Survival".into();
-        let p2 = Profile::new("Survival".into(), "1.21.4".into(), ModLoader::Vanilla, "P".into());
+        let p2 = Profile::new(
+            "Survival".into(),
+            "1.21.4".into(),
+            ModLoader::Vanilla,
+            "P".into(),
+        );
 
         assert_eq!(
             unique_instance_dir_name(&paths, &p2.name, &[p1]),
@@ -1278,7 +1306,12 @@ mod tests {
         let paths = test_paths("migrate_uuid_dir");
         fs::create_dir_all(&paths.instances_dir).unwrap();
 
-        let mut p = Profile::new("Fabric 1.21".into(), "1.21.4".into(), ModLoader::Vanilla, "P".into());
+        let mut p = Profile::new(
+            "Fabric 1.21".into(),
+            "1.21.4".into(),
+            ModLoader::Vanilla,
+            "P".into(),
+        );
         let legacy_dir = paths.instances_dir.join(&p.id);
         fs::create_dir_all(legacy_dir.join("mods")).unwrap();
         fs::write(legacy_dir.join("mods").join("sodium.jar"), b"jar").unwrap();
@@ -1289,19 +1322,37 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].dir_name, "Fabric 1.21");
         assert!(!legacy_dir.exists());
-        assert!(paths.instances_dir.join("Fabric 1.21").join("mods").join("sodium.jar").is_file());
+        assert!(paths
+            .instances_dir
+            .join("Fabric 1.21")
+            .join("mods")
+            .join("sodium.jar")
+            .is_file());
         assert_eq!(
             loaded[0].icon_path,
-            paths.instances_dir.join("Fabric 1.21").join("icon.png").to_string_lossy()
+            paths
+                .instances_dir
+                .join("Fabric 1.21")
+                .join("icon.png")
+                .to_string_lossy()
         );
 
         loaded[0].name = "Better Fabric".into();
         assert!(rename_instance_dir_for_profile(&paths, &mut loaded[0], &[]));
         assert_eq!(loaded[0].dir_name, "Better Fabric");
-        assert!(paths.instances_dir.join("Better Fabric").join("mods").join("sodium.jar").is_file());
+        assert!(paths
+            .instances_dir
+            .join("Better Fabric")
+            .join("mods")
+            .join("sodium.jar")
+            .is_file());
         assert_eq!(
             loaded[0].icon_path,
-            paths.instances_dir.join("Better Fabric").join("icon.png").to_string_lossy()
+            paths
+                .instances_dir
+                .join("Better Fabric")
+                .join("icon.png")
+                .to_string_lossy()
         );
 
         let _ = fs::remove_dir_all(&paths.root);
@@ -1370,7 +1421,11 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&paths.accounts_file).unwrap().permissions().mode() & 0o777;
+            let mode = fs::metadata(&paths.accounts_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(mode, 0o600);
         }
 
@@ -1382,5 +1437,37 @@ mod tests {
 
         let _ = fs::remove_dir_all(&paths.root);
     }
-}
 
+    #[test]
+    fn instance_dir_auto_creates_mods_folder_for_modded_profiles() {
+        let paths = test_paths("auto_mods_dir");
+        let mut modded = Profile::new(
+            "Fabric Test".into(),
+            "1.21.4".into(),
+            ModLoader::Fabric {
+                loader_version: String::new(),
+            },
+            "Player".into(),
+        );
+        modded.dir_name = "Fabric Test".into();
+        let inst = instance_dir(&paths, &modded);
+        assert!(inst.is_dir());
+        assert!(inst.join("mods").is_dir());
+
+        let mut vanilla = Profile::new(
+            "Vanilla Test".into(),
+            "1.21.4".into(),
+            ModLoader::Vanilla,
+            "Player".into(),
+        );
+        vanilla.dir_name = "Vanilla Test".into();
+        let v_inst = instance_dir(&paths, &vanilla);
+        assert!(v_inst.is_dir());
+        assert!(!v_inst.join("mods").exists());
+
+        let ensured = ensure_instance_mods_dir(&paths, &vanilla).unwrap();
+        assert!(ensured.is_dir());
+
+        let _ = fs::remove_dir_all(&paths.root);
+    }
+}

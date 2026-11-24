@@ -46,8 +46,7 @@ const MS_DEVICE_CODE_URL: &str =
 const MS_TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const XBL_AUTH_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";
 const XSTS_AUTH_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
-const MC_LOGIN_XBOX_URL: &str =
-    "https://api.minecraftservices.com/authentication/login_with_xbox";
+const MC_LOGIN_XBOX_URL: &str = "https://api.minecraftservices.com/authentication/login_with_xbox";
 const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 const ELY_AUTH_URL: &str = "https://authserver.ely.by/auth/authenticate";
 const ELY_VALIDATE_URL: &str = "https://authserver.ely.by/auth/validate";
@@ -498,7 +497,13 @@ pub fn account_skin_cache_key(account: &Account) -> String {
         AccountKind::Offline => format!("off_{}", account.username.to_lowercase()),
     };
     raw.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -557,7 +562,14 @@ struct SkinRef {
 fn fetch_mojang_skin_url(client: &reqwest::blocking::Client, uuid: &str) -> Option<String> {
     let clean = uuid.replace('-', "");
     let url = format!("https://sessionserver.mojang.com/session/minecraft/profile/{clean}");
-    let resp: SessionProfileResp = client.get(&url).send().ok()?.error_for_status().ok()?.json().ok()?;
+    let resp: SessionProfileResp = client
+        .get(&url)
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .ok()?;
     let prop = resp.properties.into_iter().find(|p| p.name == "textures")?;
     let decoded = decode_base64_str(&prop.value)?;
     let parsed: TexturesPayload = serde_json::from_slice(&decoded).ok()?;
@@ -653,7 +665,11 @@ pub fn decode_skin_head_and_body(png_bytes: &[u8]) -> Result<(IconImage, IconIma
         .map_err(|e| format!("Invalid skin image: {e}"))?
         .to_rgba8();
     if img.width() < 64 || img.height() < 32 {
-        return Err(format!("Unsupported skin dimensions {}x{}", img.width(), img.height()));
+        return Err(format!(
+            "Unsupported skin dimensions {}x{}",
+            img.width(),
+            img.height()
+        ));
     }
     let modern = img.height() >= 64;
 
@@ -774,6 +790,8 @@ struct GithubAsset {
     browser_download_url: String,
     #[serde(default)]
     size: u64,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -784,6 +802,63 @@ struct GithubReleaseResp {
     body: String,
     #[serde(default)]
     assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateInstallMode {
+    Standalone,
+    AppImage,
+    ReadOnlyPackage,
+}
+
+fn is_dir_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".sunset-write-probe-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn detect_update_target() -> Result<(UpdateInstallMode, PathBuf), String> {
+    if let Some(appimage) = std::env::var_os("APPIMAGE").filter(|v| !v.is_empty()) {
+        let path = PathBuf::from(appimage);
+        let writable = path.parent().is_some_and(is_dir_writable);
+        let mode = if writable {
+            UpdateInstallMode::AppImage
+        } else {
+            UpdateInstallMode::ReadOnlyPackage
+        };
+        return Ok((mode, path));
+    }
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Failed to locate current executable: {e}"))?;
+    let writable = exe_path.parent().is_some_and(is_dir_writable);
+    let mode = if writable {
+        UpdateInstallMode::Standalone
+    } else {
+        UpdateInstallMode::ReadOnlyPackage
+    };
+    Ok((mode, exe_path))
+}
+
+fn select_appimage_asset<'a>(assets: &'a [GithubAsset], arch: &str) -> Option<&'a GithubAsset> {
+    let arch_tokens: &[&str] = match arch {
+        "x86_64" => &["x86_64", "x64", "amd64"],
+        "aarch64" => &["aarch64", "arm64"],
+        _ => &[],
+    };
+    assets.iter().find(|a| {
+        let lower = a.name.to_ascii_lowercase();
+        lower.ends_with(".appimage")
+            && (arch_tokens.is_empty() || arch_tokens.iter().any(|t| lower.contains(t)))
+    })
 }
 
 fn select_release_asset<'a>(
@@ -824,8 +899,19 @@ fn select_release_asset<'a>(
     for a in assets {
         let lower = a.name.to_ascii_lowercase();
         if [
-            ".sha256", ".sha512", ".sig", ".asc", ".txt", ".json", ".deb", ".rpm", ".dmg",
-            ".msi", ".appimage", "-setup.exe", "installer.exe",
+            ".sha256",
+            ".sha512",
+            ".sig",
+            ".asc",
+            ".txt",
+            ".json",
+            ".deb",
+            ".rpm",
+            ".dmg",
+            ".msi",
+            ".appimage",
+            "-setup.exe",
+            "installer.exe",
         ]
         .iter()
         .any(|ext| lower.ends_with(ext))
@@ -879,8 +965,8 @@ fn verify_executable_magic(head: &[u8], is_zip: bool, os: &str) -> Result<(), St
 fn extract_binary_from_zip(zip_path: &Path, dest_path: &Path, os: &str) -> Result<(), String> {
     let file = std::fs::File::open(zip_path)
         .map_err(|e| format!("Failed to open update archive {}: {e}", zip_path.display()))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| format!("Failed to read update archive: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read update archive: {e}"))?;
 
     let mut chosen_idx: Option<(u64, usize)> = None;
     for idx in 0..archive.len() {
@@ -1075,7 +1161,9 @@ pub fn parse_sha256_digest(text: &str) -> Option<String> {
 }
 
 /// Checks GitHub Releases (`sunset-launcher/sunset-launcher`) for a newer version than `current_version`.
-pub fn check_github_latest_release(current_version: &str) -> Result<Option<LauncherUpdateInfo>, String> {
+pub fn check_github_latest_release(
+    current_version: &str,
+) -> Result<Option<LauncherUpdateInfo>, String> {
     let client = build_http_client()?;
     let resp = client
         .get("https://api.github.com/repos/sunset-launcher/sunset-launcher/releases/latest")
@@ -1091,18 +1179,30 @@ pub fn check_github_latest_release(current_version: &str) -> Result<Option<Launc
         .json()
         .map_err(|e| format!("Invalid GitHub release payload: {e}"))?;
     if is_newer_semver(&rel.tag_name, current_version) {
-        let asset = select_release_asset(
-            &rel.assets,
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-        );
+        let mode = detect_update_target()
+            .map(|(m, _)| m)
+            .unwrap_or(UpdateInstallMode::Standalone);
+        let asset = match mode {
+            UpdateInstallMode::AppImage => {
+                select_appimage_asset(&rel.assets, std::env::consts::ARCH)
+            }
+            UpdateInstallMode::Standalone => {
+                select_release_asset(&rel.assets, std::env::consts::OS, std::env::consts::ARCH)
+            }
+            UpdateInstallMode::ReadOnlyPackage => None,
+        };
         let sha256_url = asset.and_then(|a| find_sha256_asset_url(&rel.assets, &a.name));
+        let sha256_digest = asset
+            .and_then(|a| a.digest.as_deref())
+            .and_then(|d| d.strip_prefix("sha256:").or(Some(d)))
+            .and_then(parse_sha256_digest);
         Ok(Some(LauncherUpdateInfo {
             version: rel.tag_name,
             html_url: rel.html_url,
             notes: rel.body,
             download_url: asset.map(|a| a.browser_download_url.clone()),
             sha256_url,
+            sha256_digest,
             asset_name: asset.map(|a| a.name.clone()),
             asset_size: asset.and_then(|a| (a.size > 0).then_some(a.size)),
         }))
@@ -1121,8 +1221,13 @@ pub fn download_and_apply_update(
         .download_url
         .as_deref()
         .ok_or_else(|| "No downloadable binary asset found for this platform".to_string())?;
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to locate current executable: {e}"))?;
+    let (mode, exe_path) = detect_update_target()?;
+    if mode == UpdateInstallMode::ReadOnlyPackage {
+        return Err(
+            "This installation is in a system-managed directory. Download the latest package from GitHub Releases."
+                .to_string(),
+        );
+    }
     let exe_dir = exe_path
         .parent()
         .ok_or_else(|| "Cannot determine launcher directory".to_string())?;
@@ -1136,7 +1241,10 @@ pub fn download_and_apply_update(
     std::fs::create_dir_all(&updates_dir)
         .map_err(|e| format!("Failed to create updates folder: {e}"))?;
 
-    let asset_name = info.asset_name.as_deref().unwrap_or("sunset-launcher-update");
+    let asset_name = info
+        .asset_name
+        .as_deref()
+        .unwrap_or("sunset-launcher-update");
     let is_zip = asset_name.to_ascii_lowercase().ends_with(".zip");
     let dl_path = updates_dir.join(format!("download-{asset_name}"));
 
@@ -1150,7 +1258,9 @@ pub fn download_and_apply_update(
         .timeout(Duration::from_secs(180))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
-    let expected_sha256 = if let Some(sha_url) = info.sha256_url.as_deref() {
+    let expected_sha256 = if let Some(digest) = info.sha256_digest.clone() {
+        Some(digest)
+    } else if let Some(sha_url) = info.sha256_url.as_deref() {
         let sha_text = client
             .get(sha_url)
             .send()
@@ -1199,8 +1309,8 @@ pub fn download_and_apply_update(
             .write_all(&buf[..n])
             .map_err(|e| format!("Failed to write update file: {e}"))?;
         downloaded += n as u64;
-        if expected_total > 0 {
-            let pct = ((downloaded * 80) / expected_total).min(80) as u8;
+        if let Some(pct) = (downloaded * 80).checked_div(expected_total) {
+            let pct = pct.min(80) as u8;
             if pct >= last_pct + 4 {
                 last_pct = pct;
                 let _ = tx.send(WorkerEvent::Progress {
@@ -1274,10 +1384,7 @@ pub fn download_and_apply_update(
         let _ = std::fs::remove_file(&staged_path);
         let _ = std::fs::remove_file(&dl_path);
         let _ = std::fs::remove_file(&extracted_path);
-        return Err(format!(
-            "Cannot write update to {}: {e}",
-            exe_dir.display()
-        ));
+        return Err(format!("Cannot write update to {}: {e}", exe_dir.display()));
     }
 
     if let Err(e) = replace_executable_file(&staged_path, &exe_path) {
@@ -1317,7 +1424,10 @@ mod tests {
         rgba.put_pixel(40, 8, image::Rgba([20, 20, 200, 128]));
         let mut png_bytes = Vec::new();
         image::DynamicImage::ImageRgba8(rgba)
-            .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
             .unwrap();
         let (head, body) = decode_skin_head_and_body(&png_bytes).unwrap();
         assert_eq!((head.width, head.height), (32, 32));
@@ -1332,16 +1442,19 @@ mod tests {
                 name: "svarka-launcher-linux-x64.sha256".to_string(),
                 browser_download_url: "https://example.invalid/linux.sha256".to_string(),
                 size: 64,
+                digest: None,
             },
             GithubAsset {
                 name: "svarka-launcher-linux-x64".to_string(),
                 browser_download_url: "https://example.invalid/linux-bin".to_string(),
                 size: 12_000_000,
+                digest: None,
             },
             GithubAsset {
                 name: "svarka-launcher-windows-x64.exe".to_string(),
                 browser_download_url: "https://example.invalid/win-bin".to_string(),
                 size: 13_000_000,
+                digest: None,
             },
         ];
         assert_eq!(
@@ -1362,36 +1475,43 @@ mod tests {
                 name: "sunset-launcher-linux-x64.sha256".to_string(),
                 browser_download_url: "https://example.invalid/sunset-linux.sha256".to_string(),
                 size: 64,
+                digest: None,
             },
             GithubAsset {
                 name: "sunset-launcher-0.1.8-1.x86_64.rpm".to_string(),
                 browser_download_url: "https://example.invalid/sunset-linux.rpm".to_string(),
                 size: 12_200_000,
+                digest: None,
             },
             GithubAsset {
                 name: "sunset-launcher-0.1.8-x86_64.AppImage".to_string(),
                 browser_download_url: "https://example.invalid/sunset-linux.AppImage".to_string(),
                 size: 14_000_000,
+                digest: None,
             },
             GithubAsset {
                 name: "sunset-launcher-macos-arm64.dmg".to_string(),
                 browser_download_url: "https://example.invalid/sunset-macos.dmg".to_string(),
                 size: 13_500_000,
+                digest: None,
             },
             GithubAsset {
                 name: "sunset-launcher-linux-x64".to_string(),
                 browser_download_url: "https://example.invalid/sunset-linux".to_string(),
                 size: 12_000_000,
+                digest: None,
             },
             GithubAsset {
                 name: "sunset-launcher-windows-x64-setup.exe".to_string(),
                 browser_download_url: "https://example.invalid/sunset-win-setup".to_string(),
                 size: 13_800_000,
+                digest: None,
             },
             GithubAsset {
                 name: "sunset-launcher-windows-x64.exe".to_string(),
                 browser_download_url: "https://example.invalid/sunset-win".to_string(),
                 size: 13_000_000,
+                digest: None,
             },
         ];
         assert_eq!(
@@ -1412,8 +1532,48 @@ mod tests {
             name: "sunset-launcher-windows-x64-setup.exe".to_string(),
             browser_download_url: "https://example.invalid/sunset-win-setup".to_string(),
             size: 13_800_000,
+            digest: None,
         }];
         assert!(select_release_asset(&setup_only, "windows", "x86_64").is_none());
+
+        let appimage_assets = vec![
+            GithubAsset {
+                name: "sunset-launcher-0.2.0-x86_64.AppImage.sha256".to_string(),
+                browser_download_url: "https://example.invalid/x64.AppImage.sha256".to_string(),
+                size: 96,
+                digest: None,
+            },
+            GithubAsset {
+                name: "sunset-launcher-0.2.0-x86_64.AppImage".to_string(),
+                browser_download_url: "https://example.invalid/x64.AppImage".to_string(),
+                size: 11_200_000,
+                digest: None,
+            },
+            GithubAsset {
+                name: "sunset-launcher-0.2.0-aarch64.AppImage".to_string(),
+                browser_download_url: "https://example.invalid/arm64.AppImage".to_string(),
+                size: 11_000_000,
+                digest: None,
+            },
+        ];
+        assert_eq!(
+            select_appimage_asset(&appimage_assets, "x86_64")
+                .unwrap()
+                .name,
+            "sunset-launcher-0.2.0-x86_64.AppImage"
+        );
+        assert_eq!(
+            select_appimage_asset(&appimage_assets, "aarch64")
+                .unwrap()
+                .name,
+            "sunset-launcher-0.2.0-aarch64.AppImage"
+        );
+
+        let tmp = std::env::temp_dir().join(format!("mc-writable-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(is_dir_writable(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(!is_dir_writable(&tmp));
     }
 
     #[test]
@@ -1438,7 +1598,8 @@ mod tests {
 
     #[test]
     fn test_windows_backup_fallback_and_stale_cleanup() {
-        let tmp_dir = std::env::temp_dir().join(format!("mc-win-updater-test-{}", std::process::id()));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("mc-win-updater-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         std::fs::create_dir_all(&tmp_dir).unwrap();
 
@@ -1498,16 +1659,22 @@ mod tests {
                 name: "sunset-launcher-macos-arm64".into(),
                 browser_download_url: "https://example.invalid/macos-arm64".into(),
                 size: 10_000_000,
+                digest: Some(
+                    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .into(),
+                ),
             },
             GithubAsset {
                 name: "sunset-launcher-macos-arm64.sha256".into(),
                 browser_download_url: "https://example.invalid/macos-arm64.sha256".into(),
                 size: 96,
+                digest: None,
             },
             GithubAsset {
                 name: "sunset-launcher-linux-arm64".into(),
                 browser_download_url: "https://example.invalid/linux-arm64".into(),
                 size: 11_000_000,
+                digest: None,
             },
         ];
         let mac = select_release_asset(&assets, "macos", "aarch64").unwrap();
@@ -1520,4 +1687,3 @@ mod tests {
         assert_eq!(linux_arm.name, "sunset-launcher-linux-arm64");
     }
 }
-

@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -70,10 +70,18 @@ pub fn build_http_client() -> Result<Client, String> {
         .map_err(|e| format!("Failed to create HTTP client: {e}"))
 }
 
+pub(crate) fn adaptive_download_concurrency(requested: usize) -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    let cap = (cpus * 4).clamp(8, 24);
+    requested.clamp(1, cap)
+}
+
 pub(crate) fn build_async_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(concat!("sunset-launcher/", env!("CARGO_PKG_VERSION")))
-        .pool_max_idle_per_host(64)
+        .pool_max_idle_per_host(24)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_nodelay(true)
         .connect_timeout(Duration::from_secs(15))
@@ -249,7 +257,11 @@ fn fetch_forge_versions(game_version: &str) -> Result<Vec<LoaderVersionEntry>, S
         .ok()
         .and_then(|r| r.error_for_status().ok())
         .and_then(|r| r.json::<ForgePromotions>().ok())
-        .and_then(|p| p.promos.get(&format!("{game_version}-recommended")).cloned());
+        .and_then(|p| {
+            p.promos
+                .get(&format!("{game_version}-recommended"))
+                .cloned()
+        });
 
     let versions = parse_maven_metadata_versions(&xml);
     Ok(filter_forge_versions(
@@ -360,8 +372,8 @@ pub fn rules_allow_with_features(rules: Option<&Vec<Rule>>, features: &RuleFeatu
         let os_matches = match &rule.os {
             None => true,
             Some(os) => {
-                let name_ok = os.name.as_deref().map_or(true, |n| n == os_name);
-                let arch_ok = os.arch.as_deref().map_or(true, |a| match a {
+                let name_ok = os.name.as_deref().is_none_or(|n| n == os_name);
+                let arch_ok = os.arch.as_deref().is_none_or(|a| match a {
                     "x86" => cfg!(target_arch = "x86"),
                     "x86_64" | "amd64" => cfg!(target_arch = "x86_64"),
                     "arm64" | "aarch64" => cfg!(target_arch = "aarch64"),
@@ -445,9 +457,71 @@ fn verify_sha1(path: &Path, expected_sha1: &str) -> bool {
 }
 
 fn tmp_part_path(dest: &Path) -> PathBuf {
-    let mut tmp_name = dest.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(".part");
-    dest.with_file_name(tmp_name)
+    static PART_SEQ: AtomicU64 = AtomicU64::new(0);
+    let base = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".to_string());
+    let seq = PART_SEQ.fetch_add(1, Ordering::Relaxed);
+    dest.with_file_name(format!(".{base}.{}.{seq}.part", std::process::id()))
+}
+
+pub(crate) fn finalize_downloaded_file(tmp_path: &Path, dest: &Path) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create dir {}: {e}", parent.display()))?;
+        }
+    }
+
+    let rename_err = match fs::rename(tmp_path, dest) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+
+    for delay_ms in [15_u64, 35, 75, 150, 300] {
+        #[cfg(windows)]
+        if dest.exists() {
+            if let Ok(meta) = fs::metadata(dest) {
+                let mut perms = meta.permissions();
+                if perms.readonly() {
+                    perms.set_readonly(false);
+                    let _ = fs::set_permissions(dest, perms);
+                }
+            }
+            let _ = fs::remove_file(dest);
+        }
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        if fs::rename(tmp_path, dest).is_ok() {
+            return Ok(());
+        }
+    }
+
+    if fs::copy(tmp_path, dest).is_ok() {
+        let _ = fs::remove_file(tmp_path);
+        return Ok(());
+    }
+
+    let _ = fs::remove_file(tmp_path);
+    Err(format!(
+        "Failed to finalize {}: {rename_err}",
+        dest.display()
+    ))
+}
+
+fn write_bytes_and_finalize(dest: &Path, data: &[u8]) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create dir {}: {e}", parent.display()))?;
+        }
+    }
+    let tmp_path = tmp_part_path(dest);
+    if let Err(e) = fs::write(&tmp_path, data) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Failed to write {}: {e}", tmp_path.display()));
+    }
+    finalize_downloaded_file(&tmp_path, dest)
 }
 
 pub fn download_file(
@@ -501,6 +575,13 @@ fn download_once(
         .error_for_status()
         .map_err(|e| format!("HTTP error for {url}: {e}"))?;
 
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create dir {}: {e}", parent.display()))?;
+        }
+    }
+
     let tmp_path = tmp_part_path(dest);
     let file = File::create(&tmp_path)
         .map_err(|e| format!("Failed to create {}: {e}", tmp_path.display()))?;
@@ -514,20 +595,31 @@ fn download_once(
             let _ = fs::remove_file(&tmp_path);
             return Err(CANCELLED_ERR_MSG.to_string());
         }
-        let n = resp
-            .read(&mut buf)
-            .map_err(|e| format!("Download stream error for {url}: {e}"))?;
+        let n = match resp.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                drop(out);
+                let _ = fs::remove_file(&tmp_path);
+                return Err(format!("Download stream error for {url}: {e}"));
+            }
+        };
         if n == 0 {
             break;
         }
         if let Some(ref mut h) = hasher {
             h.update(&buf[..n]);
         }
-        out.write_all(&buf[..n])
-            .map_err(|e| format!("Failed to write {}: {e}", tmp_path.display()))?;
+        if let Err(e) = out.write_all(&buf[..n]) {
+            drop(out);
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("Failed to write {}: {e}", tmp_path.display()));
+        }
     }
-    out.flush()
-        .map_err(|e| format!("Failed to flush {}: {e}", tmp_path.display()))?;
+    if let Err(e) = out.flush() {
+        drop(out);
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("Failed to flush {}: {e}", tmp_path.display()));
+    }
     drop(out);
 
     if let (Some(sha1), Some(h)) = (expected_sha1, hasher) {
@@ -538,8 +630,7 @@ fn download_once(
         }
     }
 
-    fs::rename(&tmp_path, dest)
-        .map_err(|e| format!("Failed to finalize {}: {e}", dest.display()))?;
+    finalize_downloaded_file(&tmp_path, dest)?;
     Ok(())
 }
 
@@ -548,13 +639,6 @@ async fn download_async_with_retry(
     job: &DownloadJob,
 ) -> Result<(), String> {
     check_not_cancelled()?;
-    if job.dest.is_file() {
-        match job.sha1.as_deref() {
-            Some(sha1) if verify_sha1(&job.dest, sha1) => return Ok(()),
-            Some(_) => {}
-            None => return Ok(()),
-        }
-    }
 
     let mut last_err = String::new();
     for attempt in 1..=3 {
@@ -580,6 +664,9 @@ async fn download_async_once(
     dest: &Path,
     expected_sha1: Option<&str>,
 ) -> Result<(), String> {
+    const MEM_SPILL_THRESHOLD: usize = 2 * 1024 * 1024;
+    const DISK_FLUSH_CHUNK: usize = 512 * 1024;
+
     check_not_cancelled()?;
     let mut resp = client
         .get(url)
@@ -589,43 +676,119 @@ async fn download_async_once(
         .error_for_status()
         .map_err(|e| format!("HTTP error for {url}: {e}"))?;
 
-    let tmp_path = tmp_part_path(dest);
-    let file = File::create(&tmp_path)
-        .map_err(|e| format!("Failed to create {}: {e}", tmp_path.display()))?;
-    let mut out = BufWriter::with_capacity(65536, file);
+    let mut mem_buf: Vec<u8> = Vec::new();
+    let mut spilled: Option<(File, PathBuf)> = None;
     let mut hasher = expected_sha1.map(|_| Sha1::new());
 
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("Download stream error for {url}: {e}"))?
-    {
+    loop {
+        let chunk = match resp.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(e) => {
+                if let Some((file, tmp_path)) = spilled.take() {
+                    drop(file);
+                    let _ = tokio::task::spawn_blocking(move || fs::remove_file(tmp_path)).await;
+                }
+                return Err(format!("Download stream error for {url}: {e}"));
+            }
+        };
         if is_download_cancelled() {
-            drop(out);
-            let _ = fs::remove_file(&tmp_path);
+            if let Some((file, tmp_path)) = spilled.take() {
+                drop(file);
+                let _ = tokio::task::spawn_blocking(move || fs::remove_file(tmp_path)).await;
+            }
             return Err(CANCELLED_ERR_MSG.to_string());
         }
         if let Some(ref mut h) = hasher {
             h.update(&chunk);
         }
-        out.write_all(&chunk)
-            .map_err(|e| format!("Failed to write {}: {e}", tmp_path.display()))?;
+
+        if let Some((mut file, tmp_path)) = spilled.take() {
+            mem_buf.extend_from_slice(&chunk);
+            if mem_buf.len() >= DISK_FLUSH_CHUNK {
+                let to_write = std::mem::take(&mut mem_buf);
+                let tmp_for_err = tmp_path.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = file.write_all(&to_write) {
+                        drop(file);
+                        let _ = fs::remove_file(&tmp_for_err);
+                        return Err(format!("Failed to write {}: {e}", tmp_for_err.display()));
+                    }
+                    Ok(file)
+                })
+                .await
+                .map_err(|e| format!("Download task error: {e}"))??;
+                spilled = Some((res, tmp_path));
+            } else {
+                spilled = Some((file, tmp_path));
+            }
+        } else {
+            mem_buf.extend_from_slice(&chunk);
+            if mem_buf.len() > MEM_SPILL_THRESHOLD {
+                let to_write = std::mem::take(&mut mem_buf);
+                let dest_owned = dest.to_path_buf();
+                let tmp_path = tmp_part_path(dest);
+                let tmp_clone = tmp_path.clone();
+                let file = tokio::task::spawn_blocking(move || {
+                    if let Some(parent) = dest_owned.parent() {
+                        if !parent.as_os_str().is_empty() && !parent.is_dir() {
+                            fs::create_dir_all(parent).map_err(|e| {
+                                format!("Failed to create dir {}: {e}", parent.display())
+                            })?;
+                        }
+                    }
+                    let mut f = File::create(&tmp_clone)
+                        .map_err(|e| format!("Failed to create {}: {e}", tmp_clone.display()))?;
+                    if let Err(e) = f.write_all(&to_write) {
+                        drop(f);
+                        let _ = fs::remove_file(&tmp_clone);
+                        return Err(format!("Failed to write {}: {e}", tmp_clone.display()));
+                    }
+                    Ok(f)
+                })
+                .await
+                .map_err(|e| format!("Download task error: {e}"))??;
+                spilled = Some((file, tmp_path));
+            }
+        }
     }
-    out.flush()
-        .map_err(|e| format!("Failed to flush {}: {e}", tmp_path.display()))?;
-    drop(out);
 
     if let (Some(sha1), Some(h)) = (expected_sha1, hasher) {
         let digest = hex::encode(h.finalize());
         if !digest.eq_ignore_ascii_case(sha1) {
-            let _ = fs::remove_file(&tmp_path);
+            if let Some((file, tmp_path)) = spilled.take() {
+                drop(file);
+                let _ = tokio::task::spawn_blocking(move || fs::remove_file(tmp_path)).await;
+            }
             return Err(format!("SHA-1 mismatch for {url}"));
         }
     }
 
-    fs::rename(&tmp_path, dest)
-        .map_err(|e| format!("Failed to finalize {}: {e}", dest.display()))?;
-    Ok(())
+    let dest_owned = dest.to_path_buf();
+    if let Some((mut file, tmp_path)) = spilled.take() {
+        tokio::task::spawn_blocking(move || {
+            if !mem_buf.is_empty() {
+                if let Err(e) = file.write_all(&mem_buf) {
+                    drop(file);
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(format!("Failed to write {}: {e}", tmp_path.display()));
+                }
+            }
+            if let Err(e) = file.flush() {
+                drop(file);
+                let _ = fs::remove_file(&tmp_path);
+                return Err(format!("Failed to flush {}: {e}", tmp_path.display()));
+            }
+            drop(file);
+            finalize_downloaded_file(&tmp_path, &dest_owned)
+        })
+        .await
+        .map_err(|e| format!("Download finalize task error: {e}"))?
+    } else {
+        tokio::task::spawn_blocking(move || write_bytes_and_finalize(&dest_owned, &mem_buf))
+            .await
+            .map_err(|e| format!("Download finalize task error: {e}"))?
+    }
 }
 
 /// A single file to fetch as part of a parallel batch.
@@ -638,6 +801,15 @@ pub struct DownloadJob {
     pub size: Option<u64>,
 }
 
+/// How an existing destination file is validated before skipping a download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyMode {
+    /// Trust an exact size match (fast; used for the many asset objects).
+    SizeOnly,
+    /// Re-hash every existing file against its SHA-1 and repair anything corrupt.
+    Repair,
+}
+
 /// Downloads many files concurrently over pooled async HTTP connections.
 /// Jobs with the same destination are deduplicated, and parent directories are created once upfront.
 pub fn download_parallel(
@@ -646,15 +818,42 @@ pub fn download_parallel(
     concurrency: usize,
     on_progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<(), String> {
+    download_parallel_with_mode(
+        _client,
+        jobs,
+        concurrency,
+        VerifyMode::SizeOnly,
+        on_progress,
+    )
+}
+
+/// Like [`download_parallel`] but lets the caller choose how existing files are
+/// validated. `VerifyMode::Repair` re-hashes cached files and re-downloads any that
+/// are missing or corrupt, allowing a broken installation to self-heal.
+pub fn download_parallel_with_mode(
+    _client: &Client,
+    jobs: Vec<DownloadJob>,
+    concurrency: usize,
+    verify: VerifyMode,
+    on_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<(), String> {
     check_not_cancelled()?;
     let mut seen = HashSet::new();
     let jobs: Vec<DownloadJob> = jobs
         .into_iter()
         .filter(|j| seen.insert(j.dest.clone()))
-        .filter(|j| match (j.size, j.dest.metadata()) {
-            (Some(size), Ok(meta)) => meta.len() != size,
-            _ => true,
-        })
+        .filter(
+            |j| match (verify, j.size, j.sha1.as_deref(), j.dest.metadata()) {
+                (VerifyMode::SizeOnly, Some(size), _, Ok(meta)) => {
+                    !meta.is_file() || meta.len() != size
+                }
+                (VerifyMode::SizeOnly, None, _, Ok(meta)) => !meta.is_file() || meta.len() == 0,
+                (VerifyMode::Repair, _, Some(sha1), Ok(meta)) => {
+                    !meta.is_file() || !verify_sha1(&j.dest, sha1)
+                }
+                _ => true,
+            },
+        )
         .collect();
 
     let total = jobs.len();
@@ -674,13 +873,17 @@ pub fn download_parallel(
     }
 
     let async_client = build_async_http_client()?;
+    let rt_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(2, 4);
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
+        .worker_threads(rt_threads)
         .enable_all()
         .build()
         .map_err(|e| format!("Failed to start download runtime: {e}"))?;
 
-    let worker_count = concurrency.clamp(1, 64).min(total);
+    let worker_count = adaptive_download_concurrency(concurrency).min(total);
     let jobs = Arc::new(jobs);
     let next = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicUsize::new(0));
@@ -748,8 +951,7 @@ pub fn download_parallel(
 }
 
 fn extract_natives(jar_path: &Path, natives_dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(natives_dir)
-        .map_err(|e| format!("Failed to create natives dir: {e}"))?;
+    fs::create_dir_all(natives_dir).map_err(|e| format!("Failed to create natives dir: {e}"))?;
     let file = File::open(jar_path)
         .map_err(|e| format!("Failed to open native jar {}: {e}", jar_path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
@@ -770,10 +972,63 @@ fn extract_natives(jar_path: &Path, natives_dir: &Path) -> Result<(), String> {
         if let Some(parent) = out_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let mut out = File::create(&out_path)
+        let out = File::create(&out_path)
             .map_err(|e| format!("Failed to extract {}: {e}", out_path.display()))?;
-        io::copy(&mut entry, &mut out)
+        let mut writer = BufWriter::with_capacity(64 * 1024, out);
+        io::copy(&mut entry, &mut writer)
             .map_err(|e| format!("Failed to write extracted file: {e}"))?;
+        writer
+            .flush()
+            .map_err(|e| format!("Failed to flush extracted file: {e}"))?;
+    }
+    Ok(())
+}
+
+fn extract_natives_cached(
+    native_jars: &[PathBuf],
+    natives_dir: &Path,
+    offline_mode: bool,
+) -> Result<(), String> {
+    if native_jars.is_empty() {
+        return Ok(());
+    }
+    let mut sig_parts: Vec<String> = Vec::new();
+    for jar in native_jars {
+        if let Ok(meta) = fs::metadata(jar) {
+            if meta.is_file() {
+                let name = jar.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                sig_parts.push(format!("{name}:{}", meta.len()));
+            }
+        }
+    }
+    sig_parts.sort();
+    let expected_stamp = sig_parts.join("\n");
+    let stamp_path = natives_dir.join(".natives_stamp");
+
+    if !expected_stamp.is_empty()
+        && fs::read_to_string(&stamp_path).ok().as_deref() == Some(expected_stamp.as_str())
+    {
+        let has_extracted = fs::read_dir(natives_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                !name.starts_with('.') && e.path().is_file()
+            });
+        if has_extracted {
+            return Ok(());
+        }
+    }
+
+    for jar in native_jars {
+        if !offline_mode || jar.is_file() {
+            extract_natives(jar, natives_dir)?;
+        }
+    }
+    if !expected_stamp.is_empty() {
+        let _ = fs::write(&stamp_path, expected_stamp);
     }
     Ok(())
 }
@@ -786,6 +1041,7 @@ pub struct PreparedLaunch {
     pub log_config_arg: Option<String>,
     pub game_assets_dir: PathBuf,
     pub map_to_resources_index: Option<PathBuf>,
+    pub java_bin: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -851,7 +1107,7 @@ fn collect_libraries(
                         url: artifact.url.clone(),
                         dest: dest.clone(),
                         sha1: artifact.sha1.clone(),
-                        size: None,
+                        size: artifact.size,
                     });
                 }
                 if let Some(ref mut cp) = cp_out {
@@ -884,7 +1140,7 @@ fn collect_libraries(
                             url: native_art.url.clone(),
                             dest: dest.clone(),
                             sha1: native_art.sha1.clone(),
-                            size: None,
+                            size: native_art.size,
                         });
                     }
                     native_jars.push(dest);
@@ -944,11 +1200,7 @@ fn read_jar_main_class(jar_path: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("No Main-Class in {}", jar_path.display()))
 }
 
-fn resolve_data_entry(
-    raw: &str,
-    data_dir: &Path,
-    libraries_dir: &Path,
-) -> Result<String, String> {
+fn resolve_data_entry(raw: &str, data_dir: &Path, libraries_dir: &Path) -> Result<String, String> {
     if let Some(quoted) = raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
         return Ok(quoted.to_string());
     }
@@ -1021,14 +1273,18 @@ fn extract_installer_jar(
                 .map_err(|e| format!("Failed to read install_profile.json: {e}"))?;
             install_profile_raw = Some(s);
         } else if let Some(maven_rel) = name.strip_prefix("maven/") {
-            let Some(enclosed) = Path::new(maven_rel).file_name().map(|_| PathBuf::from(maven_rel))
+            let Some(enclosed) = Path::new(maven_rel)
+                .file_name()
+                .map(|_| PathBuf::from(maven_rel))
             else {
                 continue;
             };
-            if enclosed
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir))
-            {
+            if enclosed.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::RootDir
+                )
+            }) {
                 continue;
             }
             let dest = libraries_dir.join(enclosed);
@@ -1127,10 +1383,7 @@ fn run_installer_processors(
         "MINECRAFT_JAR".to_string(),
         client_jar.to_string_lossy().to_string(),
     );
-    vars.insert(
-        "ROOT".to_string(),
-        paths.root.to_string_lossy().to_string(),
-    );
+    vars.insert("ROOT".to_string(), paths.root.to_string_lossy().to_string());
     vars.insert(
         "INSTALLER".to_string(),
         installer_jar.to_string_lossy().to_string(),
@@ -1152,7 +1405,7 @@ fn run_installer_processors(
         .filter(|p| {
             p.sides
                 .as_ref()
-                .map_or(true, |s| s.iter().any(|side| side == "client"))
+                .is_none_or(|s| s.iter().any(|side| side == "client"))
         })
         .collect();
 
@@ -1189,8 +1442,7 @@ fn run_installer_processors(
                 };
                 let expected_sha = expected_sha.trim_matches('\'');
                 Path::new(&out_file).is_file()
-                    && (expected_sha.is_empty()
-                        || verify_sha1(Path::new(&out_file), expected_sha))
+                    && (expected_sha.is_empty() || verify_sha1(Path::new(&out_file), expected_sha))
             });
             if up_to_date {
                 continue;
@@ -1274,7 +1526,12 @@ fn resolve_effective_loader_version(
         .find(|v| v.stable)
         .or_else(|| versions.first())
         .map(|v| v.version.clone())
-        .ok_or_else(|| format!("No {} version available for Minecraft {game_version}", kind.label()))
+        .ok_or_else(|| {
+            format!(
+                "No {} version available for Minecraft {game_version}",
+                kind.label()
+            )
+        })
 }
 
 fn installer_url_for(
@@ -1290,14 +1547,22 @@ fn installer_url_for(
                 "https://maven.minecraftforge.net/net/minecraftforge/forge/{exact}/forge-{exact}-installer.jar"
             );
             // Fast path for standard 1.13+ coordinates; fall back to metadata lookup on legacy versions.
-            if client.head(&std_url).send().is_ok_and(|r| r.status().is_success()) {
+            if client
+                .head(&std_url)
+                .send()
+                .is_ok_and(|r| r.status().is_success())
+            {
                 return Ok(std_url);
             }
             let alt_suffix = format!("{game_version}-{loader_version}-{game_version}");
             let alt_url = format!(
                 "https://maven.minecraftforge.net/net/minecraftforge/forge/{alt_suffix}/forge-{alt_suffix}-installer.jar"
             );
-            if client.head(&alt_url).send().is_ok_and(|r| r.status().is_success()) {
+            if client
+                .head(&alt_url)
+                .send()
+                .is_ok_and(|r| r.status().is_success())
+            {
                 return Ok(alt_url);
             }
             Ok(std_url)
@@ -1360,12 +1625,8 @@ pub fn sync_mapped_assets_to_dir(
         if let Some(parent) = dst.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        fs::copy(&src, &dst).map_err(|e| {
-            format!(
-                "Failed to materialize legacy asset {}: {e}",
-                dst.display()
-            )
-        })?;
+        fs::copy(&src, &dst)
+            .map_err(|e| format!("Failed to materialize legacy asset {}: {e}", dst.display()))?;
     }
     Ok(())
 }
@@ -1408,7 +1669,10 @@ fn find_cached_meta_loader_version(version_dir: &Path, slug: &str) -> Option<Str
         let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if let Some(rest) = name.strip_prefix(&prefix).and_then(|s| s.strip_suffix(".json")) {
+        if let Some(rest) = name
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix(".json"))
+        {
             if !rest.is_empty() {
                 let mtime = e
                     .metadata()
@@ -1505,8 +1769,7 @@ pub fn prepare_version_with_mode(
     check_not_cancelled()?;
     let client = build_http_client()?;
     let version_dir = paths.versions_dir.join(version_id);
-    fs::create_dir_all(&version_dir)
-        .map_err(|e| format!("Failed to create version dir: {e}"))?;
+    fs::create_dir_all(&version_dir).map_err(|e| format!("Failed to create version dir: {e}"))?;
     let json_path = version_dir.join(format!("{version_id}.json"));
 
     let _ = tx.send(WorkerEvent::Progress {
@@ -1551,18 +1814,19 @@ pub fn prepare_version_with_mode(
 
     // Prepare client JAR download job (batched concurrently with libraries & assets below)
     let client_jar = version_dir.join(format!("{version_id}.jar"));
-    let client_job = if let Some(client_dl) = details.downloads.as_ref().and_then(|d| d.client.as_ref()) {
-        Some(DownloadJob {
-            url: client_dl.url.clone(),
-            dest: client_jar.clone(),
-            sha1: client_dl.sha1.clone(),
-            size: None,
-        })
-    } else if !client_jar.exists() {
-        return Err(format!("No client download info for {version_id}"));
-    } else {
-        None
-    };
+    let client_job =
+        if let Some(client_dl) = details.downloads.as_ref().and_then(|d| d.client.as_ref()) {
+            Some(DownloadJob {
+                url: client_dl.url.clone(),
+                dest: client_jar.clone(),
+                sha1: client_dl.sha1.clone(),
+                size: client_dl.size,
+            })
+        } else if !client_jar.exists() {
+            return Err(format!("No client download info for {version_id}"));
+        } else {
+            None
+        };
 
     // Collect Mojang libraries & natives
     let natives_dir = version_dir.join("natives");
@@ -1649,7 +1913,7 @@ pub fn prepare_version_with_mode(
                 .iter()
                 .filter_map(|l| maven_key(&l.name))
                 .collect();
-            vanilla_cp.retain(|(_, key)| key.as_ref().map_or(true, |k| !override_keys.contains(k)));
+            vanilla_cp.retain(|(_, key)| key.as_ref().is_none_or(|k| !override_keys.contains(k)));
             classpath.extend(loader_cp.into_iter().map(|(p, _)| p));
             loader_overlay = Some(overlay);
         }
@@ -1681,7 +1945,10 @@ pub fn prepare_version_with_mode(
             let cached_overlay_path = loader_dir.join("version.json");
             let cached_install_profile_path = loader_dir.join("install_profile.json");
 
-            let (overlay, install_profile) = if offline_mode && cached_overlay_path.is_file() {
+            let can_use_cached_installer = cached_overlay_path.is_file()
+                && (offline_mode
+                    || (installer_jar.is_file() && loader_dir.join(".processors_done").is_file()));
+            let (overlay, install_profile) = if can_use_cached_installer {
                 let ov_raw = fs::read_to_string(&cached_overlay_path)
                     .map_err(|e| format!("Failed to read cached version.json: {e}"))?;
                 let ov: LoaderProfileOverlay = serde_json::from_str(&ov_raw)
@@ -1739,7 +2006,7 @@ pub fn prepare_version_with_mode(
                 .iter()
                 .filter_map(|l| maven_key(&l.name))
                 .collect();
-            vanilla_cp.retain(|(_, key)| key.as_ref().map_or(true, |k| !override_keys.contains(k)));
+            vanilla_cp.retain(|(_, key)| key.as_ref().is_none_or(|k| !override_keys.contains(k)));
             classpath.extend(loader_cp.into_iter().map(|(p, _)| p));
             loader_overlay = Some(overlay);
         }
@@ -1748,42 +2015,41 @@ pub fn prepare_version_with_mode(
     classpath.extend(vanilla_cp.into_iter().map(|(p, _)| p));
 
     // Download official Mojang Log4j XML configuration when present (protects 1.7-1.18 against Log4Shell).
-    let log_config_arg = if let Some(log_client) =
-        details.logging.as_ref().and_then(|l| l.client.as_ref())
-    {
-        if !log_client.file.id.is_empty() && !log_client.file.url.is_empty() {
-            let log_dir = paths.assets_dir.join("log_configs");
-            fs::create_dir_all(&log_dir)
-                .map_err(|e| format!("Failed to create log_configs dir: {e}"))?;
-            let safe_id = Path::new(&log_client.file.id)
-                .file_name()
-                .ok_or_else(|| "Invalid logging config filename".to_string())?;
-            let xml_dest = log_dir.join(safe_id);
-            if offline_mode {
-                xml_dest.is_file().then(|| {
-                    log_client
-                        .argument
-                        .replace("${path}", &xml_dest.to_string_lossy())
-                })
+    let log_config_arg =
+        if let Some(log_client) = details.logging.as_ref().and_then(|l| l.client.as_ref()) {
+            if !log_client.file.id.is_empty() && !log_client.file.url.is_empty() {
+                let log_dir = paths.assets_dir.join("log_configs");
+                fs::create_dir_all(&log_dir)
+                    .map_err(|e| format!("Failed to create log_configs dir: {e}"))?;
+                let safe_id = Path::new(&log_client.file.id)
+                    .file_name()
+                    .ok_or_else(|| "Invalid logging config filename".to_string())?;
+                let xml_dest = log_dir.join(safe_id);
+                if offline_mode {
+                    xml_dest.is_file().then(|| {
+                        log_client
+                            .argument
+                            .replace("${path}", &xml_dest.to_string_lossy())
+                    })
+                } else {
+                    download_file(
+                        &client,
+                        &log_client.file.url,
+                        &xml_dest,
+                        Some(&log_client.file.sha1),
+                    )?;
+                    Some(
+                        log_client
+                            .argument
+                            .replace("${path}", &xml_dest.to_string_lossy()),
+                    )
+                }
             } else {
-                download_file(
-                    &client,
-                    &log_client.file.url,
-                    &xml_dest,
-                    Some(&log_client.file.sha1),
-                )?;
-                Some(
-                    log_client
-                        .argument
-                        .replace("${path}", &xml_dest.to_string_lossy()),
-                )
+                None
             }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
     // Fetch asset index early so Vanilla/Fabric/Quilt can download client.jar, libraries, and
     // thousands of assets in a single 64-connection async batch.
@@ -1798,7 +2064,12 @@ pub fn prepare_version_with_mode(
             .join("indexes")
             .join(format!("{}.json", asset_info.id));
         if !offline_mode {
-            download_file(&client, &asset_info.url, &index_path, Some(&asset_info.sha1))?;
+            download_file(
+                &client,
+                &asset_info.url,
+                &index_path,
+                Some(&asset_info.sha1),
+            )?;
         }
 
         if index_path.is_file() {
@@ -1818,7 +2089,11 @@ pub fn prepare_version_with_mode(
                         let prefix = &obj.hash[..2];
                         DownloadJob {
                             url: format!("{RESOURCES_BASE}/{prefix}/{}", obj.hash),
-                            dest: paths.assets_dir.join("objects").join(prefix).join(&obj.hash),
+                            dest: paths
+                                .assets_dir
+                                .join("objects")
+                                .join(prefix)
+                                .join(&obj.hash),
                             sha1: Some(obj.hash.clone()),
                             size: Some(obj.size),
                         }
@@ -1844,22 +2119,27 @@ pub fn prepare_version_with_mode(
         if offline_mode {
             verify_offline_jobs(&lib_jobs, "libraries/client JAR")?;
         } else {
-            let lib_total = lib_jobs.len();
             let _ = tx.send(WorkerEvent::Progress {
-                stage: format!("Libraries: 0/{lib_total}"),
+                stage: "Verifying game files...".to_string(),
                 fraction: 0.16,
             });
             let last_lib_report = AtomicUsize::new(0);
-            download_parallel(&client, lib_jobs, 32, &|done, total| {
-                let prev = last_lib_report.load(Ordering::Relaxed);
-                if done == total || done >= prev + 5 {
-                    last_lib_report.store(done, Ordering::Relaxed);
-                    let _ = tx.send(WorkerEvent::Progress {
-                        stage: format!("Libraries: {done}/{total}"),
-                        fraction: 0.16 + 0.22 * (done as f32 / total.max(1) as f32),
-                    });
-                }
-            })?;
+            download_parallel_with_mode(
+                &client,
+                lib_jobs,
+                24,
+                VerifyMode::SizeOnly,
+                &|done, total| {
+                    let prev = last_lib_report.load(Ordering::Relaxed);
+                    if done == total || done >= prev + 3 {
+                        last_lib_report.store(done, Ordering::Relaxed);
+                        let _ = tx.send(WorkerEvent::Progress {
+                            stage: format!("Libraries: {done}/{total}"),
+                            fraction: 0.16 + 0.22 * (done as f32 / total.max(1) as f32),
+                        });
+                    }
+                },
+            )?;
         }
 
         run_installer_processors(
@@ -1872,17 +2152,13 @@ pub fn prepare_version_with_mode(
             tx,
         )?;
 
-        for jar in &native_jars {
-            if !offline_mode || jar.is_file() {
-                extract_natives(jar, &natives_dir)?;
-            }
-        }
+        extract_natives_cached(&native_jars, &natives_dir, offline_mode)?;
 
         if !asset_jobs.is_empty() {
             let last_report = AtomicUsize::new(0);
-            download_parallel(&client, asset_jobs, 64, &|done, total| {
+            download_parallel(&client, asset_jobs, 24, &|done, total| {
                 let prev = last_report.load(Ordering::Relaxed);
-                if done == total || done >= prev + 25 {
+                if done == total || done >= prev + 10 {
                     last_report.store(done, Ordering::Relaxed);
                     let _ = tx.send(WorkerEvent::Progress {
                         stage: format!("Assets: {done}/{total}"),
@@ -1906,25 +2182,31 @@ pub fn prepare_version_with_mode(
             verify_offline_jobs(&all_jobs, "libraries/client JAR")?;
         } else {
             all_jobs.extend(asset_jobs);
+            let _ = tx.send(WorkerEvent::Progress {
+                stage: "Verifying game files...".to_string(),
+                fraction: 0.16,
+            });
 
             let last_report = AtomicUsize::new(0);
-            download_parallel(&client, all_jobs, 64, &|done, total| {
-                let prev = last_report.load(Ordering::Relaxed);
-                if done == total || done >= prev + 25 {
-                    last_report.store(done, Ordering::Relaxed);
-                    let _ = tx.send(WorkerEvent::Progress {
-                        stage: format!("Downloading: {done}/{total}"),
-                        fraction: 0.16 + 0.80 * (done as f32 / total.max(1) as f32),
-                    });
-                }
-            })?;
+            download_parallel_with_mode(
+                &client,
+                all_jobs,
+                24,
+                VerifyMode::SizeOnly,
+                &|done, total| {
+                    let prev = last_report.load(Ordering::Relaxed);
+                    if done == total || done >= prev + 10 {
+                        last_report.store(done, Ordering::Relaxed);
+                        let _ = tx.send(WorkerEvent::Progress {
+                            stage: format!("Downloading: {done}/{total}"),
+                            fraction: 0.16 + 0.80 * (done as f32 / total.max(1) as f32),
+                        });
+                    }
+                },
+            )?;
         }
 
-        for jar in &native_jars {
-            if !offline_mode || jar.is_file() {
-                extract_natives(jar, &natives_dir)?;
-            }
-        }
+        extract_natives_cached(&native_jars, &natives_dir, offline_mode)?;
     }
 
     let (game_assets_dir, map_to_resources_index) =
@@ -1951,6 +2233,7 @@ pub fn prepare_version_with_mode(
         log_config_arg,
         game_assets_dir,
         map_to_resources_index,
+        java_bin,
     })
 }
 
@@ -1959,9 +2242,32 @@ mod tests {
     use super::{
         filter_forge_versions, filter_neoforge_versions, neoforge_mc_prefix,
         parse_manifest_main_class, parse_maven_metadata_versions, resolve_processor_arg,
+        verify_sha1,
     };
     use std::collections::HashMap;
     use std::path::Path;
+
+    #[test]
+    fn test_verify_sha1_detects_corruption() {
+        let dir = std::env::temp_dir().join(format!("sl-sha1-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("blob.bin");
+        std::fs::write(&file, b"hello").unwrap();
+        assert!(verify_sha1(
+            &file,
+            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+        ));
+        assert!(!verify_sha1(
+            &file,
+            "0000000000000000000000000000000000000000"
+        ));
+        std::fs::write(&file, b"corrupted").unwrap();
+        assert!(!verify_sha1(
+            &file,
+            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_neoforge_prefix_mapping() {
@@ -2116,7 +2422,10 @@ mod tests {
             os: None,
             features: Some(feat_map),
         }];
-        assert!(!rules_allow_with_features(Some(&rules), &RuleFeatures::default()));
+        assert!(!rules_allow_with_features(
+            Some(&rules),
+            &RuleFeatures::default()
+        ));
         assert!(rules_allow_with_features(
             Some(&rules),
             &RuleFeatures {
@@ -2179,5 +2488,85 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
-}
 
+    #[test]
+    fn finalize_downloaded_file_creates_parent_and_overwrites() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mc_launcher_finalize_test_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let part1 = super::tmp_part_path(&tmp.join("mods").join("sodium.jar"));
+        assert!(part1
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with('.'));
+        assert!(part1
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".part"));
+
+        let src1 = tmp.join(".sodium.jar.1.part");
+        let dest = tmp.join("mods").join("sodium.jar");
+        std::fs::write(&src1, b"v1").unwrap();
+        super::finalize_downloaded_file(&src1, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"v1");
+        assert!(!src1.exists());
+
+        let src2 = tmp.join(".sodium.jar.2.part");
+        std::fs::write(&src2, b"v2").unwrap();
+        super::finalize_downloaded_file(&src2, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"v2");
+        assert!(!src2.exists());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn adaptive_download_concurrency_and_cached_natives_extraction() {
+        assert_eq!(super::adaptive_download_concurrency(0), 1);
+        assert_eq!(super::adaptive_download_concurrency(4), 4);
+        let capped = super::adaptive_download_concurrency(64);
+        assert!((8..=24).contains(&capped));
+
+        let tmp = std::env::temp_dir().join(format!(
+            "mc_launcher_natives_cache_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let jar_path = tmp.join("lwjgl-natives.jar");
+        let natives_dir = tmp.join("natives");
+        {
+            use std::io::Write;
+            let f = std::fs::File::create(&jar_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("META-INF/MANIFEST.MF", opts).unwrap();
+            zw.write_all(b"Manifest-Version: 1.0\n").unwrap();
+            zw.start_file("lwjgl.dll", opts).unwrap();
+            zw.write_all(b"native-bytes").unwrap();
+            zw.finish().unwrap();
+        }
+
+        let jars = vec![jar_path.clone()];
+        super::extract_natives_cached(&jars, &natives_dir, false).unwrap();
+        assert_eq!(
+            std::fs::read(natives_dir.join("lwjgl.dll")).unwrap(),
+            b"native-bytes"
+        );
+        assert!(natives_dir.join(".natives_stamp").is_file());
+
+        // Overwrite extracted file with sentinel: cached second call must skip re-extraction.
+        std::fs::write(natives_dir.join("lwjgl.dll"), b"cached-sentinel").unwrap();
+        super::extract_natives_cached(&jars, &natives_dir, false).unwrap();
+        assert_eq!(
+            std::fs::read(natives_dir.join("lwjgl.dll")).unwrap(),
+            b"cached-sentinel"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

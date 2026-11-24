@@ -99,7 +99,29 @@ pub fn parse_java_major(version_output: &str) -> Option<u32> {
     }
 }
 
+pub(crate) fn parse_java_release_major(release_text: &str) -> Option<u32> {
+    for line in release_text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("JAVA_VERSION=") {
+            let quoted = rest.trim();
+            if quoted.starts_with('"') && quoted.ends_with('"') {
+                return parse_java_major(quoted);
+            }
+            let wrapped = format!("\"{}\"", quoted.trim_matches(['"', '\'']));
+            return parse_java_major(&wrapped);
+        }
+    }
+    None
+}
+
 fn java_major_version(bin: &Path) -> Option<u32> {
+    if let Some(home) = bin.parent().and_then(Path::parent) {
+        if let Ok(release_text) = std::fs::read_to_string(home.join("release")) {
+            if let Some(major) = parse_java_release_major(&release_text) {
+                return Some(major);
+            }
+        }
+    }
     let mut cmd = Command::new(bin);
     cmd.arg("-version");
     configure_background_command(&mut cmd);
@@ -156,7 +178,10 @@ pub fn detect_java_installations() -> Vec<JavaInstall> {
             }
         }
     } else if cfg!(target_os = "macos") {
-        push_java_vendor_dirs(Path::new("/Library/Java/JavaVirtualMachines"), &mut candidates);
+        push_java_vendor_dirs(
+            Path::new("/Library/Java/JavaVirtualMachines"),
+            &mut candidates,
+        );
     } else {
         for root in ["/usr/lib/jvm", "/usr/lib64/jvm", "/opt/java"] {
             push_java_vendor_dirs(Path::new(root), &mut candidates);
@@ -217,19 +242,19 @@ pub fn resolve_java_binary(profile: &Profile, required: Option<u32>) -> Result<P
 
     let installs = detect_java_installations();
     if installs.is_empty() {
-        return Err(format!("Java runtime not found. {}", install_hint(required.unwrap_or(21))));
+        return Err(format!(
+            "Java runtime not found. {}",
+            install_hint(required.unwrap_or(21))
+        ));
     }
 
     let chosen = match required {
-        Some(req) => installs
-            .iter()
-            .find(|j| j.major == req)
-            .or_else(|| {
-                installs
-                    .iter()
-                    .filter(|j| j.major > req)
-                    .min_by_key(|j| j.major)
-            }),
+        Some(req) => installs.iter().find(|j| j.major == req).or_else(|| {
+            installs
+                .iter()
+                .filter(|j| j.major > req)
+                .min_by_key(|j| j.major)
+        }),
         None => installs.iter().max_by_key(|j| j.major),
     };
 
@@ -309,12 +334,23 @@ fn find_java_in_dir(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-fn extract_zip_archive(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
+fn extract_zip_archive(
+    archive_path: &Path,
+    dest_dir: &Path,
+    tx: Option<&Sender<WorkerEvent>>,
+    major: u32,
+) -> Result<(), String> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| format!("Failed to open Java archive: {e}"))?;
+    let reader = BufReader::with_capacity(256 * 1024, file);
     let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Invalid Java zip archive: {e}"))?;
+        zip::ZipArchive::new(reader).map_err(|e| format!("Invalid Java zip archive: {e}"))?;
+    let total = archive.len().max(1);
+    let mut last_pct = 0usize;
     for i in 0..archive.len() {
+        if is_download_cancelled() {
+            return Err(CANCELLED_ERR_MSG.to_string());
+        }
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("Failed to read zip entry {i}: {e}"))?;
@@ -331,14 +367,25 @@ fn extract_zip_archive(archive_path: &Path, dest_dir: &Path) -> Result<(), Strin
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create parent dir {}: {e}", parent.display()))?;
         }
-        let mut out_file = std::fs::File::create(&out_path)
+        let out_file = std::fs::File::create(&out_path)
             .map_err(|e| format!("Failed to create {}: {e}", out_path.display()))?;
-        std::io::copy(&mut entry, &mut out_file)
+        let mut writer = std::io::BufWriter::with_capacity(256 * 1024, out_file);
+        std::io::copy(&mut entry, &mut writer)
             .map_err(|e| format!("Failed to write {}: {e}", out_path.display()))?;
+        writer
+            .flush()
+            .map_err(|e| format!("Failed to flush {}: {e}", out_path.display()))?;
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
+        }
+
+        let pct = ((i + 1) * 100) / total;
+        if pct >= last_pct + 5 || i + 1 == total {
+            last_pct = pct;
+            let frac = 0.17 + 0.05 * ((i + 1) as f32 / total as f32);
+            emit_progress(tx, format!("Extracting Java {major} ({pct}%)..."), frac);
         }
     }
     Ok(())
@@ -406,8 +453,9 @@ fn download_adoptium_jre(
     let total_bytes = resp.content_length();
     let archive_part = java_root.join(format!("temurin-{major}.{ext}.part"));
     {
-        let mut out = std::fs::File::create(&archive_part)
+        let raw_file = std::fs::File::create(&archive_part)
             .map_err(|e| format!("Failed to create temp Java archive: {e}"))?;
+        let mut out = std::io::BufWriter::with_capacity(256 * 1024, raw_file);
         let mut buf = [0u8; 64 * 1024];
         let mut downloaded: u64 = 0;
         let mut last_pct: u32 = 0;
@@ -426,25 +474,25 @@ fn download_adoptium_jre(
             out.write_all(&buf[..n])
                 .map_err(|e| format!("Failed to write Java {major} archive: {e}"))?;
             downloaded += n as u64;
-            if let Some(total) = total_bytes {
-                if total > 0 {
-                    let pct = ((downloaded * 100) / total) as u32;
-                    if pct >= last_pct + 5 || pct == 100 {
-                        last_pct = pct;
-                        let frac = 0.02 + 0.14 * (downloaded as f32 / total as f32);
-                        emit_progress(
-                            tx,
-                            format!(
-                                "Downloading Java {major} ({:.1} / {:.1} MB)...",
-                                downloaded as f64 / (1024.0 * 1024.0),
-                                total as f64 / (1024.0 * 1024.0)
-                            ),
-                            frac,
-                        );
-                    }
+            if let Some(total) = total_bytes.filter(|t| *t > 0) {
+                let pct = ((downloaded * 100) / total) as u32;
+                if pct >= last_pct + 5 || pct == 100 {
+                    last_pct = pct;
+                    let frac = 0.02 + 0.14 * (downloaded as f32 / total as f32);
+                    emit_progress(
+                        tx,
+                        format!(
+                            "Downloading Java {major} ({:.1} / {:.1} MB)...",
+                            downloaded as f64 / (1024.0 * 1024.0),
+                            total as f64 / (1024.0 * 1024.0)
+                        ),
+                        frac,
+                    );
                 }
             }
         }
+        out.flush()
+            .map_err(|e| format!("Failed to flush Java {major} archive: {e}"))?;
     }
 
     emit_progress(tx, format!("Extracting Java {major}..."), 0.17);
@@ -456,7 +504,7 @@ fn download_adoptium_jre(
         .map_err(|e| format!("Failed to create Java staging directory: {e}"))?;
 
     let extract_res = if ext == "zip" {
-        extract_zip_archive(&archive_part, &stage_dir)
+        extract_zip_archive(&archive_part, &stage_dir, tx, major)
     } else {
         let mut cmd = Command::new("tar");
         cmd.args([
@@ -503,7 +551,20 @@ fn download_adoptium_jre(
     if target_dir.exists() {
         let _ = std::fs::remove_dir_all(&target_dir);
     }
-    if let Err(e) = std::fs::rename(&source_dir, &target_dir) {
+    let mut move_err = std::fs::rename(&source_dir, &target_dir).err();
+    if move_err.is_some() {
+        for delay_ms in [50_u64, 100, 200, 400, 600] {
+            thread::sleep(Duration::from_millis(delay_ms));
+            match std::fs::rename(&source_dir, &target_dir) {
+                Ok(()) => {
+                    move_err = None;
+                    break;
+                }
+                Err(e) => move_err = Some(e),
+            }
+        }
+    }
+    if let Some(e) = move_err {
         let _ = std::fs::remove_dir_all(&stage_dir);
         return Err(format!(
             "Failed to move extracted Java {major} into {}: {e}",
@@ -568,6 +629,15 @@ pub fn ensure_java_runtime_with_mode(
 ) -> Result<PathBuf, String> {
     if !profile.java_path.trim().is_empty() {
         return resolve_java_binary(profile, required);
+    }
+
+    if let Some(req) = required {
+        let managed_dir = paths.root.join("java").join(format!("temurin-{req}"));
+        if let Some(bin) = find_java_in_dir(&managed_dir) {
+            if java_major_version(&bin) == Some(req) {
+                return Ok(bin);
+            }
+        }
     }
 
     let installs = detect_java_installations();
@@ -685,7 +755,7 @@ fn collect_arg_values(
                 let allowed = obj
                     .get("rules")
                     .and_then(|r| serde_json::from_value::<Vec<Rule>>(r.clone()).ok())
-                    .map_or(true, |rules| rules_allow_with_features(Some(&rules), features));
+                    .is_none_or(|rules| rules_allow_with_features(Some(&rules), features));
                 if !allowed {
                     continue;
                 }
@@ -806,13 +876,16 @@ pub fn launch_game(
     tx: Sender<WorkerEvent>,
 ) -> Result<GameHandle, String> {
     check_not_cancelled()?;
-    let required_java = prepared
-        .version_details
-        .java_version
-        .as_ref()
-        .map(|j| j.major_version);
-    let java_bin =
-        ensure_java_runtime_with_mode(paths, profile, required_java, offline_mode, Some(&tx))?;
+    let java_bin = if prepared.java_bin.is_file() {
+        prepared.java_bin.clone()
+    } else {
+        let required_java = prepared
+            .version_details
+            .java_version
+            .as_ref()
+            .map(|j| j.major_version);
+        ensure_java_runtime_with_mode(paths, profile, required_java, offline_mode, Some(&tx))?
+    };
     let game_dir = instance_dir(paths, profile);
     let profile_id = profile.id.clone();
 
@@ -861,14 +934,29 @@ pub fn launch_game(
             } else {
                 account.username.trim()
             };
-            (name.to_string(), offline_uuid(name), "0".to_string(), "legacy")
+            (
+                name.to_string(),
+                offline_uuid(name),
+                "0".to_string(),
+                "legacy",
+            )
         }
         AccountKind::Microsoft {
             uuid, access_token, ..
-        } => (account.username.clone(), uuid.clone(), access_token.clone(), "msa"),
+        } => (
+            account.username.clone(),
+            uuid.clone(),
+            access_token.clone(),
+            "msa",
+        ),
         AccountKind::ElyBy {
             uuid, access_token, ..
-        } => (account.username.clone(), uuid.clone(), access_token.clone(), "mojang"),
+        } => (
+            account.username.clone(),
+            uuid.clone(),
+            access_token.clone(),
+            "mojang",
+        ),
     };
 
     let assets_index_name = prepared
@@ -936,7 +1024,10 @@ pub fn launch_game(
     vars.insert("launcher_version", env!("CARGO_PKG_VERSION").to_string());
     vars.insert("classpath", classpath_str.clone());
     vars.insert("classpath_separator", sep.to_string());
-    vars.insert("library_directory", paths.libraries_dir.to_string_lossy().to_string());
+    vars.insert(
+        "library_directory",
+        paths.libraries_dir.to_string_lossy().to_string(),
+    );
     if let Some((w, h)) = custom_res {
         vars.insert("resolution_width", w.to_string());
         vars.insert("resolution_height", h.to_string());
@@ -1348,5 +1439,22 @@ EMPTY=
                 ("EMPTY".to_string(), "".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_java_release_major() {
+        assert_eq!(
+            parse_java_release_major("IMPLEMENTOR=\"Eclipse Adoptium\"\nJAVA_VERSION=\"21.0.5\"\n"),
+            Some(21)
+        );
+        assert_eq!(
+            parse_java_release_major("JAVA_VERSION=\"1.8.0_402\"\n"),
+            Some(8)
+        );
+        assert_eq!(
+            parse_java_release_major("JAVA_VERSION=\"17.0.12\"\n"),
+            Some(17)
+        );
+        assert_eq!(parse_java_release_major("OS_NAME=\"Windows\"\n"), None);
     }
 }

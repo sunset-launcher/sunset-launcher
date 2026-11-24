@@ -1,14 +1,17 @@
 use crate::models::{
-    InstalledProject, LauncherPaths, LoaderKind, ModLoader, ModrinthFile, ModrinthHashes,
-    ModrinthInstallOutcome, ModrinthProjectType, ModrinthSearchHit, ModrinthSearchPage,
-    ModrinthSort, ModrinthVersion, Profile, ProjectSource, WorkerEvent,
+    DedicatedServer, InstalledProject, LauncherPaths, LoaderKind, ModLoader, ModrinthFile,
+    ModrinthHashes, ModrinthInstallOutcome, ModrinthProjectType, ModrinthSearchHit,
+    ModrinthSearchPage, ModrinthSort, ModrinthVersion, Profile, ProjectSource, WorkerEvent,
 };
 use crate::modrinth::{
-    curseforge_edge_cdn_url, default_datapack_rel_folder, folder_for, install_curseforge_zip,
-    load_installed_index, save_installed_index, SearchParams, SEARCH_PAGE_SIZE,
+    curseforge_edge_cdn_url, default_datapack_rel_folder, ensure_instance_content_dir, folder_for,
+    install_curseforge_zip, load_installed_index, load_server_installed_index,
+    sanitize_mod_filename, save_installed_index, save_server_installed_index, SearchParams,
+    SEARCH_PAGE_SIZE,
 };
 use crate::mojang::{build_http_client, check_not_cancelled, download_file};
-use crate::storage::instance_dir;
+use crate::servers::server_supports_plugins_live;
+use crate::storage::{instance_dir, server_dir};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -398,15 +401,20 @@ pub fn fetch_curseforge_versions_for_profile(
     }
 }
 
-fn cf_project_meta(client: &Client, api_key: &str, mod_id: u64) -> Option<(String, Option<String>)> {
+fn cf_project_meta(
+    client: &Client,
+    api_key: &str,
+    mod_id: u64,
+) -> Option<(String, Option<String>)> {
     let (base_url, opt_key) = cf_api_endpoint(api_key);
-    let resp: CfSingleModResp = cf_apply_auth(client.get(format!("{base_url}/mods/{mod_id}")), opt_key)
-        .send()
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .ok()?;
+    let resp: CfSingleModResp =
+        cf_apply_auth(client.get(format!("{base_url}/mods/{mod_id}")), opt_key)
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .ok()?;
     let icon = resp
         .data
         .logo
@@ -415,12 +423,12 @@ fn cf_project_meta(client: &Client, api_key: &str, mod_id: u64) -> Option<(Strin
     Some((resp.data.name, icon))
 }
 
-fn install_cf_version_single(
+#[allow(clippy::too_many_arguments)]
+fn install_cf_file_to_dir(
     client: &Client,
-    paths: &LauncherPaths,
-    profile: &Profile,
+    base_dir: &Path,
+    folder_rel: String,
     mod_id: u64,
-    project_type: ModrinthProjectType,
     title: &str,
     icon_url: Option<String>,
     version: &ModrinthVersion,
@@ -431,20 +439,9 @@ fn install_cf_version_single(
         .files
         .first()
         .ok_or_else(|| format!("Version {} has no files", version.version_number))?;
-    let safe_name = Path::new(&file.filename)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty() && !n.contains(".."))
-        .ok_or_else(|| format!("Invalid CurseForge filename: {}", file.filename))?
-        .to_string();
+    let safe_name = sanitize_mod_filename(&file.filename)?;
 
-    let inst = instance_dir(paths, profile);
-    let folder_rel = if project_type == ModrinthProjectType::Datapack {
-        default_datapack_rel_folder(&inst)
-    } else {
-        folder_for(project_type).to_string()
-    };
-    let dest_dir = inst.join(&folder_rel);
+    let dest_dir = base_dir.join(&folder_rel);
     fs::create_dir_all(&dest_dir).map_err(|e| format!("Failed to create {folder_rel}: {e}"))?;
 
     let _ = tx.send(WorkerEvent::Progress {
@@ -461,7 +458,7 @@ fn install_cf_version_single(
     let project_key = format!("cf:{mod_id}");
     if let Some(old) = index.get(&project_key) {
         if old.filename != safe_name {
-            let old_dir = inst.join(&old.folder);
+            let old_dir = base_dir.join(&old.folder);
             let _ = fs::remove_file(old_dir.join(&old.filename));
             let _ = fs::remove_file(old_dir.join(format!("{}.disabled", old.filename)));
         }
@@ -481,6 +478,30 @@ fn install_cf_version_single(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn install_cf_version_single(
+    client: &Client,
+    paths: &LauncherPaths,
+    profile: &Profile,
+    mod_id: u64,
+    project_type: ModrinthProjectType,
+    title: &str,
+    icon_url: Option<String>,
+    version: &ModrinthVersion,
+    index: &mut HashMap<String, InstalledProject>,
+    tx: &Sender<WorkerEvent>,
+) -> Result<String, String> {
+    let inst = instance_dir(paths, profile);
+    let folder_rel = if project_type == ModrinthProjectType::Datapack {
+        default_datapack_rel_folder(&inst)
+    } else {
+        folder_for(project_type).to_string()
+    };
+    install_cf_file_to_dir(
+        client, &inst, folder_rel, mod_id, title, icon_url, version, index, tx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn install_curseforge_project(
     api_key: &str,
     paths: &LauncherPaths,
@@ -493,6 +514,19 @@ pub fn install_curseforge_project(
     tx: &Sender<WorkerEvent>,
 ) -> Result<ModrinthInstallOutcome, String> {
     check_not_cancelled()?;
+    if project_type == ModrinthProjectType::Mod && !profile.loader.is_modded() {
+        return Err("Mods require a modded loader (Fabric, Quilt, Forge, or NeoForge). Switch loader in Instance settings.".to_string());
+    }
+    if project_type == ModrinthProjectType::Plugin {
+        return Err("Plugins can only be installed to Dedicated Servers.".to_string());
+    }
+    let precreated_dest_folder = if project_type != ModrinthProjectType::Modpack {
+        let (_, dest_folder, _) = ensure_instance_content_dir(paths, profile, project_type)?;
+        Some(dest_folder)
+    } else {
+        None
+    };
+
     let client = build_http_client()?;
 
     let version = match chosen_version {
@@ -529,22 +563,10 @@ pub fn install_curseforge_project(
             stage: format!("Downloading modpack {}...", file.filename),
             fraction: 0.12,
         });
-        download_file(
-            &client,
-            &file.url,
-            &tmp_zip,
-            file.hashes.sha1.as_deref(),
-        )?;
+        download_file(&client, &file.url, &tmp_zip, file.hashes.sha1.as_deref())?;
         let res = install_curseforge_zip(paths, &tmp_zip, profile.username.clone(), api_key, tx);
         let _ = fs::remove_file(&tmp_zip);
         return res;
-    }
-
-    if project_type == ModrinthProjectType::Mod && !profile.loader.is_modded() {
-        return Err("Mods require a modded loader (Fabric, Quilt, Forge, or NeoForge). Switch loader in Instance settings.".to_string());
-    }
-    if project_type == ModrinthProjectType::Plugin {
-        return Err("Plugins can only be installed to Dedicated Servers.".to_string());
     }
 
     let mut index = load_installed_index(paths, profile);
@@ -569,8 +591,8 @@ pub fn install_curseforge_project(
             if !visited.insert(dep_id) || index.contains_key(&format!("cf:{dep_id}")) {
                 continue;
             }
-            let (dep_title, dep_icon) =
-                cf_project_meta(&client, api_key, dep_id).unwrap_or_else(|| (format!("CF-{dep_id}"), None));
+            let (dep_title, dep_icon) = cf_project_meta(&client, api_key, dep_id)
+                .unwrap_or_else(|| (format!("CF-{dep_id}"), None));
             let _ = tx.send(WorkerEvent::Progress {
                 stage: format!("Dependency: {dep_title}..."),
                 fraction: 0.75,
@@ -606,11 +628,13 @@ pub fn install_curseforge_project(
     }
 
     save_installed_index(paths, profile, &index);
-    let dest_folder = if project_type == ModrinthProjectType::Datapack {
-        default_datapack_rel_folder(&instance_dir(paths, profile))
-    } else {
-        folder_for(project_type).to_string()
-    };
+    let dest_folder = precreated_dest_folder.unwrap_or_else(|| {
+        if project_type == ModrinthProjectType::Datapack {
+            default_datapack_rel_folder(&instance_dir(paths, profile))
+        } else {
+            folder_for(project_type).to_string()
+        }
+    });
     let _ = tx.send(WorkerEvent::Progress {
         stage: format!("Installed: {filename}"),
         fraction: 1.0,
@@ -619,6 +643,156 @@ pub fn install_curseforge_project(
         title: title.to_string(),
         filename,
         dest_folder,
+        dependencies_installed: deps_installed,
+    })
+}
+
+/// Installs a CurseForge mod or plugin directly into a dedicated server's `mods/` or `plugins/` folder.
+#[allow(clippy::too_many_arguments)]
+pub fn install_curseforge_server_project(
+    api_key: &str,
+    paths: &LauncherPaths,
+    server: &DedicatedServer,
+    mod_id: u64,
+    project_type: ModrinthProjectType,
+    title: &str,
+    icon_url: Option<&str>,
+    chosen_version: Option<&ModrinthVersion>,
+    tx: &Sender<WorkerEvent>,
+) -> Result<ModrinthInstallOutcome, String> {
+    check_not_cancelled()?;
+    let srv_dir = server_dir(paths, server);
+    let dest_folder = match project_type {
+        ModrinthProjectType::Plugin => {
+            if !server_supports_plugins_live(&srv_dir, server.software) {
+                return Err(format!(
+                    "{} server does not support plugins (install a plugin-bridge mod or use Paper/Purpur/Folia/Arclight).",
+                    server.software.label()
+                ));
+            }
+            "plugins"
+        }
+        ModrinthProjectType::Mod => {
+            if !server.software.supports_mods() {
+                return Err(format!(
+                    "{} server does not support mods.",
+                    server.software.label()
+                ));
+            }
+            "mods"
+        }
+        _ => {
+            return Err(
+                "Only plugins and mods can be installed to a dedicated server.".to_string(),
+            );
+        }
+    };
+
+    let loader = if project_type == ModrinthProjectType::Mod {
+        ModLoader::from_kind(
+            server
+                .software
+                .modrinth_mod_loader()
+                .unwrap_or(LoaderKind::Vanilla),
+            String::new(),
+        )
+    } else {
+        ModLoader::Vanilla
+    };
+
+    let client = build_http_client()?;
+    let version = match chosen_version {
+        Some(v) => v.clone(),
+        None => {
+            let _ = tx.send(WorkerEvent::Progress {
+                stage: format!("Finding version for {title}..."),
+                fraction: 0.1,
+            });
+            let mut list = fetch_curseforge_versions_for_profile(
+                api_key,
+                mod_id,
+                project_type,
+                &server.mc_version,
+                &loader,
+            )?;
+            if list.is_empty() && project_type == ModrinthProjectType::Plugin {
+                list = fetch_cf_files_raw(&client, api_key, mod_id, None, None)?;
+            }
+            list.into_iter().next().ok_or_else(|| {
+                format!(
+                    "No compatible CurseForge file found for {title} ({} {}).",
+                    server.mc_version,
+                    server.software.label()
+                )
+            })?
+        }
+    };
+
+    let mut index = load_server_installed_index(paths, server);
+    let filename = install_cf_file_to_dir(
+        &client,
+        &srv_dir,
+        dest_folder.to_string(),
+        mod_id,
+        title,
+        icon_url.map(str::to_string),
+        &version,
+        &mut index,
+        tx,
+    )?;
+
+    let mut deps_installed = Vec::new();
+    if project_type == ModrinthProjectType::Mod && !version.cf_dep_mod_ids.is_empty() {
+        let mut visited: HashSet<u64> = HashSet::from([mod_id]);
+        let mut queue: Vec<u64> = version.cf_dep_mod_ids.clone();
+        while let Some(dep_id) = queue.pop() {
+            if !visited.insert(dep_id) || index.contains_key(&format!("cf:{dep_id}")) {
+                continue;
+            }
+            let (dep_title, dep_icon) = cf_project_meta(&client, api_key, dep_id)
+                .unwrap_or_else(|| (format!("CF-{dep_id}"), None));
+            let _ = tx.send(WorkerEvent::Progress {
+                stage: format!("Dependency: {dep_title}..."),
+                fraction: 0.75,
+            });
+            if let Ok(dep_vers) = fetch_curseforge_versions_for_profile(
+                api_key,
+                dep_id,
+                ModrinthProjectType::Mod,
+                &server.mc_version,
+                &loader,
+            ) {
+                if let Some(dep_ver) = dep_vers.into_iter().next() {
+                    if install_cf_file_to_dir(
+                        &client,
+                        &srv_dir,
+                        dest_folder.to_string(),
+                        dep_id,
+                        &dep_title,
+                        dep_icon,
+                        &dep_ver,
+                        &mut index,
+                        tx,
+                    )
+                    .is_ok()
+                    {
+                        deps_installed.push(dep_title);
+                        queue.extend(dep_ver.cf_dep_mod_ids);
+                    }
+                }
+            }
+        }
+    }
+
+    save_server_installed_index(paths, server, &index);
+    let _ = tx.send(WorkerEvent::Progress {
+        stage: format!("Installed: {filename}"),
+        fraction: 1.0,
+    });
+    Ok(ModrinthInstallOutcome::FileInstalled {
+        title: title.to_string(),
+        filename,
+        dest_folder: dest_folder.to_string(),
         dependencies_installed: deps_installed,
     })
 }

@@ -68,6 +68,25 @@ impl McLauncherApp {
                         );
                         self.export_current_profile_mrpack(ui.ctx(), &profile);
                     }
+                    if ui_button_icon(
+                        ui,
+                        "inst_backup_profile_btn",
+                        Some(Icon::Folder),
+                        tr(self.settings.language, "btn.backup_profile"),
+                        ButtonVariant::Secondary,
+                        true,
+                        30.0,
+                    )
+                    .clicked()
+                    {
+                        anim::emit_ring(
+                            ui.ctx(),
+                            anim::pointer_or_center(ui.ctx()),
+                            accent(),
+                            30.0,
+                        );
+                        self.export_current_profile_archive(ui.ctx(), &profile);
+                    }
 
                     let left_w = (ui.available_width() - 8.0).max(80.0);
                     ui.allocate_ui_with_layout(
@@ -205,6 +224,20 @@ impl McLauncherApp {
                     anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 30.0);
                     self.export_current_profile_mrpack(ui.ctx(), &profile);
                 }
+                if ui_button_icon(
+                    ui,
+                    "inst_backup_profile_btn_narrow",
+                    Some(Icon::Folder),
+                    tr(self.settings.language, "btn.backup_profile"),
+                    ButtonVariant::Secondary,
+                    true,
+                    30.0,
+                )
+                .clicked()
+                {
+                    anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 30.0);
+                    self.export_current_profile_archive(ui.ctx(), &profile);
+                }
             });
         }
 
@@ -297,9 +330,13 @@ impl McLauncherApp {
         let backups = self.cached_world_backups(profile);
         ui_toolbar_row(ui, 30.0, |ui| {
             ui.label(
-                egui::RichText::new(format!("{} {}", worlds.len(), tr(self.settings.language, "inst.saved_worlds")))
-                    .small()
-                    .color(text_secondary()),
+                egui::RichText::new(format!(
+                    "{} {}",
+                    worlds.len(),
+                    tr(self.settings.language, "inst.saved_worlds")
+                ))
+                .small()
+                .color(text_secondary()),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui_button_icon(
@@ -601,8 +638,7 @@ impl McLauncherApp {
                                     {
                                         self.expanded_world_datapacks = None;
                                     } else {
-                                        self.expanded_world_datapacks =
-                                            Some(w.folder_name.clone());
+                                        self.expanded_world_datapacks = Some(w.folder_name.clone());
                                     }
                                 }
                                 if ui_button_icon(
@@ -682,10 +718,7 @@ impl McLauncherApp {
                             );
                         }
                         Err(e) => {
-                            self.show_toast(
-                                ui.ctx(),
-                                format!("{}: {e}", tr(lang, "status.error")),
-                            );
+                            self.show_toast(ui.ctx(), format!("{}: {e}", tr(lang, "status.error")));
                         }
                     }
                 }
@@ -840,7 +873,12 @@ impl McLauncherApp {
                         )
                         .clicked()
                         {
-                            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 28.0);
+                            anim::emit_ring(
+                                ui.ctx(),
+                                anim::pointer_or_center(ui.ctx()),
+                                accent(),
+                                28.0,
+                            );
                             open_in_file_manager(&inst.join("backups"));
                         }
                     });
@@ -1042,7 +1080,12 @@ impl McLauncherApp {
                         ui.ctx().request_repaint();
                     }
                     if action_restore {
-                        anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 30.0);
+                        anim::emit_ring(
+                            ui.ctx(),
+                            anim::pointer_or_center(ui.ctx()),
+                            accent(),
+                            30.0,
+                        );
                         self.world_backup_busy = true;
                         let inst_dir = instance_dir(&self.paths, profile);
                         let fname = b.file_name.clone();
@@ -1220,10 +1263,7 @@ impl McLauncherApp {
                                             ui.painter().image(
                                                 tex.id(),
                                                 t_rect,
-                                                Rect::from_min_max(
-                                                    Pos2::ZERO,
-                                                    Pos2::new(1.0, 1.0),
-                                                ),
+                                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                                                 Color32::WHITE,
                                             );
                                         }
@@ -1277,7 +1317,8 @@ impl McLauncherApp {
                             let thumb_size = Vec2::new(88.0, 50.0);
                             let (t_rect, t_resp) =
                                 ui.allocate_exact_size(thumb_size, Sense::click());
-                            ui.painter().rect_filled(t_rect, Rounding::same(6.0), bg_input());
+                            ui.painter()
+                                .rect_filled(t_rect, Rounding::same(6.0), bg_input());
                             if let Some(ref tex) = thumb_tex {
                                 ui.painter().image(
                                     tex.id(),
@@ -1379,6 +1420,7 @@ impl McLauncherApp {
         let inst = instance_dir(&self.paths, profile);
         let folder_name = self.content_folder.dir_name();
         let target_dir = inst.join(folder_name);
+        let _ = std::fs::create_dir_all(&target_dir);
         let items = self.cached_content_items(profile, folder_name);
         let total_count = items.len();
         let enabled_count = items.iter().filter(|i| i.enabled).count();
@@ -1409,8 +1451,12 @@ impl McLauncherApp {
             .unwrap_or_default();
         let state_label = |s: ContentStateFilter| match s {
             ContentStateFilter::All => format!("{} ({total_count})", tr(lang, "lib.all")),
-            ContentStateFilter::Enabled => format!("{} ({enabled_count})", tr(lang, "content.enabled")),
-            ContentStateFilter::Disabled => format!("{} ({disabled_count})", tr(lang, "content.disabled")),
+            ContentStateFilter::Enabled => {
+                format!("{} ({enabled_count})", tr(lang, "content.enabled"))
+            }
+            ContentStateFilter::Disabled => {
+                format!("{} ({disabled_count})", tr(lang, "content.disabled"))
+            }
         };
 
         let mut folder_val = self.content_folder;
@@ -1617,7 +1663,13 @@ impl McLauncherApp {
                     self.fs_cache.invalidate();
                     let pos = anim::pointer_or_center(ui.ctx());
                     anim::emit_burst(ui.ctx(), pos, accent(), 8);
-                    anim::emit_floating_badge(ui.ctx(), pos, Some(Icon::Check), format!("+{n}"), accent());
+                    anim::emit_floating_badge(
+                        ui.ctx(),
+                        pos,
+                        Some(Icon::Check),
+                        format!("+{n}"),
+                        accent(),
+                    );
                     self.show_toast(
                         ui.ctx(),
                         format!("{}: {n}", tr(lang, "toast.enabled_count")),
@@ -1632,7 +1684,13 @@ impl McLauncherApp {
                     self.fs_cache.invalidate();
                     let pos = anim::pointer_or_center(ui.ctx());
                     anim::emit_ring(ui.ctx(), pos, text_secondary(), 30.0);
-                    anim::emit_floating_badge(ui.ctx(), pos, None, format!("-{n}"), text_secondary());
+                    anim::emit_floating_badge(
+                        ui.ctx(),
+                        pos,
+                        None,
+                        format!("-{n}"),
+                        text_secondary(),
+                    );
                     self.show_toast(
                         ui.ctx(),
                         format!("{}: {n}", tr(lang, "toast.disabled_count")),
@@ -1713,10 +1771,8 @@ impl McLauncherApp {
                     } else {
                         ui_wrap_row(ui, 30.0, |ui| {
                             ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(msg).color(text_secondary()),
-                                )
-                                .wrap(),
+                                egui::Label::new(egui::RichText::new(msg).color(text_secondary()))
+                                    .wrap(),
                             );
                             browse_btn(ui);
                         });
@@ -1745,11 +1801,8 @@ impl McLauncherApp {
                             }
                         }
 
-                        let card_id = ui.make_persistent_id((
-                            "mod_card_hover",
-                            folder_name,
-                            &item.base_name,
-                        ));
+                        let card_id =
+                            ui.make_persistent_id(("mod_card_hover", folder_name, &item.base_name));
                         animated_card(ui, card_id, false, |ui| {
                             ui.set_min_width(card_inner_w);
                             ui.set_max_width(card_inner_w);
@@ -1832,15 +1885,17 @@ impl McLauncherApp {
                                                 toggle_disk_name = Some(item.disk_name.clone());
                                             }
 
-                                            let icon_url_opt = info.and_then(|i| i.icon_url.as_ref());
+                                            let icon_url_opt =
+                                                info.and_then(|i| i.icon_url.as_ref());
                                             if left_w >= 120.0 {
                                                 let icon_px = 30.0;
                                                 let tex_opt = icon_url_opt
                                                     .and_then(|u| self.mr_icons.get(u))
                                                     .and_then(|o| o.as_ref());
-                                                let is_icon_loading = icon_url_opt.is_some_and(|u| {
-                                                    self.mr_icons_pending.contains(u.as_str())
-                                                });
+                                                let is_icon_loading =
+                                                    icon_url_opt.is_some_and(|u| {
+                                                        self.mr_icons_pending.contains(u.as_str())
+                                                    });
                                                 let icon_size = Vec2::splat(icon_px);
                                                 if let Some(tex) = tex_opt {
                                                     ui.add(
@@ -2089,9 +2144,7 @@ impl McLauncherApp {
         ui.add_space(6.0);
         if self.inst_log_files.is_empty() {
             card_frame(false, 0.0).show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(tr(lang, "logs.empty")).color(text_secondary()),
-                );
+                ui.label(egui::RichText::new(tr(lang, "logs.empty")).color(text_secondary()));
             });
         } else {
             let log_label = |entry: &InstanceLogFile| {
@@ -2224,8 +2277,23 @@ impl McLauncherApp {
         let mut trigger_pick_icon = false;
         let mut trigger_pick_java = false;
         let mut rename_dir = false;
+        let mut dup_name_toast = false;
         let can_delete = self.profiles.len() > 1;
         let selected_idx = self.selected_idx;
+        let other_profile_names: Vec<String> = self
+            .profiles
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != selected_idx)
+            .map(|(_, p)| p.name.trim().to_lowercase())
+            .collect();
+        let other_profiles_snapshot: Vec<Profile> = self
+            .profiles
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != selected_idx)
+            .map(|(_, p)| p.clone())
+            .collect();
 
         bounded_scroll(ui, "profile_tab_scroll", |ui| {
             let profile = &mut self.profiles[selected_idx];
@@ -2309,20 +2377,45 @@ impl McLauncherApp {
                             ui.end_row();
 
                             ui.label(tr(self.settings.language, "inst.name"));
-                            let name_resp = ui_text_input(
-                                ui,
-                                "cfg_inst_name_w",
-                                &mut profile.name,
-                                tr(self.settings.language, "inst.name_hint"),
-                                col1_w.min(360.0),
-                                false,
-                            );
-                            if name_resp.changed() {
-                                changed = true;
-                            }
-                            if name_resp.lost_focus() {
-                                rename_dir = true;
-                            }
+                            ui.vertical(|ui| {
+                                let name_resp = ui_text_input(
+                                    ui,
+                                    "cfg_inst_name_w",
+                                    &mut profile.name,
+                                    tr(self.settings.language, "inst.name_hint"),
+                                    col1_w.min(360.0),
+                                    false,
+                                );
+                                let trimmed = profile.name.trim().to_lowercase();
+                                let is_dup = !trimmed.is_empty()
+                                    && other_profile_names.iter().any(|n| n == &trimmed);
+                                if is_dup {
+                                    ui.label(
+                                        egui::RichText::new(tr(
+                                            self.settings.language,
+                                            "err.duplicate_instance_name",
+                                        ))
+                                        .small()
+                                        .color(DANGER),
+                                    );
+                                }
+                                if name_resp.changed() && !is_dup && !trimmed.is_empty() {
+                                    changed = true;
+                                }
+                                if name_resp.lost_focus() {
+                                    if is_dup {
+                                        profile.name = super::disambiguate_profile_name(
+                                            &profile.name,
+                                            &other_profiles_snapshot,
+                                        );
+                                        dup_name_toast = true;
+                                        changed = true;
+                                        rename_dir = true;
+                                    } else if !trimmed.is_empty() {
+                                        rename_dir = true;
+                                    }
+                                }
+                            });
                             ui.end_row();
 
                             ui.label(tr(self.settings.language, "inst.mc_version"));
@@ -2335,7 +2428,10 @@ impl McLauncherApp {
                                         .truncate()
                                         .show_ui(ui, |ui| {
                                             if filtered_versions.is_empty() {
-                                                ui.label(tr(self.settings.language, "inst.loading_versions"));
+                                                ui.label(tr(
+                                                    self.settings.language,
+                                                    "inst.loading_versions",
+                                                ));
                                             } else {
                                                 for vid in &filtered_versions {
                                                     if ui
@@ -2436,11 +2532,34 @@ impl McLauncherApp {
                         field_w,
                         false,
                     );
-                    if name_resp.changed() {
+                    let trimmed = profile.name.trim().to_lowercase();
+                    let is_dup =
+                        !trimmed.is_empty() && other_profile_names.iter().any(|n| n == &trimmed);
+                    if is_dup {
+                        ui.label(
+                            egui::RichText::new(tr(
+                                self.settings.language,
+                                "err.duplicate_instance_name",
+                            ))
+                            .small()
+                            .color(DANGER),
+                        );
+                    }
+                    if name_resp.changed() && !is_dup && !trimmed.is_empty() {
                         changed = true;
                     }
                     if name_resp.lost_focus() {
-                        rename_dir = true;
+                        if is_dup {
+                            profile.name = super::disambiguate_profile_name(
+                                &profile.name,
+                                &other_profiles_snapshot,
+                            );
+                            dup_name_toast = true;
+                            changed = true;
+                            rename_dir = true;
+                        } else if !trimmed.is_empty() {
+                            rename_dir = true;
+                        }
                     }
                     ui.add_space(6.0);
 
@@ -2879,7 +2998,11 @@ impl McLauncherApp {
                 section_header(ui, tr(self.settings.language, "inst.sec_window"));
                 ui.add_space(6.0);
 
-                ui.label(egui::RichText::new(tr(self.settings.language, "inst.game_resolution")).small().color(text_secondary()));
+                ui.label(
+                    egui::RichText::new(tr(self.settings.language, "inst.game_resolution"))
+                        .small()
+                        .color(text_secondary()),
+                );
                 let cur_res = (profile.window_width, profile.window_height);
                 let res_options = [
                     ("Default", None),
@@ -2896,11 +3019,7 @@ impl McLauncherApp {
                     })
                     .map(|(l, _)| l.to_string())
                     .unwrap_or_else(|| {
-                        format!(
-                            "{}×{}",
-                            cur_res.0.unwrap_or(854),
-                            cur_res.1.unwrap_or(480)
-                        )
+                        format!("{}×{}", cur_res.0.unwrap_or(854), cur_res.1.unwrap_or(480))
                     });
                 egui::ComboBox::from_id_salt("inst_res_preset_combo")
                     .selected_text(cur_res_lbl)
@@ -2923,7 +3042,12 @@ impl McLauncherApp {
                                         profile.window_height = Some(h);
                                     }
                                 }
-                                anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 26.0);
+                                anim::emit_ring(
+                                    ui.ctx(),
+                                    anim::pointer_or_center(ui.ctx()),
+                                    accent(),
+                                    26.0,
+                                );
                                 changed = true;
                             }
                         }
@@ -3047,7 +3171,6 @@ impl McLauncherApp {
                     changed = true;
                 }
             });
-
         });
 
         if rescan_java {
@@ -3067,6 +3190,12 @@ impl McLauncherApp {
         if trigger_del {
             anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), DANGER, 30.0);
             self.confirm_delete_idx = Some(selected_idx);
+        }
+        if dup_name_toast {
+            self.show_toast(
+                ui.ctx(),
+                tr(self.settings.language, "err.duplicate_instance_name"),
+            );
         }
         if rename_dir && !self.profiles[selected_idx].name.trim().is_empty() {
             let others: Vec<Profile> = self

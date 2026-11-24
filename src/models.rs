@@ -49,7 +49,9 @@ impl LoaderKind {
 /// Mod loader type for a Minecraft profile/instance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ModLoader {
+    #[default]
     Vanilla,
     Fabric {
         #[serde(default)]
@@ -67,12 +69,6 @@ pub enum ModLoader {
         #[serde(default)]
         loader_version: String,
     },
-}
-
-impl Default for ModLoader {
-    fn default() -> Self {
-        Self::Vanilla
-    }
 }
 
 impl ModLoader {
@@ -739,6 +735,7 @@ pub struct LauncherUpdateInfo {
     pub notes: String,
     pub download_url: Option<String>,
     pub sha256_url: Option<String>,
+    pub sha256_digest: Option<String>,
     pub asset_name: Option<String>,
     pub asset_size: Option<u64>,
 }
@@ -1375,7 +1372,10 @@ mod tests {
     fn sunset_theme_is_first_and_default() {
         assert_eq!(ThemePreset::ALL[0], ThemePreset::Sunset);
         assert_eq!(ThemePreset::default(), ThemePreset::Sunset);
-        assert_eq!(LauncherSettings::default().theme_preset, ThemePreset::Sunset);
+        assert_eq!(
+            LauncherSettings::default().theme_preset,
+            ThemePreset::Sunset
+        );
         assert_eq!(ThemePreset::Sunset.palette().accent, [255, 128, 66]);
         assert_eq!(ThemePreset::Emerald.palette().accent, [27, 217, 106]);
     }
@@ -1409,4 +1409,3 @@ mod tests {
         assert!(p.prefer_discrete_gpu);
     }
 }
-

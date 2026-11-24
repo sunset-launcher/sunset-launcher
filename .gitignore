@@ -1,5 +1,6 @@
 # Rust build & debug artifacts
 /target/
+/tests/
 **/*.rs.bk
 *.pdb
 *.profraw
@@ -33,3 +34,4 @@ profiles.json
 # Separate website repository
 /site/
 
+.aider*

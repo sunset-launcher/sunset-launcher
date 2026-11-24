@@ -1,0 +1,13 @@
+pub mod auth;
+pub mod curseforge;
+pub mod discord;
+pub mod i18n;
+pub mod icons;
+pub mod launcher;
+pub mod models;
+pub mod modrinth;
+pub mod mojang;
+pub mod servers;
+pub mod storage;
+pub mod theme;
+pub mod ui;

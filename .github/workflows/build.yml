@@ -82,6 +82,14 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Check formatting
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
+
       - name: Run unit tests
         if: matrix.target != 'x86_64-apple-darwin'
         run: cargo test --target ${{ matrix.target }}
@@ -89,11 +97,11 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Prepare standalone artifact
+      - name: Prepare release binary
         shell: bash
         run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "dist/${{ matrix.artifact_name }}"
+          mkdir -p dist staging
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "staging/${{ matrix.artifact_name }}"
 
       - name: Sign Windows binary (if certificate secrets configured)
         if: runner.os == 'Windows'
@@ -101,7 +109,7 @@ jobs:
         env:
           PFX_B64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
           PFX_PASS: ${{ secrets.WINDOWS_CERT_PASSWORD }}
-          ARTIFACT: dist/${{ matrix.artifact_name }}
+          ARTIFACT: staging/${{ matrix.artifact_name }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:PFX_B64)) {
             Write-Host "No WINDOWS_CERT_PFX_BASE64 secret configured; skipping Authenticode signing."
@@ -120,7 +128,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/${{ matrix.artifact_name }}" -DestinationPath "dist/sunset-launcher-windows-x64-portable.zip" -Force
+          Compress-Archive -Path "staging/${{ matrix.artifact_name }}" -DestinationPath "dist/sunset-launcher-windows-x64-portable.zip" -Force
 
       - name: Package Windows installer (Inno Setup)
         if: runner.os == 'Windows'
@@ -159,7 +167,7 @@ jobs:
           VER=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
           PKG_DIR="deb_root"
           mkdir -p "$PKG_DIR/DEBIAN" "$PKG_DIR/usr/bin" "$PKG_DIR/usr/share/applications" "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
-          cp "dist/${{ matrix.artifact_name }}" "$PKG_DIR/usr/bin/sunset-launcher"
+          cp "staging/${{ matrix.artifact_name }}" "$PKG_DIR/usr/bin/sunset-launcher"
           chmod 0755 "$PKG_DIR/usr/bin/sunset-launcher"
           cp logo.png "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/sunset-launcher.png"
           cat > "$PKG_DIR/usr/share/applications/sunset-launcher.desktop" <<'EOF'
@@ -196,7 +204,7 @@ jobs:
           RPM_TOP="$PWD/rpmbuild"
           rm -rf "$RPM_TOP"
           mkdir -p "$RPM_TOP"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-          cp "dist/${{ matrix.artifact_name }}" "$RPM_TOP/SOURCES/sunset-launcher"
+          cp "staging/${{ matrix.artifact_name }}" "$RPM_TOP/SOURCES/sunset-launcher"
           cp logo.png "$RPM_TOP/SOURCES/sunset-launcher.png"
           cat > "$RPM_TOP/SOURCES/sunset-launcher.desktop" <<'EOF'
           [Desktop Entry]
@@ -249,7 +257,7 @@ jobs:
           APP_DIR="AppDir"
           rm -rf "$APP_DIR"
           mkdir -p "$APP_DIR/usr/bin" "$APP_DIR/usr/share/applications" "$APP_DIR/usr/share/icons/hicolor/256x256/apps"
-          cp "dist/${{ matrix.artifact_name }}" "$APP_DIR/usr/bin/sunset-launcher"
+          cp "staging/${{ matrix.artifact_name }}" "$APP_DIR/usr/bin/sunset-launcher"
           chmod 0755 "$APP_DIR/usr/bin/sunset-launcher"
           cp logo.png "$APP_DIR/usr/share/icons/hicolor/256x256/apps/sunset-launcher.png"
           cp logo.png "$APP_DIR/sunset-launcher.png"
@@ -287,7 +295,7 @@ jobs:
           APP_DIR="Sunset Launcher.app/Contents"
           rm -rf "Sunset Launcher.app" AppIcon.iconset
           mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
-          cp "dist/${{ matrix.artifact_name }}" "$APP_DIR/MacOS/sunset-launcher"
+          cp "staging/${{ matrix.artifact_name }}" "$APP_DIR/MacOS/sunset-launcher"
           chmod +x "$APP_DIR/MacOS/sunset-launcher"
           cp logo.png "$APP_DIR/Resources/logo.png"
           ICON_PLIST=""
@@ -335,20 +343,6 @@ jobs:
           ln -s /Applications "dmg_root/Applications"
           hdiutil create -volname "Sunset Launcher" -srcfolder dmg_root -ov -format UDZO "dist/${{ matrix.artifact_name }}.dmg"
           rm -rf dmg_root
-
-      - name: Generate SHA-256 checksums
-        shell: bash
-        run: |
-          cd dist
-          for f in *; do
-            [ -f "$f" ] || continue
-            case "$f" in *.sha256) continue ;; esac
-            if command -v sha256sum >/dev/null 2>&1; then
-              sha256sum "$f" > "$f.sha256"
-            else
-              shasum -a 256 "$f" > "$f.sha256"
-            fi
-          done
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

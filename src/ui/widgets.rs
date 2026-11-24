@@ -1,6 +1,11 @@
 use super::*;
 
-pub(super) fn score_palette_match(query: &str, title: &str, subtitle: &str, keywords: &str) -> Option<i32> {
+pub(super) fn score_palette_match(
+    query: &str,
+    title: &str,
+    subtitle: &str,
+    keywords: &str,
+) -> Option<i32> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return Some(0);
@@ -198,7 +203,11 @@ pub(super) fn build_win32_file_filter_utf16(filter_label: &str, exts: &[&str]) -
         .collect()
 }
 
-pub(super) fn pick_file(title: &str, filter_label: &str, exts: &[&str]) -> Option<std::path::PathBuf> {
+pub(super) fn pick_file(
+    title: &str,
+    filter_label: &str,
+    exts: &[&str],
+) -> Option<std::path::PathBuf> {
     #[cfg(target_os = "linux")]
     {
         use std::io::ErrorKind;
@@ -224,35 +233,29 @@ pub(super) fn pick_file(title: &str, filter_label: &str, exts: &[&str]) -> Optio
                 Err(_) => continue,
             }
         }
-        match std::process::Command::new("yad")
+        if let Ok(out) = std::process::Command::new("yad")
             .args(["--file", &title_arg, &filter_arg])
             .output()
         {
-            Ok(out) => {
-                if out.status.success() {
-                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    if !s.is_empty() {
-                        return Some(std::path::PathBuf::from(s));
-                    }
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
                 }
-                return None;
             }
-            Err(_) => {}
+            return None;
         }
-        match std::process::Command::new("kdialog")
+        if let Ok(out) = std::process::Command::new("kdialog")
             .args(["--title", title, "--getopenfilename", ".", &joined])
             .output()
         {
-            Ok(out) => {
-                if out.status.success() {
-                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    if !s.is_empty() {
-                        return Some(std::path::PathBuf::from(s));
-                    }
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
                 }
-                return None;
             }
-            Err(_) => {}
+            return None;
         }
         let py_script = format!(
             "import tkinter as tk; from tkinter import filedialog; r = tk.Tk(); r.withdraw(); p = filedialog.askopenfilename(title={title:?}, filetypes=[({filter_label:?}, {joined:?})]); print(p or '')"
@@ -355,7 +358,9 @@ pub(super) fn pick_file(title: &str, filter_label: &str, exts: &[&str]) -> Optio
                 .iter()
                 .position(|&c| c == 0)
                 .unwrap_or(file_buf.len());
-            let s = String::from_utf16_lossy(&file_buf[..end]).trim().to_string();
+            let s = String::from_utf16_lossy(&file_buf[..end])
+                .trim()
+                .to_string();
             if !s.is_empty() {
                 return Some(std::path::PathBuf::from(s));
             }
@@ -365,7 +370,10 @@ pub(super) fn pick_file(title: &str, filter_label: &str, exts: &[&str]) -> Optio
     {
         let _ = (title, filter_label);
         let types: Vec<String> = exts.iter().map(|e| format!("\"{e}\"")).collect();
-        let script = format!("POSIX path of (choose file of type {{{}}})", types.join(", "));
+        let script = format!(
+            "POSIX path of (choose file of type {{{}}})",
+            types.join(", ")
+        );
         if let Ok(out) = std::process::Command::new("osascript")
             .args(["-e", &script])
             .output()
@@ -399,7 +407,11 @@ pub(super) fn draw_account_avatar(
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
-            painter.rect_stroke(rect, rounding, Stroke::new(1.0_f32, with_alpha(fallback_col, 140)));
+            painter.rect_stroke(
+                rect,
+                rounding,
+                Stroke::new(1.0_f32, with_alpha(fallback_col, 140)),
+            );
             return;
         }
     }
@@ -440,14 +452,7 @@ pub(super) fn draw_server_card_avatar(
     if let Some(tex) = icon_tex {
         draw_instance_image_avatar(painter, rect, tex.id(), selected, is_running);
     } else {
-        draw_server_avatar(
-            painter,
-            rect,
-            &srv.name,
-            srv.software,
-            selected,
-            is_running,
-        );
+        draw_server_avatar(painter, rect, &srv.name, srv.software, selected, is_running);
     }
 }
 
@@ -464,7 +469,12 @@ pub(super) fn apply_profile_icon_from_file(
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
-        .filter(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "ico"))
+        .filter(|e| {
+            matches!(
+                e.as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "ico"
+            )
+        })
         .unwrap_or_else(|| "png".to_string());
     let inst_dir = instance_dir(paths, profile);
     let _ = std::fs::create_dir_all(&inst_dir);
@@ -502,7 +512,9 @@ pub(super) fn render_instance_avatar_controls(
         ui.spacing_mut().item_spacing.x = 8.0;
         let av_id = ui.make_persistent_id((id_salt, "avatar_click"));
         let (av_rect, av_resp) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
-        let hov_t = ui.ctx().animate_bool_with_time(av_id.with("hov"), av_resp.hovered(), 0.12);
+        let hov_t = ui
+            .ctx()
+            .animate_bool_with_time(av_id.with("hov"), av_resp.hovered(), 0.12);
         let prs_t = ui.ctx().animate_bool_with_time(
             av_id.with("prs"),
             av_resp.is_pointer_button_down_on(),
@@ -586,7 +598,11 @@ pub(super) fn clamp_summary(s: &str, max_chars: usize) -> String {
     out
 }
 
-pub(super) fn render_loader_kind_pills(ui: &mut egui::Ui, id_prefix: &str, loader: &mut ModLoader) -> bool {
+pub(super) fn render_loader_kind_pills(
+    ui: &mut egui::Ui,
+    id_prefix: &str,
+    loader: &mut ModLoader,
+) -> bool {
     let mut changed = false;
     let mut current = loader.kind();
     let combo_w = ui.available_width().clamp(90.0, 170.0);
@@ -596,7 +612,10 @@ pub(super) fn render_loader_kind_pills(ui: &mut egui::Ui, id_prefix: &str, loade
         .truncate()
         .show_ui(ui, |ui| {
             for kind in LoaderKind::ALL {
-                if ui.selectable_value(&mut current, kind, kind.label()).changed() {
+                if ui
+                    .selectable_value(&mut current, kind, kind.label())
+                    .changed()
+                {
                     *loader = ModLoader::from_kind(kind, String::new());
                     changed = true;
                 }
