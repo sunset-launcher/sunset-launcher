@@ -441,18 +441,13 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
 }
 
 /// Draws the Sunset Launcher vector emblem fallback: twilight squircle,
-/// glowing sunset sun disc, and dark isometric Minecraft cube with amber rim-lighting.
+/// sunset sun disc, and dark isometric Minecraft cube with amber rim-lighting.
 pub fn draw_brand_logo(painter: &egui::Painter, rect: Rect) {
     let s = rect.width().min(rect.height());
     let rounding = Rounding::same((s * 0.26).clamp(6.0, 12.0));
     let sun_coral = Color32::from_rgb(245, 114, 62);
     let sun_gold = Color32::from_rgb(255, 198, 92);
 
-    painter.rect_filled(
-        rect.expand(2.0),
-        Rounding::same((s * 0.30).clamp(7.0, 14.0)),
-        Color32::from_rgba_unmultiplied(sun_coral.r(), sun_coral.g(), sun_coral.b(), 48),
-    );
     painter.rect(
         rect,
         rounding,
@@ -706,44 +701,15 @@ pub fn draw_icon_animated(
     }
 }
 
-/// Draws the Sunset emblem with hover halo and click pop/burst ring.
+/// Draws the flat Sunset block glyph without halos or burst rings.
 #[allow(dead_code)]
 pub fn draw_brand_logo_animated(
     painter: &egui::Painter,
     rect: Rect,
-    hover_t: f32,
-    click_t: Option<f32>,
+    _hover_t: f32,
+    _click_t: Option<f32>,
 ) {
-    let pop = click_t.map_or(0.0, |t| (t * std::f32::consts::PI).sin());
-    let s = rect.width().min(rect.height());
-    let draw_rect = Rect::from_center_size(
-        rect.center(),
-        rect.size() * (1.0 + hover_t * 0.04 + pop * 0.08),
-    );
-    if hover_t > 0.02 {
-        let halo_a = (hover_t * 48.0).round() as u8;
-        painter.rect_filled(
-            draw_rect.expand(2.0 + hover_t * 2.5),
-            Rounding::same((s * 0.32).clamp(8.0, 15.0)),
-            Color32::from_rgba_unmultiplied(255, 165, 84, halo_a),
-        );
-    }
-    draw_brand_logo(painter, draw_rect);
-    if let Some(t) = click_t {
-        let inv = 1.0 - t.clamp(0.0, 1.0);
-        let expand = crate::ui::anim::ease_out_quint(t) * 6.0;
-        let ring_a = (inv * inv * 180.0).round() as u8;
-        if ring_a > 1 {
-            painter.rect_stroke(
-                draw_rect.expand(expand),
-                Rounding::same((s * 0.28 + expand * 0.4).clamp(7.0, 16.0)),
-                Stroke::new(
-                    1.5_f32,
-                    Color32::from_rgba_unmultiplied(255, 198, 92, ring_a),
-                ),
-            );
-        }
-    }
+    draw_brand_logo(painter, rect);
 }
 
 /// Decodes `logo.png` into a 64x64 RGBA `egui::IconData` for the OS window/taskbar.

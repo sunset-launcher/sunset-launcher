@@ -6,7 +6,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -227,7 +229,11 @@ fn exchange_ms_token_for_minecraft(
 }
 
 /// Starts Microsoft Device Code Flow in a background thread and reports progress via `tx`.
-pub fn start_microsoft_device_login(client_id: String, tx: Sender<WorkerEvent>) {
+pub fn start_microsoft_device_login(
+    client_id: String,
+    cancel_token: Arc<AtomicBool>,
+    tx: Sender<WorkerEvent>,
+) {
     let effective_client_id = if client_id.trim().is_empty() {
         DEFAULT_MS_CLIENT_ID.to_string()
     } else {
@@ -235,6 +241,9 @@ pub fn start_microsoft_device_login(client_id: String, tx: Sender<WorkerEvent>) 
     };
 
     thread::spawn(move || {
+        if cancel_token.load(Ordering::Relaxed) {
+            return;
+        }
         let client = match build_http_client() {
             Ok(c) => c,
             Err(e) => {
@@ -250,6 +259,10 @@ pub fn start_microsoft_device_login(client_id: String, tx: Sender<WorkerEvent>) 
                 ("scope", "XboxLive.signin offline_access"),
             ])
             .send();
+
+        if cancel_token.load(Ordering::Relaxed) {
+            return;
+        }
 
         let dc: DeviceCodeResponse = match resp {
             Ok(r) if r.status().is_success() => match r.json() {
@@ -286,7 +299,19 @@ pub fn start_microsoft_device_login(client_id: String, tx: Sender<WorkerEvent>) 
         let deadline = std::time::Instant::now() + Duration::from_secs(dc.expires_in);
 
         while std::time::Instant::now() < deadline {
-            thread::sleep(interval);
+            let step = Duration::from_millis(250);
+            let mut slept = Duration::ZERO;
+            while slept < interval {
+                if cancel_token.load(Ordering::Relaxed) {
+                    return;
+                }
+                let chunk = (interval - slept).min(step);
+                thread::sleep(chunk);
+                slept += chunk;
+            }
+            if cancel_token.load(Ordering::Relaxed) {
+                return;
+            }
 
             let token_resp = client
                 .post(MS_TOKEN_URL)
@@ -297,6 +322,10 @@ pub fn start_microsoft_device_login(client_id: String, tx: Sender<WorkerEvent>) 
                 ])
                 .send();
 
+            if cancel_token.load(Ordering::Relaxed) {
+                return;
+            }
+
             let Ok(r) = token_resp else {
                 continue;
             };
@@ -306,7 +335,9 @@ pub fn start_microsoft_device_login(client_id: String, tx: Sender<WorkerEvent>) 
                     Ok(tok) => {
                         let refresh = tok.refresh_token.unwrap_or_default();
                         let res = exchange_ms_token_for_minecraft(&tok.access_token, &refresh);
-                        let _ = tx.send(WorkerEvent::MsAuthFinished(res));
+                        if !cancel_token.load(Ordering::Relaxed) {
+                            let _ = tx.send(WorkerEvent::MsAuthFinished(res));
+                        }
                         return;
                     }
                     Err(e) => {
@@ -329,9 +360,11 @@ pub fn start_microsoft_device_login(client_id: String, tx: Sender<WorkerEvent>) 
             }
         }
 
-        let _ = tx.send(WorkerEvent::MsAuthFinished(Err(
-            "Microsoft authentication timed out.".to_string(),
-        )));
+        if !cancel_token.load(Ordering::Relaxed) {
+            let _ = tx.send(WorkerEvent::MsAuthFinished(Err(
+                "Microsoft authentication timed out.".to_string(),
+            )));
+        }
     });
 }
 

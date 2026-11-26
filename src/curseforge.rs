@@ -478,7 +478,7 @@ fn install_cf_file_to_dir(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn install_cf_version_single(
+pub(crate) fn install_cf_version_single(
     client: &Client,
     paths: &LauncherPaths,
     profile: &Profile,
@@ -797,6 +797,185 @@ pub fn install_curseforge_server_project(
     })
 }
 
+/// Computes the CurseForge MurmurHash2 (32-bit, seed = 1) file fingerprint,
+/// skipping whitespace bytes (`\t`, `\n`, `\r`, `' '`) per the CurseForge spec.
+pub fn compute_curseforge_fingerprint(bytes: &[u8]) -> u32 {
+    const M: u32 = 0x5bd1_e995;
+    const R: u32 = 24;
+    let is_ws = |b: u8| matches!(b, 9 | 10 | 13 | 32);
+
+    let len = bytes.iter().filter(|&&b| !is_ws(b)).count() as u32;
+    let mut h: u32 = 1 ^ len;
+    let mut chunk: u32 = 0;
+    let mut shift: u32 = 0;
+
+    for &b in bytes {
+        if is_ws(b) {
+            continue;
+        }
+        chunk |= (b as u32) << shift;
+        shift += 8;
+        if shift == 32 {
+            let mut k = chunk.wrapping_mul(M);
+            k ^= k >> R;
+            k = k.wrapping_mul(M);
+            h = h.wrapping_mul(M) ^ k;
+            chunk = 0;
+            shift = 0;
+        }
+    }
+
+    if shift > 0 {
+        h ^= chunk;
+        h = h.wrapping_mul(M);
+    }
+
+    h ^= h >> 13;
+    h = h.wrapping_mul(M);
+    h ^= h >> 15;
+    h
+}
+
+pub fn compute_file_curseforge_fingerprint(path: &Path) -> Result<u32, String> {
+    let bytes =
+        fs::read(path).map_err(|e| format!("Failed to read {} for fingerprint: {e}", path.display()))?;
+    Ok(compute_curseforge_fingerprint(&bytes))
+}
+
+#[derive(Deserialize)]
+struct CfFingerprintsResp {
+    data: CfFingerprintsData,
+}
+
+#[derive(Deserialize)]
+struct CfFingerprintsData {
+    #[serde(rename = "exactMatches", default)]
+    exact_matches: Vec<CfFingerprintMatch>,
+}
+
+#[derive(Deserialize)]
+struct CfFingerprintMatch {
+    id: u64,
+    file: CfFingerprintFile,
+}
+
+#[derive(Deserialize)]
+struct CfFingerprintFile {
+    #[serde(rename = "displayName", default)]
+    display_name: String,
+    #[serde(rename = "fileName", default)]
+    file_name: String,
+    #[serde(rename = "fileFingerprint", default)]
+    file_fingerprint: u64,
+}
+
+#[derive(Deserialize)]
+struct CfModsBatchResp {
+    data: Vec<CfModEntry>,
+}
+
+/// Looks up unmatched local content files against CurseForge's `/fingerprints` API.
+/// `items` is a list of `(folder, base_name, murmur2_fingerprint)`.
+pub fn identify_curseforge_files_by_fingerprint(
+    client: &Client,
+    api_key: &str,
+    items: &[(String, String, u32)],
+) -> HashMap<String, InstalledProject> {
+    let mut out = HashMap::new();
+    if items.is_empty() {
+        return out;
+    }
+
+    let (base, key) = cf_api_endpoint(api_key);
+    let mut fp_to_meta: HashMap<u64, (&str, &str)> = HashMap::new();
+    let mut all_fps: Vec<u64> = Vec::with_capacity(items.len());
+    for (folder, base_name, fp) in items {
+        let fp64 = *fp as u64;
+        if fp_to_meta.insert(fp64, (folder.as_str(), base_name.as_str())).is_none() {
+            all_fps.push(fp64);
+        }
+    }
+
+    let mut matches: Vec<CfFingerprintMatch> = Vec::new();
+    for chunk in all_fps.chunks(100) {
+        let body = serde_json::json!({ "fingerprints": chunk });
+        let url = format!("{base}/fingerprints/{CF_MINECRAFT_GAME_ID}");
+        let resp = cf_apply_auth(client.post(&url).json(&body), key)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .or_else(|_| {
+                let fallback = format!("{base}/fingerprints");
+                cf_apply_auth(client.post(&fallback).json(&body), key)
+                    .send()
+                    .and_then(|r| r.error_for_status())
+            });
+        if let Ok(r) = resp {
+            if let Ok(parsed) = r.json::<CfFingerprintsResp>() {
+                matches.extend(parsed.data.exact_matches);
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        return out;
+    }
+
+    let mod_ids: Vec<u64> = matches
+        .iter()
+        .map(|m| m.id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut meta_by_id: HashMap<u64, (String, Option<String>)> = HashMap::new();
+    for chunk in mod_ids.chunks(50) {
+        let body = serde_json::json!({ "modIds": chunk });
+        if let Ok(resp) = cf_apply_auth(client.post(format!("{base}/mods")).json(&body), key)
+            .send()
+            .and_then(|r| r.error_for_status())
+        {
+            if let Ok(batch) = resp.json::<CfModsBatchResp>() {
+                for m in batch.data {
+                    let icon = m
+                        .logo
+                        .and_then(|l| l.thumbnail_url.or(l.url))
+                        .filter(|s| !s.is_empty());
+                    meta_by_id.insert(m.id, (m.name, icon));
+                }
+            }
+        }
+    }
+
+    for m in matches {
+        let Some(&(folder, base_name)) = fp_to_meta.get(&m.file.file_fingerprint) else {
+            continue;
+        };
+        let (title, icon_url) = meta_by_id
+            .get(&m.id)
+            .cloned()
+            .unwrap_or_else(|| (base_name.to_string(), None));
+        let ver = if !m.file.display_name.trim().is_empty() {
+            m.file.display_name
+        } else if !m.file.file_name.trim().is_empty() {
+            m.file.file_name
+        } else {
+            base_name.to_string()
+        };
+        out.insert(
+            format!("cf:{}", m.id),
+            InstalledProject {
+                title,
+                filename: base_name.to_string(),
+                folder: folder.to_string(),
+                version_number: ver,
+                icon_url,
+                source: ProjectSource::CurseForge,
+            },
+        );
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,5 +997,15 @@ mod tests {
             cf_api_endpoint(" my_secret_key "),
             ("https://api.curseforge.com/v1", Some("my_secret_key"))
         );
+    }
+
+    #[test]
+    fn test_curseforge_fingerprint_ignores_whitespace_and_is_deterministic() {
+        let a = compute_curseforge_fingerprint(b"hello world\r\n\t!");
+        let b = compute_curseforge_fingerprint(b"helloworld!");
+        assert_eq!(a, b);
+        assert_ne!(a, compute_curseforge_fingerprint(b"helloworld?"));
+        // Known MurmurHash2 (seed=1) of empty slice:
+        assert_eq!(compute_curseforge_fingerprint(b""), 0x058d_6359);
     }
 }

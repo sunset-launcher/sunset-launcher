@@ -9,240 +9,6 @@ impl McLauncherApp {
 
         let profile = self.profiles[self.selected_idx].clone();
         let avail_w = ui.available_width().max(120.0);
-        let wide = avail_w >= 920.0;
-        if wide {
-            ui.allocate_ui_with_layout(
-                Vec2::new(avail_w, 32.0),
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    ui.set_max_width(avail_w);
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    if ui_button_icon(
-                        ui,
-                        "inst_mr_btn",
-                        Some(Icon::Compass),
-                        tr(self.settings.language, "nav.discover"),
-                        ButtonVariant::Primary,
-                        true,
-                        30.0,
-                    )
-                    .clicked()
-                    {
-                        self.switch_page(ui.ctx(), NavPage::Discover);
-                    }
-                    if ui_button_icon(
-                        ui,
-                        "inst_dir_btn",
-                        Some(Icon::Folder),
-                        tr(self.settings.language, "btn.open_folder"),
-                        ButtonVariant::Secondary,
-                        true,
-                        30.0,
-                    )
-                    .clicked()
-                    {
-                        anim::emit_ring(
-                            ui.ctx(),
-                            anim::pointer_or_center(ui.ctx()),
-                            accent(),
-                            28.0,
-                        );
-                        open_in_file_manager(&instance_dir(&self.paths, &profile));
-                    }
-                    if ui_button_icon(
-                        ui,
-                        "inst_export_mrpack_btn",
-                        Some(Icon::Download),
-                        tr(self.settings.language, "btn.export_mrpack"),
-                        ButtonVariant::Secondary,
-                        true,
-                        30.0,
-                    )
-                    .clicked()
-                    {
-                        anim::emit_ring(
-                            ui.ctx(),
-                            anim::pointer_or_center(ui.ctx()),
-                            accent(),
-                            30.0,
-                        );
-                        self.export_current_profile_mrpack(ui.ctx(), &profile);
-                    }
-                    if ui_button_icon(
-                        ui,
-                        "inst_backup_profile_btn",
-                        Some(Icon::Folder),
-                        tr(self.settings.language, "btn.backup_profile"),
-                        ButtonVariant::Secondary,
-                        true,
-                        30.0,
-                    )
-                    .clicked()
-                    {
-                        anim::emit_ring(
-                            ui.ctx(),
-                            anim::pointer_or_center(ui.ctx()),
-                            accent(),
-                            30.0,
-                        );
-                        self.export_current_profile_archive(ui.ctx(), &profile);
-                    }
-
-                    let left_w = (ui.available_width() - 8.0).max(80.0);
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(left_w, 30.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.set_max_width(left_w);
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            let (av_r, _) =
-                                ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
-                            let is_running = self.is_profile_running(&profile.id);
-                            draw_profile_avatar(
-                                ui.painter(),
-                                av_r,
-                                &profile,
-                                &self.profile_icons,
-                                true,
-                                is_running,
-                            );
-                            if is_running {
-                                draw_running_pulse_dot(
-                                    ui,
-                                    Pos2::new(av_r.right() - 5.0, av_r.bottom() - 5.0),
-                                    2.8,
-                                    accent(),
-                                    bg_void(),
-                                );
-                            }
-                            let title_w = (left_w - 220.0).max(50.0);
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(title_w, 30.0),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.set_max_width(title_w);
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&profile.name)
-                                                .size(21.0)
-                                                .strong()
-                                                .color(text_primary()),
-                                        )
-                                        .truncate(),
-                                    );
-                                },
-                            );
-                            badge_sized(ui, &profile.version_id, false, 30.0, None);
-                            loader_badge_sized(
-                                ui,
-                                profile.loader.kind(),
-                                &profile.loader.label(),
-                                30.0,
-                            );
-                        },
-                    );
-                },
-            );
-        } else {
-            let render_title = |ui: &mut egui::Ui, w: f32| {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(w, 28.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.set_max_width(w);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&profile.name)
-                                    .size(21.0)
-                                    .strong()
-                                    .color(text_primary()),
-                            )
-                            .truncate(),
-                        );
-                    },
-                );
-            };
-            if avail_w < 420.0 {
-                render_title(ui, avail_w);
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.set_max_width(avail_w);
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    badge(ui, &profile.version_id, false);
-                    loader_badge(ui, profile.loader.kind(), &profile.loader.label());
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    ui.set_max_width(avail_w);
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    render_title(ui, (avail_w - 180.0).max(120.0));
-                    badge(ui, &profile.version_id, false);
-                    loader_badge(ui, profile.loader.kind(), &profile.loader.label());
-                });
-            }
-            ui.add_space(4.0);
-            ui_wrap_row(ui, 30.0, |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if ui_button_icon(
-                    ui,
-                    "inst_mr_btn_narrow",
-                    Some(Icon::Compass),
-                    tr(self.settings.language, "nav.discover"),
-                    ButtonVariant::Primary,
-                    true,
-                    30.0,
-                )
-                .clicked()
-                {
-                    self.switch_page(ui.ctx(), NavPage::Discover);
-                }
-                if ui_button_icon(
-                    ui,
-                    "inst_dir_btn_narrow",
-                    Some(Icon::Folder),
-                    tr(self.settings.language, "btn.folder"),
-                    ButtonVariant::Secondary,
-                    true,
-                    30.0,
-                )
-                .clicked()
-                {
-                    anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 28.0);
-                    open_in_file_manager(&instance_dir(&self.paths, &profile));
-                }
-                if ui_button_icon(
-                    ui,
-                    "inst_export_mrpack_btn_narrow",
-                    Some(Icon::Download),
-                    tr(self.settings.language, "btn.export_mrpack"),
-                    ButtonVariant::Secondary,
-                    true,
-                    30.0,
-                )
-                .clicked()
-                {
-                    anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 30.0);
-                    self.export_current_profile_mrpack(ui.ctx(), &profile);
-                }
-                if ui_button_icon(
-                    ui,
-                    "inst_backup_profile_btn_narrow",
-                    Some(Icon::Folder),
-                    tr(self.settings.language, "btn.backup_profile"),
-                    ButtonVariant::Secondary,
-                    true,
-                    30.0,
-                )
-                .clicked()
-                {
-                    anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 30.0);
-                    self.export_current_profile_archive(ui.ctx(), &profile);
-                }
-            });
-        }
-
-        ui.add_space(6.0);
-
         let lang = self.settings.language;
         let (total_mods, enabled_mods) = self.profile_mod_counts(&profile);
         let worlds_cnt = self.cached_worlds(&profile).len();
@@ -266,48 +32,189 @@ impl McLauncherApp {
                 None => base.to_string(),
             }
         };
-        if avail_w < 680.0 {
-            let prev_tab = self.instance_tab;
-            egui::ComboBox::from_id_salt("inst_subtab_combo")
-                .selected_text(tab_label_for(self.instance_tab))
-                .width((avail_w - 16.0).clamp(110.0, 260.0))
-                .truncate()
-                .show_ui(ui, |ui| {
-                    for tab in InstanceSubTab::ALL {
-                        ui.selectable_value(&mut self.instance_tab, tab, tab_label_for(tab));
-                    }
-                });
-            if self.instance_tab != prev_tab {
-                self.mark_subtab_switch(ui.ctx());
-            }
-        } else {
-            ui_wrap_row(ui, 30.0, |ui| {
-                for tab in InstanceSubTab::ALL {
-                    let is_active = self.instance_tab == tab;
-                    let tab_icon = match tab {
-                        InstanceSubTab::Content => Icon::Layers,
-                        InstanceSubTab::Worlds => Icon::Grid,
-                        InstanceSubTab::Screenshots => Icon::External,
-                        InstanceSubTab::Logs => Icon::Terminal,
-                        InstanceSubTab::Settings => Icon::Sliders,
-                    };
-                    let lbl = tab_label_for(tab);
-                    if ui_pill_tab_icon(
+
+        let mut hdr_go_discover = false;
+        let mut hdr_open_dir = false;
+        let mut hdr_export_mrpack = false;
+        let mut hdr_backup_profile = false;
+        let mut chosen_tab = self.instance_tab;
+
+        let wide = avail_w >= 680.0;
+        if wide {
+            ui.allocate_ui_with_layout(
+                Vec2::new(avail_w, 28.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.set_max_width(avail_w);
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    if ui_button_icon(
                         ui,
-                        ("inst_subtab", tab.label()),
-                        Some(tab_icon),
-                        &lbl,
-                        is_active,
+                        "inst_mr_btn",
+                        Some(Icon::Compass),
+                        tr(lang, "nav.discover"),
+                        ButtonVariant::Primary,
+                        true,
+                        26.0,
                     )
                     .clicked()
-                        && !is_active
                     {
-                        self.instance_tab = tab;
-                        self.mark_subtab_switch(ui.ctx());
+                        hdr_go_discover = true;
                     }
+                    egui::ComboBox::from_id_salt("inst_hdr_actions_combo")
+                        .selected_text(tr(lang, "btn.actions"))
+                        .width(120.0)
+                        .truncate()
+                        .show_ui(ui, |ui| {
+                            if ui.button(tr(lang, "btn.open_folder")).clicked() {
+                                hdr_open_dir = true;
+                                ui.close_menu();
+                            }
+                            if ui.button(tr(lang, "btn.export_mrpack")).clicked() {
+                                hdr_export_mrpack = true;
+                                ui.close_menu();
+                            }
+                            if ui.button(tr(lang, "btn.backup_profile")).clicked() {
+                                hdr_backup_profile = true;
+                                ui.close_menu();
+                            }
+                        });
+                    egui::ComboBox::from_id_salt("inst_subtab_combo")
+                        .selected_text(tab_label_for(chosen_tab))
+                        .width(156.0)
+                        .truncate()
+                        .show_ui(ui, |ui| {
+                            for tab in InstanceSubTab::ALL {
+                                ui.selectable_value(&mut chosen_tab, tab, tab_label_for(tab));
+                            }
+                        });
+
+                    let left_w = (ui.available_width() - 8.0).max(80.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(left_w, 28.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_max_width(left_w);
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let (av_r, _) =
+                                ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                            let is_running = self.is_profile_running(&profile.id);
+                            draw_profile_avatar(
+                                ui.painter(),
+                                av_r,
+                                &profile,
+                                &self.profile_icons,
+                                true,
+                                is_running,
+                            );
+                            if is_running {
+                                draw_running_pulse_dot(
+                                    ui,
+                                    Pos2::new(av_r.right() - 4.5, av_r.bottom() - 4.5),
+                                    2.6,
+                                    accent(),
+                                    bg_void(),
+                                );
+                            }
+                            let show_badges = left_w >= 260.0;
+                            let title_w = if show_badges {
+                                (left_w - 190.0).max(50.0)
+                            } else {
+                                (left_w - 36.0).max(50.0)
+                            };
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(title_w, CTL_HEIGHT),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_max_width(title_w);
+                                    page_heading(ui, &profile.name);
+                                },
+                            );
+                            if show_badges {
+                                badge_sized(ui, &profile.version_id, false, 24.0, None);
+                                loader_badge_sized(
+                                    ui,
+                                    profile.loader.kind(),
+                                    &profile.loader.label(),
+                                    24.0,
+                                );
+                            }
+                        },
+                    );
+                },
+            );
+        } else {
+            ui_wrap_row(ui, CTL_HEIGHT, |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                page_heading(ui, &profile.name);
+                badge(ui, &profile.version_id, false);
+                loader_badge(ui, profile.loader.kind(), &profile.loader.label());
+            });
+            ui.add_space(4.0);
+            ui_wrap_row(ui, 26.0, |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                egui::ComboBox::from_id_salt("inst_subtab_combo")
+                    .selected_text(tab_label_for(chosen_tab))
+                    .width(152.0)
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        for tab in InstanceSubTab::ALL {
+                            ui.selectable_value(&mut chosen_tab, tab, tab_label_for(tab));
+                        }
+                    });
+                egui::ComboBox::from_id_salt("inst_hdr_actions_combo_n")
+                    .selected_text(tr(lang, "btn.actions"))
+                    .width(116.0)
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        if ui.button(tr(lang, "btn.open_folder")).clicked() {
+                            hdr_open_dir = true;
+                            ui.close_menu();
+                        }
+                        if ui.button(tr(lang, "btn.export_mrpack")).clicked() {
+                            hdr_export_mrpack = true;
+                            ui.close_menu();
+                        }
+                        if ui.button(tr(lang, "btn.backup_profile")).clicked() {
+                            hdr_backup_profile = true;
+                            ui.close_menu();
+                        }
+                    });
+                if ui_button_icon(
+                    ui,
+                    "inst_mr_btn_narrow",
+                    Some(Icon::Compass),
+                    tr(lang, "nav.discover"),
+                    ButtonVariant::Primary,
+                    true,
+                    26.0,
+                )
+                .clicked()
+                {
+                    hdr_go_discover = true;
                 }
             });
         }
+
+        if chosen_tab != self.instance_tab {
+            self.instance_tab = chosen_tab;
+            self.mark_subtab_switch(ui.ctx());
+        }
+        if hdr_go_discover {
+            self.switch_page(ui.ctx(), NavPage::Discover);
+        }
+        if hdr_open_dir {
+            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 26.0);
+            open_in_file_manager(&instance_dir(&self.paths, &profile));
+        }
+        if hdr_export_mrpack {
+            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 26.0);
+            self.export_current_profile_mrpack(ui.ctx(), &profile);
+        }
+        if hdr_backup_profile {
+            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 26.0);
+            self.export_current_profile_archive(ui.ctx(), &profile);
+        }
+
         ui.add_space(4.0);
         ui.separator();
         ui.add_space(6.0);
@@ -424,77 +331,50 @@ impl McLauncherApp {
                                         action_cancel_delete = true;
                                     }
                                 } else {
-                                    if ui_button_icon(
-                                        ui,
-                                        ("world_del", &w.folder_name),
-                                        Some(Icon::Trash),
-                                        tr(lang, "btn.delete"),
-                                        ButtonVariant::Subtle,
-                                        true,
-                                        28.0,
-                                    )
-                                    .clicked()
-                                    {
-                                        action_ask_delete = true;
-                                    }
-                                    if ui_button_icon(
-                                        ui,
-                                        ("world_open", &w.folder_name),
-                                        Some(Icon::Folder),
-                                        tr(lang, "btn.open"),
-                                        ButtonVariant::Subtle,
-                                        true,
-                                        28.0,
-                                    )
-                                    .clicked()
-                                    {
-                                        anim::emit_ring(
-                                            ui.ctx(),
-                                            anim::pointer_or_center(ui.ctx()),
-                                            accent(),
-                                            28.0,
-                                        );
-                                        open_in_file_manager(&w.path);
-                                    }
-                                    if ui_button_icon(
-                                        ui,
-                                        ("world_datapacks_btn", &w.folder_name),
-                                        Some(Icon::Layers),
-                                        tr(lang, "world.datapacks"),
-                                        if self.expanded_world_datapacks.as_deref()
-                                            == Some(w.folder_name.as_str())
+                                    egui::ComboBox::from_id_salt((
+                                        "world_actions_combo",
+                                        &w.folder_name,
+                                    ))
+                                    .selected_text(tr(lang, "btn.actions"))
+                                    .width(114.0)
+                                    .truncate()
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .add_enabled(
+                                                backup_enabled,
+                                                egui::Button::new(tr(lang, "world.backup")),
+                                            )
+                                            .clicked()
                                         {
-                                            ButtonVariant::Primary
-                                        } else {
-                                            ButtonVariant::Secondary
-                                        },
-                                        true,
-                                        28.0,
-                                    )
-                                    .clicked()
-                                    {
-                                        if self.expanded_world_datapacks.as_deref()
-                                            == Some(w.folder_name.as_str())
-                                        {
-                                            self.expanded_world_datapacks = None;
-                                        } else {
-                                            self.expanded_world_datapacks =
-                                                Some(w.folder_name.clone());
+                                            action_backup = true;
+                                            ui.close_menu();
                                         }
-                                    }
-                                    if ui_button_icon(
-                                        ui,
-                                        ("world_backup", &w.folder_name),
-                                        Some(Icon::Download),
-                                        tr(lang, "world.backup"),
-                                        ButtonVariant::Secondary,
-                                        backup_enabled,
-                                        28.0,
-                                    )
-                                    .clicked()
-                                    {
-                                        action_backup = true;
-                                    }
+                                        if ui.button(tr(lang, "world.datapacks")).clicked() {
+                                            if self.expanded_world_datapacks.as_deref()
+                                                == Some(w.folder_name.as_str())
+                                            {
+                                                self.expanded_world_datapacks = None;
+                                            } else {
+                                                self.expanded_world_datapacks =
+                                                    Some(w.folder_name.clone());
+                                            }
+                                            ui.close_menu();
+                                        }
+                                        if ui.button(tr(lang, "btn.open")).clicked() {
+                                            anim::emit_ring(
+                                                ui.ctx(),
+                                                anim::pointer_or_center(ui.ctx()),
+                                                accent(),
+                                                26.0,
+                                            );
+                                            open_in_file_manager(&w.path);
+                                            ui.close_menu();
+                                        }
+                                        if ui.button(tr(lang, "btn.delete")).clicked() {
+                                            action_ask_delete = true;
+                                            ui.close_menu();
+                                        }
+                                    });
                                     if ui_button_icon(
                                         ui,
                                         ("world_play", &w.folder_name),
@@ -502,7 +382,7 @@ impl McLauncherApp {
                                         tr(lang, "world.play"),
                                         ButtonVariant::Primary,
                                         can_play,
-                                        28.0,
+                                        26.0,
                                     )
                                     .clicked()
                                     {
@@ -518,6 +398,7 @@ impl McLauncherApp {
                                         ui.add(
                                             egui::Label::new(
                                                 egui::RichText::new(&w.display_name)
+                                                    .size(13.5)
                                                     .strong()
                                                     .color(text_primary()),
                                             )
@@ -543,6 +424,7 @@ impl McLauncherApp {
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(&w.display_name)
+                                    .size(13.5)
                                     .strong()
                                     .color(text_primary()),
                             )
@@ -597,82 +479,56 @@ impl McLauncherApp {
                                     tr(lang, "world.play"),
                                     ButtonVariant::Primary,
                                     can_play,
-                                    28.0,
+                                    26.0,
                                 )
                                 .clicked()
                                 {
                                     action_play = true;
                                 }
-                                if ui_button_icon(
-                                    ui,
-                                    ("world_backup", &w.folder_name),
-                                    Some(Icon::Download),
-                                    tr(lang, "world.backup"),
-                                    ButtonVariant::Secondary,
-                                    backup_enabled,
-                                    28.0,
-                                )
-                                .clicked()
-                                {
-                                    action_backup = true;
-                                }
-                                if ui_button_icon(
-                                    ui,
-                                    ("world_datapacks_btn", &w.folder_name),
-                                    Some(Icon::Layers),
-                                    tr(lang, "world.datapacks"),
-                                    if self.expanded_world_datapacks.as_deref()
-                                        == Some(w.folder_name.as_str())
+                                egui::ComboBox::from_id_salt((
+                                    "world_actions_combo_n",
+                                    &w.folder_name,
+                                ))
+                                .selected_text(tr(lang, "btn.actions"))
+                                .width(114.0)
+                                .truncate()
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .add_enabled(
+                                            backup_enabled,
+                                            egui::Button::new(tr(lang, "world.backup")),
+                                        )
+                                        .clicked()
                                     {
-                                        ButtonVariant::Primary
-                                    } else {
-                                        ButtonVariant::Secondary
-                                    },
-                                    true,
-                                    28.0,
-                                )
-                                .clicked()
-                                {
-                                    if self.expanded_world_datapacks.as_deref()
-                                        == Some(w.folder_name.as_str())
-                                    {
-                                        self.expanded_world_datapacks = None;
-                                    } else {
-                                        self.expanded_world_datapacks = Some(w.folder_name.clone());
+                                        action_backup = true;
+                                        ui.close_menu();
                                     }
-                                }
-                                if ui_button_icon(
-                                    ui,
-                                    ("world_open", &w.folder_name),
-                                    Some(Icon::Folder),
-                                    tr(lang, "btn.open"),
-                                    ButtonVariant::Subtle,
-                                    true,
-                                    28.0,
-                                )
-                                .clicked()
-                                {
-                                    anim::emit_ring(
-                                        ui.ctx(),
-                                        anim::pointer_or_center(ui.ctx()),
-                                        accent(),
-                                        28.0,
-                                    );
-                                    open_in_file_manager(&w.path);
-                                }
-                                if ui_button_icon(
-                                    ui,
-                                    ("world_del", &w.folder_name),
-                                    Some(Icon::Trash),
-                                    tr(lang, "btn.delete"),
-                                    ButtonVariant::Subtle,
-                                    true,
-                                    28.0,
-                                )
-                                .clicked()
-                                {
-                                    action_ask_delete = true;
-                                }
+                                    if ui.button(tr(lang, "world.datapacks")).clicked() {
+                                        if self.expanded_world_datapacks.as_deref()
+                                            == Some(w.folder_name.as_str())
+                                        {
+                                            self.expanded_world_datapacks = None;
+                                        } else {
+                                            self.expanded_world_datapacks =
+                                                Some(w.folder_name.clone());
+                                        }
+                                        ui.close_menu();
+                                    }
+                                    if ui.button(tr(lang, "btn.open")).clicked() {
+                                        anim::emit_ring(
+                                            ui.ctx(),
+                                            anim::pointer_or_center(ui.ctx()),
+                                            accent(),
+                                            26.0,
+                                        );
+                                        open_in_file_manager(&w.path);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button(tr(lang, "btn.delete")).clicked() {
+                                        action_ask_delete = true;
+                                        ui.close_menu();
+                                    }
+                                });
                             }
                         });
                     }
@@ -681,7 +537,7 @@ impl McLauncherApp {
                     let p = pulse_01(ui.input(|i| i.time), 5.0);
                     ui.painter().rect_stroke(
                         card_r.response.rect,
-                        Rounding::same(10.0),
+                        Rounding::same(9.0),
                         Stroke::new(1.3_f32, with_alpha(DANGER, (110.0 + p * 120.0) as u8)),
                     );
                     ui.ctx().request_repaint();
@@ -758,7 +614,7 @@ impl McLauncherApp {
                             if ui_button_icon(
                                 ui,
                                 ("world_dp_modrinth", &w.folder_name),
-                                Some(Icon::Sparkle),
+                                Some(Icon::Compass),
                                 "Modrinth",
                                 ButtonVariant::Secondary,
                                 true,
@@ -850,7 +706,7 @@ impl McLauncherApp {
                         }
                     }
                 }
-                ui.add_space(5.0);
+                ui.add_space(10.0);
             }
 
             if !backups.is_empty() {
@@ -1074,7 +930,7 @@ impl McLauncherApp {
                         let p = pulse_01(ui.input(|i| i.time), 5.0);
                         ui.painter().rect_stroke(
                             b_card.response.rect,
-                            Rounding::same(10.0),
+                            Rounding::same(9.0),
                             Stroke::new(1.3_f32, with_alpha(DANGER, (110.0 + p * 120.0) as u8)),
                         );
                         ui.ctx().request_repaint();
@@ -1123,7 +979,7 @@ impl McLauncherApp {
                             }
                         }
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(10.0);
                 }
             }
         });
@@ -1400,7 +1256,7 @@ impl McLauncherApp {
                         });
                     }
                 });
-                ui.add_space(4.0);
+                ui.add_space(10.0);
             }
             if let Some(fname) = shot_to_delete {
                 match delete_screenshot(&inst, &fname) {
@@ -1464,18 +1320,14 @@ impl McLauncherApp {
         let can_import = !self.mr_installing && !self.file_picker_open;
         let show_actions = total_count > 0 || !self.mr_installed_cache.is_empty();
         let mr_installing = self.mr_installing;
-        let identifying_mods = self.identifying_mods;
         let actions_lbl = if mr_installing {
             tr(lang, "content.checking")
-        } else if identifying_mods {
-            tr(lang, "content.identifying")
         } else {
             tr(lang, "btn.actions")
         };
 
         let mut trigger_import = false;
         let mut act_check_updates = false;
-        let mut act_identify = false;
         let mut act_enable_all = false;
         let mut act_disable_all = false;
 
@@ -1546,17 +1398,6 @@ impl McLauncherApp {
                         .clicked()
                     {
                         act_check_updates = true;
-                        ui.close_menu();
-                    }
-                    if total_count > 0
-                        && ui
-                            .add_enabled(
-                                !identifying_mods && !mr_installing,
-                                egui::Button::new(tr(lang, "btn.identify_mods")),
-                            )
-                            .clicked()
-                    {
-                        act_identify = true;
                         ui.close_menu();
                     }
                     if disabled_count > 0 && ui.button(tr(lang, "btn.enable_all")).clicked() {
@@ -1640,22 +1481,22 @@ impl McLauncherApp {
             self.request_file_pick(FilePickPurpose::InstanceContentImport);
         }
         if act_check_updates {
-            reset_download_cancel();
+            let cancel_tok = Arc::new(AtomicBool::new(false));
+            self.mr_cancel_token = Some(Arc::clone(&cancel_tok));
             anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 30.0);
             self.mr_installing = true;
             self.progress = 0.08;
             self.status_text = tr(lang, "content.checking_updates").to_string();
             let paths = self.paths.clone();
             let prof = profile.clone();
+            let cf_key = self.settings.curseforge_api_key.clone();
             let tx = self.tx.clone();
             thread::spawn(move || {
-                let res = update_all_installed_projects(&paths, &prof, &tx);
+                let res = with_download_cancel_token(cancel_tok, || {
+                    update_all_installed_projects(&paths, &prof, &cf_key, &tx)
+                });
                 let _ = tx.send(WorkerEvent::ModUpdatesFinished(res));
             });
-        }
-        if act_identify {
-            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 28.0);
-            self.start_identify_mods();
         }
         if act_enable_all {
             match set_all_content_enabled(&target_dir, true) {
@@ -1702,6 +1543,7 @@ impl McLauncherApp {
 
         let folder_name = self.content_folder.dir_name();
         let target_dir = inst.join(folder_name);
+        self.maybe_auto_identify_selected_profile();
 
         ui.add_space(6.0);
         let q = self.content_search.trim().to_lowercase();
@@ -1781,188 +1623,206 @@ impl McLauncherApp {
             });
         } else {
             let content_w = (avail_w - 14.0).max(100.0);
-            let card_inner_w = (content_w - 28.0).max(80.0);
-            egui::ScrollArea::vertical()
-                .id_salt("instance_content_scroll")
-                .auto_shrink([false, false])
-                .max_width(avail_w)
-                .max_height(avail_h)
-                .show_rows(ui, 60.0, filtered.len(), |ui, row_range| {
-                    ui.set_max_width(content_w);
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    for item in &filtered[row_range] {
-                        let info = indexed_by_file.get(&item.base_name).copied();
-                        let display_title = info
-                            .map(|i| i.title.clone())
-                            .unwrap_or_else(|| item.base_name.clone());
-                        if let Some(url) = info.and_then(|i| i.icon_url.as_deref()) {
-                            if !self.mr_icons.contains_key(url) {
-                                icons_to_request.push(url.to_string());
+            let card_inner_w = (content_w - 22.0).max(80.0);
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = 12.0;
+                egui::ScrollArea::vertical()
+                    .id_salt("instance_content_scroll")
+                    .auto_shrink([false, false])
+                    .max_width(avail_w)
+                    .max_height(avail_h)
+                    .show_rows(ui, 50.0, filtered.len(), |ui, row_range| {
+                        ui.set_max_width(content_w);
+                        ui.spacing_mut().item_spacing.y = 12.0;
+                        for item in &filtered[row_range] {
+                            let info = indexed_by_file.get(&item.base_name).copied();
+                            let display_title = info
+                                .map(|i| i.title.clone())
+                                .unwrap_or_else(|| item.base_name.clone());
+                            if let Some(url) = info.and_then(|i| i.icon_url.as_deref()) {
+                                if !self.mr_icons.contains_key(url) {
+                                    icons_to_request.push(url.to_string());
+                                }
                             }
-                        }
 
-                        let card_id =
-                            ui.make_persistent_id(("mod_card_hover", folder_name, &item.base_name));
-                        animated_card(ui, card_id, false, |ui| {
-                            ui.set_min_width(card_inner_w);
-                            ui.set_max_width(card_inner_w);
-                            let compact_row = card_inner_w < 480.0;
-                            let right_pill: Option<(&str, bool)> = if !item.enabled {
-                                Some((tr(self.settings.language, "content.disabled"), false))
-                            } else {
-                                info.map(|inf| (inf.version_number.as_str(), true))
-                            };
+                            let card_id = ui.make_persistent_id((
+                                "mod_card_hover",
+                                folder_name,
+                                &item.base_name,
+                            ));
+                            animated_card(ui, card_id, false, |ui| {
+                                ui.set_min_width(card_inner_w);
+                                ui.set_max_width(card_inner_w);
+                                let compact_row = card_inner_w < 480.0;
+                                let right_pill: Option<(&str, bool)> = if !item.enabled {
+                                    Some((tr(self.settings.language, "content.disabled"), false))
+                                } else {
+                                    info.map(|inf| (inf.version_number.as_str(), true))
+                                };
 
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(card_inner_w, 38.0),
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.set_max_width(card_inner_w);
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    let del_clicked = if compact_row {
-                                        ui_icon_button(
-                                            ui,
-                                            ("mod_del", &item.disk_name),
-                                            Icon::Trash,
-                                            &format!("Remove {}", item.disk_name),
-                                            ButtonVariant::Danger,
-                                            true,
-                                            28.0,
-                                        )
-                                        .clicked()
-                                    } else {
-                                        ui_button_icon(
-                                            ui,
-                                            ("mod_del", &item.disk_name),
-                                            Some(Icon::Trash),
-                                            tr(self.settings.language, "btn.remove"),
-                                            ButtonVariant::Danger,
-                                            true,
-                                            28.0,
-                                        )
-                                        .on_hover_text(format!("Remove {}", item.disk_name))
-                                        .clicked()
-                                    };
-                                    if del_clicked {
-                                        delete_disk_name =
-                                            Some((item.disk_name.clone(), display_title.clone()));
-                                    }
-                                    if ui.available_width() > 210.0 {
-                                        if let Some((pill_txt, highlighted)) = right_pill {
-                                            badge_sized(
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(card_inner_w, 32.0),
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_max_width(card_inner_w);
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        let del_clicked = if compact_row {
+                                            ui_icon_button(
                                                 ui,
-                                                pill_txt,
-                                                highlighted,
-                                                28.0,
-                                                Some(108.0),
+                                                ("mod_del", &item.disk_name),
+                                                Icon::Trash,
+                                                &format!("Remove {}", item.disk_name),
+                                                ButtonVariant::Danger,
+                                                true,
+                                                25.0,
                                             )
-                                            .on_hover_text(pill_txt);
-                                        }
-                                    }
-
-                                    let left_w = (ui.available_width() - 4.0).max(40.0);
-                                    ui.allocate_ui_with_layout(
-                                        Vec2::new(left_w, 36.0),
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            ui.set_max_width(left_w);
-                                            ui.spacing_mut().item_spacing.x = 6.0;
-                                            if mod_toggle_switch(
-                                                ui,
-                                                &format!(
-                                                    "{}_{}_{}",
-                                                    profile.id, folder_name, item.base_name
-                                                ),
-                                                item.enabled,
-                                            )
-                                            .on_hover_text(if item.enabled {
-                                                tr(self.settings.language, "content.disabled")
-                                            } else {
-                                                tr(self.settings.language, "content.enable")
-                                            })
                                             .clicked()
-                                            {
-                                                toggle_disk_name = Some(item.disk_name.clone());
+                                        } else {
+                                            ui_button_icon(
+                                                ui,
+                                                ("mod_del", &item.disk_name),
+                                                Some(Icon::Trash),
+                                                tr(self.settings.language, "btn.remove"),
+                                                ButtonVariant::Danger,
+                                                true,
+                                                25.0,
+                                            )
+                                            .on_hover_text(format!("Remove {}", item.disk_name))
+                                            .clicked()
+                                        };
+                                        if del_clicked {
+                                            delete_disk_name = Some((
+                                                item.disk_name.clone(),
+                                                display_title.clone(),
+                                            ));
+                                        }
+                                        if ui.available_width() > 200.0 {
+                                            if let Some((pill_txt, highlighted)) = right_pill {
+                                                badge_sized(
+                                                    ui,
+                                                    pill_txt,
+                                                    highlighted,
+                                                    24.0,
+                                                    Some(104.0),
+                                                )
+                                                .on_hover_text(pill_txt);
                                             }
+                                        }
 
-                                            let icon_url_opt =
-                                                info.and_then(|i| i.icon_url.as_ref());
-                                            if left_w >= 120.0 {
-                                                let icon_px = 30.0;
-                                                let tex_opt = icon_url_opt
-                                                    .and_then(|u| self.mr_icons.get(u))
-                                                    .and_then(|o| o.as_ref());
-                                                let is_icon_loading =
-                                                    icon_url_opt.is_some_and(|u| {
-                                                        self.mr_icons_pending.contains(u.as_str())
-                                                    });
-                                                let icon_size = Vec2::splat(icon_px);
-                                                if let Some(tex) = tex_opt {
-                                                    ui.add(
-                                                        egui::Image::new(tex)
-                                                            .fit_to_exact_size(icon_size)
-                                                            .rounding(Rounding::same(6.5)),
-                                                    );
+                                        let left_w = (ui.available_width() - 4.0).max(40.0);
+                                        ui.allocate_ui_with_layout(
+                                            Vec2::new(left_w, 32.0),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.set_max_width(left_w);
+                                                ui.spacing_mut().item_spacing.x = 6.0;
+                                                if mod_toggle_switch(
+                                                    ui,
+                                                    &format!(
+                                                        "{}_{}_{}",
+                                                        profile.id, folder_name, item.base_name
+                                                    ),
+                                                    item.enabled,
+                                                )
+                                                .on_hover_text(if item.enabled {
+                                                    tr(self.settings.language, "content.disabled")
                                                 } else {
-                                                    let (rect, _) = ui.allocate_exact_size(
-                                                        icon_size,
-                                                        Sense::hover(),
-                                                    );
-                                                    draw_icon_placeholder(
-                                                        ui,
-                                                        rect,
-                                                        6.5,
-                                                        &display_title,
-                                                        is_icon_loading,
-                                                    );
+                                                    tr(self.settings.language, "content.enable")
+                                                })
+                                                .clicked()
+                                                {
+                                                    toggle_disk_name =
+                                                        Some(item.disk_name.clone());
                                                 }
-                                            }
 
-                                            let mid_w = ui.available_width().max(16.0);
-                                            ui.allocate_ui_with_layout(
-                                                Vec2::new(mid_w, 34.0),
-                                                egui::Layout::top_down(egui::Align::Min),
-                                                |ui| {
-                                                    ui.set_max_width(mid_w);
-                                                    let mut title_rt =
-                                                        egui::RichText::new(&display_title)
-                                                            .strong();
-                                                    if !item.enabled {
-                                                        title_rt = title_rt
-                                                            .strikethrough()
-                                                            .color(text_muted());
+                                                let icon_url_opt =
+                                                    info.and_then(|i| i.icon_url.as_ref());
+                                                if left_w >= 115.0 {
+                                                    let icon_px = 28.0;
+                                                    let tex_opt = icon_url_opt
+                                                        .and_then(|u| self.mr_icons.get(u))
+                                                        .and_then(|o| o.as_ref());
+                                                    let is_icon_loading = icon_url_opt
+                                                        .is_some_and(|u| {
+                                                            self.mr_icons_pending
+                                                                .contains(u.as_str())
+                                                        });
+                                                    let icon_size = Vec2::splat(icon_px);
+                                                    if let Some(tex) = tex_opt {
+                                                        ui.add(
+                                                            egui::Image::new(tex)
+                                                                .fit_to_exact_size(icon_size)
+                                                                .rounding(Rounding::same(6.0)),
+                                                        );
                                                     } else {
-                                                        title_rt = title_rt.color(text_primary());
+                                                        let (rect, _) = ui.allocate_exact_size(
+                                                            icon_size,
+                                                            Sense::hover(),
+                                                        );
+                                                        draw_icon_placeholder(
+                                                            ui,
+                                                            rect,
+                                                            6.0,
+                                                            &display_title,
+                                                            is_icon_loading,
+                                                        );
                                                     }
-                                                    ui.add(egui::Label::new(title_rt).truncate());
-                                                    let src_tag = if let Some(inf) = info {
-                                                        inf.source.label()
-                                                    } else {
-                                                        tr(self.settings.language, "content.local")
-                                                    };
-                                                    let meta = format!(
-                                                        "{src_tag} • {} • {}",
-                                                        item.disk_name,
-                                                        format_size(item.size_bytes)
-                                                    );
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            egui::RichText::new(meta)
-                                                                .monospace()
-                                                                .small()
-                                                                .color(text_muted()),
-                                                        )
-                                                        .truncate(),
-                                                    );
-                                                },
-                                            );
-                                        },
-                                    );
-                                },
-                            );
-                        });
-                    }
-                });
+                                                }
+
+                                                let mid_w = ui.available_width().max(16.0);
+                                                ui.allocate_ui_with_layout(
+                                                    Vec2::new(mid_w, 30.0),
+                                                    egui::Layout::top_down(egui::Align::Min),
+                                                    |ui| {
+                                                        ui.set_max_width(mid_w);
+                                                        ui.spacing_mut().item_spacing.y = 1.0;
+                                                        let mut title_rt =
+                                                            egui::RichText::new(&display_title)
+                                                                .size(13.5)
+                                                                .strong();
+                                                        if !item.enabled {
+                                                            title_rt = title_rt
+                                                                .strikethrough()
+                                                                .color(text_muted());
+                                                        } else {
+                                                            title_rt =
+                                                                title_rt.color(text_primary());
+                                                        }
+                                                        ui.add(
+                                                            egui::Label::new(title_rt).truncate(),
+                                                        );
+                                                        let src_tag = if let Some(inf) = info {
+                                                            inf.source.label()
+                                                        } else {
+                                                            tr(
+                                                                self.settings.language,
+                                                                "content.local",
+                                                            )
+                                                        };
+                                                        let meta = format!(
+                                                            "{src_tag} • {} • {}",
+                                                            item.disk_name,
+                                                            format_size(item.size_bytes)
+                                                        );
+                                                        ui.add(
+                                                            egui::Label::new(
+                                                                egui::RichText::new(meta)
+                                                                    .monospace()
+                                                                    .small()
+                                                                    .color(text_muted()),
+                                                            )
+                                                            .truncate(),
+                                                        );
+                                                    },
+                                                );
+                                            },
+                                        );
+                                    },
+                                );
+                            });
+                        }
+                    });
+            });
         }
         for url in icons_to_request {
             self.request_icon(&url);
@@ -2040,77 +1900,86 @@ impl McLauncherApp {
         let mut copy_clicked = false;
         let mut open_folder_target: Option<std::path::PathBuf> = None;
 
-        ui_wrap_row(ui, 30.0, |ui| {
-            if ui_button_icon(
-                ui,
-                "inst_logs_refresh_btn",
-                Some(Icon::Refresh),
-                tr(lang, "btn.refresh"),
-                ButtonVariant::Secondary,
-                true,
-                28.0,
+        let log_label = |entry: &InstanceLogFile| {
+            let kind_prefix = match entry.kind {
+                LogFileKind::CrashReport => "Crash",
+                LogFileKind::Log => "Log",
+            };
+            format!(
+                "[{kind_prefix}] {} ({})",
+                entry.filename,
+                format_size(entry.size_bytes)
             )
-            .clicked()
-            {
-                refresh_list = true;
-            }
-            if ui_button_icon(
-                ui,
-                "inst_logs_open_crash_btn",
-                Some(Icon::Folder),
-                tr(lang, "logs.open_folder"),
-                ButtonVariant::Secondary,
-                true,
-                28.0,
-            )
-            .clicked()
-            {
-                let crash_dir = inst.join("crash-reports");
-                open_folder_target = Some(if crash_dir.is_dir() {
-                    crash_dir
-                } else {
-                    inst.join("logs")
-                });
-            }
-            if !self.inst_log_content.is_empty() {
-                if ui_button_icon(
-                    ui,
-                    "inst_logs_copy_btn",
-                    Some(Icon::Copy),
-                    tr(lang, "btn.copy_all"),
-                    ButtonVariant::Secondary,
-                    true,
-                    28.0,
-                )
-                .clicked()
-                {
-                    copy_clicked = true;
-                }
-                if ui_button_icon(
-                    ui,
-                    "inst_logs_mclogs_btn",
-                    Some(Icon::External),
-                    if self.mclogs_uploading {
-                        tr(lang, "logs.uploading")
-                    } else {
-                        tr(lang, "logs.upload_mclogs")
-                    },
-                    ButtonVariant::Primary,
-                    !self.mclogs_uploading,
-                    28.0,
-                )
-                .clicked()
-                {
-                    upload_clicked = true;
-                }
+        };
+        let actions_lbl = if self.mclogs_uploading {
+            tr(lang, "logs.uploading")
+        } else {
+            tr(lang, "btn.actions")
+        };
+
+        ui_wrap_row(ui, 26.0, |ui| {
+            if !self.inst_log_files.is_empty() {
+                let current_lbl = self
+                    .inst_log_files
+                    .iter()
+                    .find(|e| self.inst_log_selected.as_ref() == Some(&e.path))
+                    .map(log_label)
+                    .unwrap_or_else(|| "Select log".to_string());
+                egui::ComboBox::from_id_salt("inst_log_file_combo")
+                    .selected_text(current_lbl)
+                    .width((ui.available_width() * 0.42).clamp(150.0, 280.0))
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        for entry in &self.inst_log_files {
+                            let is_sel = self.inst_log_selected.as_ref() == Some(&entry.path);
+                            if ui.selectable_label(is_sel, log_label(entry)).clicked() && !is_sel {
+                                selected_new = Some(entry.path.clone());
+                            }
+                        }
+                    });
             }
             ui_search_input(
                 ui,
                 "inst_logs_filter",
                 &mut self.inst_log_filter,
                 tr(lang, "console.filter"),
-                (ui.available_width() - 10.0).clamp(110.0, 240.0),
+                (ui.available_width() - 140.0).clamp(110.0, 220.0),
             );
+            egui::ComboBox::from_id_salt("inst_logs_actions_combo")
+                .selected_text(actions_lbl)
+                .width(124.0)
+                .truncate()
+                .show_ui(ui, |ui| {
+                    if !self.inst_log_content.is_empty() {
+                        if ui
+                            .add_enabled(
+                                !self.mclogs_uploading,
+                                egui::Button::new(tr(lang, "logs.upload_mclogs")),
+                            )
+                            .clicked()
+                        {
+                            upload_clicked = true;
+                            ui.close_menu();
+                        }
+                        if ui.button(tr(lang, "btn.copy_all")).clicked() {
+                            copy_clicked = true;
+                            ui.close_menu();
+                        }
+                    }
+                    if ui.button(tr(lang, "logs.open_folder")).clicked() {
+                        let crash_dir = inst.join("crash-reports");
+                        open_folder_target = Some(if crash_dir.is_dir() {
+                            crash_dir
+                        } else {
+                            inst.join("logs")
+                        });
+                        ui.close_menu();
+                    }
+                    if ui.button(tr(lang, "btn.refresh")).clicked() {
+                        refresh_list = true;
+                        ui.close_menu();
+                    }
+                });
         });
 
         if let Some(url) = &self.mclogs_last_url {
@@ -2147,37 +2016,6 @@ impl McLauncherApp {
                 ui.label(egui::RichText::new(tr(lang, "logs.empty")).color(text_secondary()));
             });
         } else {
-            let log_label = |entry: &InstanceLogFile| {
-                let kind_prefix = match entry.kind {
-                    LogFileKind::CrashReport => "CRASH",
-                    LogFileKind::Log => "LOG",
-                };
-                format!(
-                    "[{kind_prefix}] {} ({})",
-                    entry.filename,
-                    format_size(entry.size_bytes)
-                )
-            };
-            let current_lbl = self
-                .inst_log_files
-                .iter()
-                .find(|e| self.inst_log_selected.as_ref() == Some(&e.path))
-                .map(log_label)
-                .unwrap_or_else(|| "Select log".to_string());
-            let combo_w = (ui.available_width() - 16.0).clamp(180.0, 420.0);
-            egui::ComboBox::from_id_salt("inst_log_file_combo")
-                .selected_text(current_lbl)
-                .width(combo_w)
-                .truncate()
-                .show_ui(ui, |ui| {
-                    for entry in &self.inst_log_files {
-                        let is_sel = self.inst_log_selected.as_ref() == Some(&entry.path);
-                        if ui.selectable_label(is_sel, log_label(entry)).clicked() && !is_sel {
-                            selected_new = Some(entry.path.clone());
-                        }
-                    }
-                });
-            ui.add_space(6.0);
 
             let filter_q = self.inst_log_filter.trim().to_lowercase();
             let content = self.inst_log_content.clone();
@@ -3109,7 +2947,7 @@ impl McLauncherApp {
                     &mut profile.wrapper_cmd,
                     "gamemoderun mangohud",
                     field_w,
-                    true,
+                    false,
                 )
                 .changed()
                 {
@@ -3122,13 +2960,18 @@ impl McLauncherApp {
                         .small()
                         .color(text_secondary()),
                 );
+                let pre_hint = if cfg!(windows) {
+                    "echo Starting %SUNSET_PROFILE_NAME%"
+                } else {
+                    "echo Starting $SUNSET_PROFILE_NAME"
+                };
                 if ui_text_input(
                     ui,
                     "cfg_pre_launch_cmd",
                     &mut profile.pre_launch_cmd,
-                    "echo Starting %SUNSET_PROFILE_NAME%",
+                    pre_hint,
                     field_w,
-                    true,
+                    false,
                 )
                 .changed()
                 {
@@ -3147,7 +2990,7 @@ impl McLauncherApp {
                     &mut profile.post_exit_cmd,
                     "echo Exited",
                     field_w,
-                    true,
+                    false,
                 )
                 .changed()
                 {
@@ -3198,19 +3041,27 @@ impl McLauncherApp {
             );
         }
         if rename_dir && !self.profiles[selected_idx].name.trim().is_empty() {
-            let others: Vec<Profile> = self
-                .profiles
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != selected_idx)
-                .map(|(_, p)| p.clone())
-                .collect();
-            if rename_instance_dir_for_profile(
-                &self.paths,
-                &mut self.profiles[selected_idx],
-                &others,
-            ) {
-                changed = true;
+            let pid = self.profiles[selected_idx].id.clone();
+            if self.is_profile_running(&pid) || self.is_profile_launching(&pid) {
+                self.show_toast(
+                    ui.ctx(),
+                    tr(self.settings.language, "inst.rename_running_blocked"),
+                );
+            } else {
+                let others: Vec<Profile> = self
+                    .profiles
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != selected_idx)
+                    .map(|(_, p)| p.clone())
+                    .collect();
+                if rename_instance_dir_for_profile(
+                    &self.paths,
+                    &mut self.profiles[selected_idx],
+                    &others,
+                ) {
+                    changed = true;
+                }
             }
         }
         if changed {
@@ -3219,13 +3070,12 @@ impl McLauncherApp {
                 let disabled =
                     disable_incompatible_mods_for_loader(&self.paths, &self.profiles[selected_idx]);
                 if disabled > 0 {
-                    self.show_toast(
-                        ui.ctx(),
-                        format!(
-                            "Switched to {} — disabled {disabled} incompatible mod(s)",
-                            new_loader.label()
-                        ),
+                    let msg = format!(
+                        "{} ({}: {disabled})",
+                        new_loader.label(),
+                        tr(self.settings.language, "inst.incompatible_disabled"),
                     );
+                    self.show_toast(ui.ctx(), msg);
                 }
             }
             let _ = save_profiles(&self.paths, &self.profiles);

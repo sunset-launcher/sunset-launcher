@@ -1486,6 +1486,7 @@ struct ModrinthVersionWithProject {
 pub fn update_all_installed_projects(
     paths: &LauncherPaths,
     profile: &Profile,
+    cf_api_key: &str,
     tx: &Sender<WorkerEvent>,
 ) -> Result<Vec<String>, String> {
     check_not_cancelled()?;
@@ -1677,6 +1678,55 @@ pub fn update_all_installed_projects(
         }
     }
 
+    // Check tracked CurseForge entries for newer compatible files.
+    let cf_entries: Vec<(String, InstalledProject)> = index
+        .iter()
+        .filter(|(_, p)| p.source == ProjectSource::CurseForge)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let cf_total = cf_entries.len().max(1);
+    for (i, (project_id, entry)) in cf_entries.into_iter().enumerate() {
+        check_not_cancelled()?;
+        let Some(cf_mod_id) = crate::curseforge::parse_cf_project_id(&project_id) else {
+            continue;
+        };
+        let project_type = match entry.folder.as_str() {
+            "resourcepacks" => ModrinthProjectType::Resourcepack,
+            "shaderpacks" => ModrinthProjectType::Shader,
+            s if s.ends_with("datapacks") => ModrinthProjectType::Datapack,
+            _ => ModrinthProjectType::Mod,
+        };
+        let _ = tx.send(WorkerEvent::Progress {
+            stage: format!("Checking CF ({}/{}): {}...", i + 1, cf_total, entry.title),
+            fraction: 0.85 + 0.12 * ((i as f32 + 1.0) / cf_total as f32),
+        });
+        if let Ok(vers) = crate::curseforge::fetch_curseforge_versions_for_profile(
+            cf_api_key,
+            cf_mod_id,
+            project_type,
+            &profile.version_id,
+            &profile.loader,
+        ) {
+            if let Some(best) = vers.into_iter().next() {
+                if best.version_number != entry.version_number {
+                    crate::curseforge::install_cf_version_single(
+                        &client,
+                        paths,
+                        profile,
+                        cf_mod_id,
+                        project_type,
+                        &entry.title,
+                        entry.icon_url.clone(),
+                        &best,
+                        &mut index,
+                        tx,
+                    )?;
+                    updated_titles.push(entry.title);
+                }
+            }
+        }
+    }
+
     save_installed_index(paths, profile, &index);
     let _ = tx.send(WorkerEvent::Progress {
         stage: "Update check complete".to_string(),
@@ -1815,8 +1865,14 @@ pub fn import_local_file(
                 .map_err(|e| format!("Failed to create {dest_folder}/: {e}"))?;
             fs::copy(src_path, dest_dir.join(&filename))
                 .map_err(|e| format!("Failed to import {filename}: {e}"))?;
+            let _ = identify_instance_content_by_hash(paths, profile, curseforge_api_key);
+            let title = load_installed_index(paths, profile)
+                .values()
+                .find(|p| p.folder == dest_folder && p.filename == filename)
+                .map(|p| p.title.clone())
+                .unwrap_or_else(|| filename.clone());
             Ok(ModrinthInstallOutcome::FileInstalled {
-                title: filename.clone(),
+                title,
                 filename,
                 dest_folder: dest_folder.to_string(),
                 dependencies_installed: Vec::new(),
@@ -2563,7 +2619,7 @@ pub fn install_mrpack(
     }
 
     let _ = tx.send(WorkerEvent::Progress {
-        stage: format!("Modpack '{}' installed!", new_profile.name),
+        stage: format!("Modpack '{}' installed", new_profile.name),
         fraction: 1.0,
     });
 
@@ -2731,7 +2787,7 @@ pub fn install_multimc_prism_zip(
     }
 
     let _ = tx.send(WorkerEvent::Progress {
-        stage: format!("Imported '{}'!", new_profile.name),
+        stage: format!("Imported '{}'", new_profile.name),
         fraction: 1.0,
     });
     Ok(ModrinthInstallOutcome::ModpackProfileCreated {
@@ -2994,7 +3050,7 @@ pub fn install_curseforge_zip(
     }
 
     let _ = tx.send(WorkerEvent::Progress {
-        stage: format!("CurseForge modpack '{}' installed!", new_profile.name),
+        stage: format!("CurseForge modpack '{}' installed", new_profile.name),
         fraction: 1.0,
     });
     Ok(ModrinthInstallOutcome::ModpackProfileCreated {
@@ -3664,11 +3720,13 @@ pub fn import_world_datapack(
 }
 
 /// Identifies locally added mods, resourcepacks, and shaderpacks in `profile`
-/// by querying Modrinth's `POST /v2/version_files` with their SHA-1 hashes.
+/// by querying Modrinth's `POST /v2/version_files` (SHA-1) and falling back to
+/// CurseForge's `/fingerprints` (MurmurHash2) for any remaining unmatched files.
 /// Returns `(newly_identified_count, total_unmatched_checked)`.
 pub fn identify_instance_content_by_hash(
     paths: &LauncherPaths,
     profile: &Profile,
+    cf_api_key: &str,
 ) -> Result<(usize, usize), String> {
     let inst = instance_dir(paths, profile);
     let mut index = load_installed_index(paths, profile);
@@ -3677,7 +3735,7 @@ pub fn identify_instance_content_by_hash(
         .map(|p| format!("{}/{}", p.folder, p.filename))
         .collect();
 
-    let mut hash_to_meta: HashMap<String, (String, String)> = HashMap::new();
+    let mut hash_to_meta: HashMap<String, (String, String, PathBuf)> = HashMap::new();
     for folder in ["mods", "resourcepacks", "shaderpacks"] {
         let dir = inst.join(folder);
         for item in list_content_items(&dir) {
@@ -3688,7 +3746,7 @@ pub fn identify_instance_content_by_hash(
             if let Ok((sha1_hex, _, _)) = compute_file_hashes(&path) {
                 hash_to_meta.insert(
                     sha1_hex.to_ascii_lowercase(),
-                    (folder.to_string(), item.base_name),
+                    (folder.to_string(), item.base_name, path),
                 );
             }
         }
@@ -3722,68 +3780,91 @@ pub fn identify_instance_content_by_hash(
             "hashes": chunk,
             "algorithm": "sha1"
         });
-        let resp = client
+        if let Ok(resp) = client
             .post(format!("{MODRINTH_API_BASE}/version_files"))
             .json(&body)
             .send()
-            .map_err(|e| format!("Modrinth hash lookup failed: {e}"))?
-            .error_for_status()
-            .map_err(|e| format!("Modrinth hash lookup HTTP error: {e}"))?;
-        let part: HashMap<String, VersionFileMatch> = resp
-            .json()
-            .map_err(|e| format!("Invalid Modrinth version_files response: {e}"))?;
-        matched_versions.extend(part);
-    }
-
-    if matched_versions.is_empty() {
-        return Ok((0, total_unmatched));
-    }
-
-    let project_ids: Vec<String> = matched_versions
-        .values()
-        .map(|v| v.project_id.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let mut proj_by_id: HashMap<String, ProjectBrief> = HashMap::new();
-    for chunk in project_ids.chunks(100) {
-        let ids_param = serde_json::to_string(chunk).unwrap_or_else(|_| "[]".to_string());
-        if let Ok(resp) = client
-            .get(format!("{MODRINTH_API_BASE}/projects"))
-            .query(&[("ids", ids_param.as_str())])
-            .send()
             .and_then(|r| r.error_for_status())
         {
-            if let Ok(projects) = resp.json::<Vec<ProjectBrief>>() {
-                for p in projects {
-                    proj_by_id.insert(p.id.clone(), p);
-                }
+            if let Ok(part) = resp.json::<HashMap<String, VersionFileMatch>>() {
+                matched_versions.extend(part);
             }
         }
     }
 
     let mut identified = 0usize;
-    for (hash, ver) in matched_versions {
-        let Some((folder, filename)) = hash_to_meta.get(&hash.to_ascii_lowercase()) else {
+    let mut matched_keys: HashSet<String> = HashSet::new();
+
+    if !matched_versions.is_empty() {
+        let project_ids: Vec<String> = matched_versions
+            .values()
+            .map(|v| v.project_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut proj_by_id: HashMap<String, ProjectBrief> = HashMap::new();
+        for chunk in project_ids.chunks(100) {
+            let ids_param = serde_json::to_string(chunk).unwrap_or_else(|_| "[]".to_string());
+            if let Ok(resp) = client
+                .get(format!("{MODRINTH_API_BASE}/projects"))
+                .query(&[("ids", ids_param.as_str())])
+                .send()
+                .and_then(|r| r.error_for_status())
+            {
+                if let Ok(projects) = resp.json::<Vec<ProjectBrief>>() {
+                    for p in projects {
+                        proj_by_id.insert(p.id.clone(), p);
+                    }
+                }
+            }
+        }
+
+        for (hash, ver) in matched_versions {
+            let key = hash.to_ascii_lowercase();
+            let Some((folder, filename, _)) = hash_to_meta.get(&key) else {
+                continue;
+            };
+            let proj = proj_by_id.get(&ver.project_id);
+            let title = proj
+                .map(|p| p.title.clone())
+                .unwrap_or_else(|| filename.clone());
+            let icon_url = proj.and_then(|p| p.icon_url.clone());
+            index.insert(
+                ver.project_id,
+                InstalledProject {
+                    title,
+                    filename: filename.clone(),
+                    folder: folder.clone(),
+                    version_number: ver.version_number,
+                    icon_url,
+                    source: ProjectSource::Modrinth,
+                },
+            );
+            matched_keys.insert(key);
+            identified += 1;
+        }
+    }
+
+    // Fallback to CurseForge MurmurHash2 fingerprint lookup for files not on Modrinth.
+    let mut cf_candidates: Vec<(String, String, u32)> = Vec::new();
+    for (sha1_key, (folder, filename, path)) in &hash_to_meta {
+        if matched_keys.contains(sha1_key) {
             continue;
-        };
-        let proj = proj_by_id.get(&ver.project_id);
-        let title = proj
-            .map(|p| p.title.clone())
-            .unwrap_or_else(|| filename.clone());
-        let icon_url = proj.and_then(|p| p.icon_url.clone());
-        index.insert(
-            ver.project_id,
-            InstalledProject {
-                title,
-                filename: filename.clone(),
-                folder: folder.clone(),
-                version_number: ver.version_number,
-                icon_url,
-                source: ProjectSource::Modrinth,
-            },
+        }
+        if let Ok(fp) = crate::curseforge::compute_file_curseforge_fingerprint(path) {
+            cf_candidates.push((folder.clone(), filename.clone(), fp));
+        }
+    }
+    if !cf_candidates.is_empty() {
+        let cf_found = crate::curseforge::identify_curseforge_files_by_fingerprint(
+            &client,
+            cf_api_key,
+            &cf_candidates,
         );
-        identified += 1;
+        for (pid, entry) in cf_found {
+            index.insert(pid, entry);
+            identified += 1;
+        }
     }
 
     if identified > 0 {

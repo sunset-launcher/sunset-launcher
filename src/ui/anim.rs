@@ -162,13 +162,13 @@ pub fn paint_click_ripple(
         origin.x.clamp(rect.left(), rect.right()),
         origin.y.clamp(rect.top(), rect.bottom()),
     );
-    let max_alpha = 64.0_f32;
+    let max_alpha = 56.0_f32;
 
     let clipped = painter.with_clip_rect(rect);
-    let max_r = (rect.width().hypot(rect.height()) * 0.65).max(20.0);
-    let r = 4.0 + eased * max_r;
+    let max_r = (rect.width().hypot(rect.height()) * 0.65).max(18.0);
+    let r = 3.0 + eased * max_r;
 
-    let fill_a = ((inv * inv) * (max_alpha * 0.45)).round() as u8;
+    let fill_a = ((inv * inv) * (max_alpha * 0.42)).round() as u8;
     if fill_a > 1 {
         clipped.circle_filled(
             origin,
@@ -183,20 +183,20 @@ pub fn paint_click_ripple(
             origin,
             r * 0.92,
             Stroke::new(
-                1.35 * inv + 0.45,
+                1.25 * inv + 0.4,
                 Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), ring_a),
             ),
         );
     }
 
     if outer_bloom {
-        let border_a = ((1.0 - (t * 1.6).min(1.0)).powi(2) * (max_alpha * 0.65)).round() as u8;
+        let border_a = ((1.0 - (t * 1.6).min(1.0)).powi(2) * (max_alpha * 0.6)).round() as u8;
         if border_a > 1 {
             painter.rect_stroke(
-                rect.expand(eased * 2.2),
+                rect.expand(eased * 2.0),
                 rounding,
                 Stroke::new(
-                    1.15_f32,
+                    1.1_f32,
                     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), border_a),
                 ),
             );
@@ -204,7 +204,7 @@ pub fn paint_click_ripple(
     }
 }
 
-/// Paints a subtle moving diagonal sheen across action buttons when hovered.
+/// Paints a subtle moving sheen across action buttons and active progress bars.
 pub fn paint_shimmer_sweep(
     painter: &egui::Painter,
     rect: Rect,
@@ -218,7 +218,7 @@ pub fn paint_shimmer_sweep(
     }
     let p = ease_out_cubic(progress_01.clamp(0.0, 1.0));
     let clipped = painter.with_clip_rect(rect);
-    let band_w = (rect.width() * 0.28).clamp(14.0, 48.0);
+    let band_w = (rect.width() * 0.28).clamp(12.0, 44.0);
     let x_center = (rect.left() - band_w * 0.5) + p * (rect.width() + band_w);
     let band = Rect::from_min_max(
         Pos2::new(x_center - band_w * 0.5, rect.top()),
@@ -383,6 +383,7 @@ pub fn compute_icon_anim(icon: Icon, hover_t: f32, press_t: f32, click_t: Option
 // Subtle foreground action feedback (`ActionFx`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 const MAX_RINGS: usize = 24;
 
 #[derive(Clone)]
@@ -415,6 +416,7 @@ impl ActionFxState {
         !self.rings.is_empty() || self.screen_veil_start.is_some()
     }
 
+    #[allow(dead_code)]
     fn push_ring(&mut self, ring: FxRing) {
         if self.rings.len() >= MAX_RINGS {
             self.rings.remove(0);
@@ -449,23 +451,23 @@ pub fn emit_ring(ctx: &egui::Context, pos: Pos2, color: Color32, max_radius: f32
         st.push_ring(FxRing {
             pos,
             color,
-            max_radius: max_radius.clamp(12.0, 24.0),
+            max_radius: max_radius.clamp(12.0, 22.0),
             start_time: now,
-            duration: 0.30,
+            duration: 0.28,
         });
     });
     ctx.request_repaint();
 }
 
-/// Emits a subtle ring pulse at `pos` for primary confirmations.
+/// Emits a subtle confirmation pulse ring at `pos` for primary actions.
 pub fn emit_burst(ctx: &egui::Context, pos: Pos2, color: Color32, _count: usize) {
     with_fx_state(ctx, |st, now| {
         st.push_ring(FxRing {
             pos,
             color,
-            max_radius: 22.0,
+            max_radius: 20.0,
             start_time: now,
-            duration: 0.32,
+            duration: 0.30,
         });
     });
     ctx.request_repaint();

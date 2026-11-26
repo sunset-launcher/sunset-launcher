@@ -3,11 +3,9 @@ use super::*;
 impl McLauncherApp {
     pub(super) fn render_settings_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let lang = self.settings.language;
-        ui.heading(
-            egui::RichText::new(tr(lang, "settings.title"))
-                .size(21.0)
-                .color(text_primary()),
-        );
+        ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
+            page_heading(ui, tr(lang, "settings.title"));
+        });
         ui.label(
             egui::RichText::new(tr(lang, "settings.subtitle"))
                 .small()
@@ -520,7 +518,7 @@ impl McLauncherApp {
 
             ui.add_space(12.0);
 
-            // 5. Launch Behavior & Updates
+            // 5. Launch behavior
             card_frame(false, 0.0).show(ui, |ui| {
                 ui.set_min_width(card_w);
                 ui.set_max_width(card_w);
@@ -532,7 +530,6 @@ impl McLauncherApp {
                     tr(lang, "settings.offline_mode"),
                 ) {
                     let _ = save_launcher_settings(&self.paths, &self.settings);
-                    anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 24.0);
                 }
                 ui.add_space(4.0);
                 if ui_checkbox(
@@ -542,7 +539,6 @@ impl McLauncherApp {
                     tr(lang, "settings.hide_on_launch"),
                 ) {
                     let _ = save_launcher_settings(&self.paths, &self.settings);
-                    anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 24.0);
                 }
                 ui.add_space(4.0);
                 if ui_checkbox(
@@ -552,119 +548,6 @@ impl McLauncherApp {
                     tr(lang, "settings.open_console_crash"),
                 ) {
                     let _ = save_launcher_settings(&self.paths, &self.settings);
-                    anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 24.0);
-                }
-                ui.add_space(4.0);
-                if ui_checkbox(
-                    ui,
-                    "settings_check_updates_startup",
-                    &mut self.settings.check_updates_on_startup,
-                    tr(lang, "settings.check_updates_startup"),
-                ) {
-                    let _ = save_launcher_settings(&self.paths, &self.settings);
-                    anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 24.0);
-                }
-                ui.add_space(4.0);
-                if ui_checkbox(
-                    ui,
-                    "settings_auto_update",
-                    &mut self.settings.auto_update,
-                    tr(lang, "settings.auto_update"),
-                ) {
-                    let _ = save_launcher_settings(&self.paths, &self.settings);
-                    anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 24.0);
-                }
-                ui.add_space(12.0);
-                ui_flow_row(ui, 30.0, |ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}: v{}",
-                            tr(lang, "settings.updates.current"),
-                            env!("CARGO_PKG_VERSION")
-                        ))
-                        .monospace()
-                        .small()
-                        .color(text_muted()),
-                    );
-                    if ui_button_icon(
-                        ui,
-                        "settings_check_updates_btn",
-                        Some(Icon::Refresh),
-                        tr(lang, "settings.updates.check"),
-                        ButtonVariant::Secondary,
-                        !self.update_checking && !self.update_installing,
-                        28.0,
-                    )
-                    .clicked()
-                    {
-                        anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 28.0);
-                        self.check_launcher_updates();
-                    }
-                    if let Some(upd) = self.update_available.clone() {
-                        let has_asset = upd.download_url.is_some();
-                        if has_asset
-                            && ui_button_icon(
-                                ui,
-                                "settings_install_update_btn",
-                                Some(Icon::Download),
-                                tr(lang, "settings.updates.install"),
-                                ButtonVariant::Primary,
-                                !self.update_installing
-                                    && !self.is_busy
-                                    && !self.any_game_running()
-                                    && self.launching_profiles.is_empty(),
-                                28.0,
-                            )
-                            .clicked()
-                        {
-                            anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 10);
-                            anim::emit_edge_pulse(ctx, accent());
-                            self.start_launcher_update();
-                        }
-                        if ui_button_icon(
-                            ui,
-                            "settings_open_release_btn",
-                            Some(Icon::External),
-                            tr(lang, "settings.updates.open"),
-                            if has_asset {
-                                ButtonVariant::Secondary
-                            } else {
-                                ButtonVariant::Primary
-                            },
-                            true,
-                            28.0,
-                        )
-                        .clicked()
-                        {
-                            anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 28.0);
-                            ctx.open_url(egui::OpenUrl::new_tab(&upd.html_url));
-                        }
-                    }
-                    if self.update_installing {
-                        mono_spinner(ui, 16.0);
-                    }
-                });
-                if let Some(upd) = self.update_available.clone() {
-                    let ver = upd.version.trim_start_matches(['v', 'V']);
-                    ui.add_space(6.0);
-                    ui_alert_banner(
-                        ui,
-                        AlertKind::Success,
-                        &format!("{}: v{ver}", tr(lang, "settings.updates.available")),
-                        (card_w - 28.0).max(160.0),
-                    );
-                    let notes = upd.notes.trim();
-                    if !notes.is_empty() {
-                        ui.add_space(4.0);
-                        let preview: String = notes.chars().take(240).collect();
-                        ui.label(egui::RichText::new(preview).small().color(text_muted()));
-                    }
-                } else if self.update_checked_up_to_date {
-                    ui.add_space(6.0);
-                    badge(ui, tr(lang, "settings.updates.up_to_date"), true);
-                } else if let Some(err) = self.update_error.clone() {
-                    ui.add_space(6.0);
-                    ui_alert_banner(ui, AlertKind::Warning, &err, (card_w - 28.0).max(160.0));
                 }
             });
 
@@ -780,7 +663,7 @@ impl McLauncherApp {
                     &mut self.settings.default_java_path,
                     "Auto",
                     field_w,
-                    true,
+                    false,
                 )
                 .changed()
                 {
@@ -798,7 +681,7 @@ impl McLauncherApp {
                     &mut self.settings.default_jvm_args,
                     "-XX:+UseG1GC -XX:+UnlockExperimentalVMOptions",
                     field_w,
-                    true,
+                    false,
                 )
                 .changed()
                 {
@@ -882,6 +765,99 @@ impl McLauncherApp {
                     let _ = save_launcher_settings(&self.paths, &self.settings);
                 }
             });
+
+            ui.add_space(12.0);
+            card_frame(false, 0.0).show(ui, |ui| {
+                ui.set_min_width(card_w);
+                ui.set_max_width(card_w);
+                section_header(ui, tr(lang, "settings.updates.title"));
+                if ui_checkbox(
+                    ui,
+                    "settings_check_updates_startup",
+                    &mut self.settings.check_updates_on_startup,
+                    tr(lang, "settings.check_updates_startup"),
+                ) {
+                    let _ = save_launcher_settings(&self.paths, &self.settings);
+                }
+                ui.add_space(4.0);
+                if ui_checkbox(
+                    ui,
+                    "settings_auto_update",
+                    &mut self.settings.auto_update,
+                    tr(lang, "settings.auto_update"),
+                ) {
+                    let _ = save_launcher_settings(&self.paths, &self.settings);
+                }
+                ui.add_space(8.0);
+                ui_wrap_row(ui, 28.0, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} v{}",
+                            tr(lang, "settings.updates.current"),
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .small()
+                        .color(text_secondary()),
+                    );
+                    if ui_button_icon(
+                        ui,
+                        "settings_check_updates_btn",
+                        Some(Icon::Refresh),
+                        tr(lang, "settings.updates.check"),
+                        ButtonVariant::Secondary,
+                        !self.update_checking && !self.update_installing && !self.settings.offline_mode,
+                        28.0,
+                    )
+                    .clicked()
+                    {
+                        self.check_launcher_updates();
+                    }
+                    if let Some(upd) = self.update_available.clone() {
+                        let ver = upd.version.trim_start_matches(['v', 'V']);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} v{ver}",
+                                tr(lang, "settings.updates.available")
+                            ))
+                            .small()
+                            .color(accent_text()),
+                        );
+                        if upd.download_url.is_some()
+                            && ui_button_icon(
+                                ui,
+                                "settings_install_update_btn",
+                                Some(Icon::Download),
+                                tr(lang, "settings.updates.install"),
+                                ButtonVariant::Primary,
+                                !self.update_installing && !self.is_busy && !self.any_game_running(),
+                                28.0,
+                            )
+                            .clicked()
+                        {
+                            self.start_launcher_update();
+                        }
+                        if ui_button_icon(
+                            ui,
+                            "settings_open_release_btn",
+                            Some(Icon::External),
+                            tr(lang, "settings.updates.open"),
+                            ButtonVariant::Subtle,
+                            true,
+                            28.0,
+                        )
+                        .clicked()
+                        {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(&upd.html_url));
+                        }
+                    } else if self.update_checked_once && !self.update_checking {
+                        ui.label(
+                            egui::RichText::new(tr(lang, "settings.updates.up_to_date"))
+                                .small()
+                                .color(text_muted()),
+                        );
+                    }
+                });
+            });
         });
     }
 
@@ -915,268 +891,117 @@ impl McLauncherApp {
 
         let avail_w = ui.available_width();
         let has_crash_btn = self.last_crash_code.is_some() || diag_summary.is_some();
-        let wide_hdr = avail_w >= if has_crash_btn { 680.0 } else { 560.0 };
-        if wide_hdr {
-            ui_toolbar_row(ui, 32.0, |ui| {
-                ui.heading(
-                    egui::RichText::new(tr(lang, "nav.console"))
-                        .size(21.0)
-                        .color(text_primary()),
-                );
-                if is_running {
-                    let (dot_r, dot_resp) =
-                        ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-                    draw_running_pulse_dot(ui, dot_r.center(), 3.2, accent(), bg_void());
-                    dot_resp.on_hover_text(tr(lang, "console.live"));
-                }
-                ui.label(
-                    egui::RichText::new(format!("{logs_len} {}", tr(lang, "console.lines")))
-                        .monospace()
-                        .size(11.5)
-                        .color(text_muted()),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    if let Some(pid) = &active_pid {
-                        if self.running_games.contains_key(pid)
-                            && ui_button_icon(
-                                ui,
-                                "console_stop_inst_btn",
-                                Some(Icon::Stop),
-                                tr(lang, "top.stop"),
-                                ButtonVariant::Danger,
-                                true,
-                                28.0,
-                            )
-                            .clicked()
-                        {
-                            do_stop_pid = Some(pid.clone());
-                        }
-                    }
-                    if !logs_empty
-                        && ui_button_icon(
-                            ui,
-                            "console_mclogs_btn",
-                            Some(Icon::External),
-                            if self.mclogs_uploading {
-                                tr(lang, "logs.uploading")
-                            } else {
-                                "mclo.gs"
-                            },
-                            ButtonVariant::Secondary,
-                            !self.mclogs_uploading,
-                            28.0,
-                        )
-                        .clicked()
-                    {
-                        do_upload_mclogs = true;
-                    }
-                    if ui_button_icon(
-                        ui,
-                        "console_clear_btn",
-                        Some(Icon::Trash),
-                        tr(lang, "btn.clear"),
-                        ButtonVariant::Subtle,
-                        !logs_empty,
-                        28.0,
-                    )
-                    .clicked()
-                    {
-                        anim::emit_ring(
-                            ui.ctx(),
-                            anim::pointer_or_center(ui.ctx()),
-                            text_secondary(),
-                            28.0,
-                        );
-                        do_clear = true;
-                    }
-                    if ui_button_icon(
-                        ui,
-                        "console_copy_btn",
-                        Some(Icon::Copy),
-                        tr(lang, "btn.copy_all"),
-                        ButtonVariant::Secondary,
-                        !logs_empty,
-                        28.0,
-                    )
-                    .clicked()
-                    {
-                        do_copy_all = true;
-                    }
-                    if (self.last_crash_code.is_some() || diag_summary.is_some())
-                        && ui_button_icon(
-                            ui,
-                            "console_copy_crash_btn",
-                            Some(Icon::Alert),
-                            tr(lang, "console.copy_crash"),
-                            ButtonVariant::Danger,
-                            !logs_empty,
-                            28.0,
-                        )
-                        .clicked()
-                    {
-                        let mut parts = Vec::new();
-                        parts.push(format!("Sunset Launcher v{}", env!("CARGO_PKG_VERSION")));
-                        let crash_prof = active_pid
-                            .as_deref()
-                            .and_then(|pid| self.profiles.iter().find(|p| p.id == pid))
-                            .or_else(|| self.profiles.get(self.selected_idx));
-                        if let Some(p) = crash_prof {
-                            parts.push(format!(
-                                "Instance: {} (MC {}, {:?})",
-                                p.name, p.version_id, p.loader
-                            ));
-                        }
-                        if let Some(code) = self.last_crash_code {
-                            parts.push(format!("Exit code: {code}"));
-                        }
-                        if let Some(diag) = &diag_summary {
-                            parts.push(format!("Diagnosis: {diag}"));
-                        }
-                        let tail_start = logs_snapshot.len().saturating_sub(150);
-                        parts.push("--- Tail Logs ---".to_string());
-                        for l in logs_snapshot.iter().skip(tail_start) {
-                            parts.push(format!("[{}] {}", l.timestamp, l.text));
-                        }
-                        ui.ctx().copy_text(parts.join("\n"));
-                        let pos = anim::pointer_or_center(ui.ctx());
-                        anim::emit_ring(ui.ctx(), pos, DANGER, 30.0);
-                        anim::emit_floating_badge(ui.ctx(), pos, Some(Icon::Check), "", DANGER);
-                        self.show_toast(ui.ctx(), tr(lang, "console.copy_crash"));
-                    }
-                });
-            });
+        let mut do_copy_crash = false;
+        let console_act_lbl = if self.mclogs_uploading {
+            tr(lang, "logs.uploading")
         } else {
-            ui_wrap_row(ui, 28.0, |ui| {
-                ui.heading(
-                    egui::RichText::new(tr(lang, "nav.console"))
-                        .size(21.0)
-                        .color(text_primary()),
-                );
-                if is_running {
-                    let (dot_r, dot_resp) =
-                        ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-                    draw_running_pulse_dot(ui, dot_r.center(), 3.2, accent(), bg_void());
-                    dot_resp.on_hover_text(tr(lang, "console.live"));
-                }
-                ui.label(
-                    egui::RichText::new(format!("{logs_len} {}", tr(lang, "console.lines")))
-                        .monospace()
-                        .size(11.5)
-                        .color(text_muted()),
-                );
-            });
-            ui.add_space(4.0);
-            ui_wrap_row(ui, 28.0, |ui| {
+            tr(lang, "btn.actions")
+        };
+
+        ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
+            page_heading(ui, tr(lang, "nav.console"));
+            if is_running {
+                let (dot_r, dot_resp) =
+                    ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                draw_running_pulse_dot(ui, dot_r.center(), 3.0, accent(), bg_void());
+                dot_resp.on_hover_text(tr(lang, "console.live"));
+            }
+            ui.label(
+                egui::RichText::new(format!("{logs_len} {}", tr(lang, "console.lines")))
+                    .monospace()
+                    .size(11.0)
+                    .color(text_muted()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
                 if let Some(pid) = &active_pid {
                     if self.running_games.contains_key(pid)
                         && ui_button_icon(
                             ui,
-                            "console_stop_inst_btn_n",
+                            "console_stop_inst_btn",
                             Some(Icon::Stop),
                             tr(lang, "top.stop"),
                             ButtonVariant::Danger,
                             true,
-                            28.0,
+                            26.0,
                         )
                         .clicked()
                     {
                         do_stop_pid = Some(pid.clone());
                     }
                 }
-                if !logs_empty
-                    && ui_button_icon(
-                        ui,
-                        "console_copy_btn_n",
-                        Some(Icon::Copy),
-                        tr(lang, "btn.copy_all"),
-                        ButtonVariant::Secondary,
-                        !logs_empty,
-                        28.0,
-                    )
-                    .clicked()
-                {
-                    do_copy_all = true;
-                }
-                if !logs_empty
-                    && ui_button_icon(
-                        ui,
-                        "console_mclogs_btn_n",
-                        Some(Icon::External),
-                        if self.mclogs_uploading {
-                            tr(lang, "logs.uploading")
-                        } else {
-                            "mclo.gs"
-                        },
-                        ButtonVariant::Secondary,
-                        !self.mclogs_uploading,
-                        28.0,
-                    )
-                    .clicked()
-                {
-                    do_upload_mclogs = true;
-                }
-                if ui_button_icon(
-                    ui,
-                    "console_clear_btn_n",
-                    Some(Icon::Trash),
-                    tr(lang, "btn.clear"),
-                    ButtonVariant::Subtle,
-                    !logs_empty,
-                    28.0,
-                )
-                .clicked()
-                {
-                    anim::emit_ring(
-                        ui.ctx(),
-                        anim::pointer_or_center(ui.ctx()),
-                        text_secondary(),
-                        28.0,
-                    );
-                    do_clear = true;
-                }
-                if (self.last_crash_code.is_some() || diag_summary.is_some())
-                    && ui_button_icon(
-                        ui,
-                        "console_copy_crash_btn_n",
-                        Some(Icon::Alert),
-                        tr(lang, "console.copy_crash"),
-                        ButtonVariant::Danger,
-                        !logs_empty,
-                        28.0,
-                    )
-                    .clicked()
-                {
-                    let mut parts = Vec::new();
-                    parts.push(format!("Sunset Launcher v{}", env!("CARGO_PKG_VERSION")));
-                    let crash_prof = active_pid
-                        .as_deref()
-                        .and_then(|pid| self.profiles.iter().find(|p| p.id == pid))
-                        .or_else(|| self.profiles.get(self.selected_idx));
-                    if let Some(p) = crash_prof {
-                        parts.push(format!(
-                            "Instance: {} (MC {}, {:?})",
-                            p.name, p.version_id, p.loader
-                        ));
-                    }
-                    if let Some(code) = self.last_crash_code {
-                        parts.push(format!("Exit code: {code}"));
-                    }
-                    if let Some(diag) = &diag_summary {
-                        parts.push(format!("Diagnosis: {diag}"));
-                    }
-                    let tail_start = logs_snapshot.len().saturating_sub(150);
-                    parts.push("--- Tail Logs ---".to_string());
-                    for l in logs_snapshot.iter().skip(tail_start) {
-                        parts.push(format!("[{}] {}", l.timestamp, l.text));
-                    }
-                    ui.ctx().copy_text(parts.join("\n"));
-                    let pos = anim::pointer_or_center(ui.ctx());
-                    anim::emit_ring(ui.ctx(), pos, DANGER, 30.0);
-                    anim::emit_floating_badge(ui.ctx(), pos, Some(Icon::Check), "", DANGER);
-                    self.show_toast(ui.ctx(), tr(lang, "console.copy_crash"));
-                }
+                egui::ComboBox::from_id_salt("console_actions_combo")
+                    .selected_text(console_act_lbl)
+                    .width(124.0)
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .add_enabled(!logs_empty, egui::Button::new(tr(lang, "btn.copy_all")))
+                            .clicked()
+                        {
+                            do_copy_all = true;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(
+                                !logs_empty && !self.mclogs_uploading,
+                                egui::Button::new(tr(lang, "logs.upload_mclogs")),
+                            )
+                            .clicked()
+                        {
+                            do_upload_mclogs = true;
+                            ui.close_menu();
+                        }
+                        if has_crash_btn
+                            && ui
+                                .add_enabled(
+                                    !logs_empty,
+                                    egui::Button::new(tr(lang, "console.copy_crash")),
+                                )
+                                .clicked()
+                        {
+                            do_copy_crash = true;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(!logs_empty, egui::Button::new(tr(lang, "btn.clear")))
+                            .clicked()
+                        {
+                            do_clear = true;
+                            ui.close_menu();
+                        }
+                    });
             });
+        });
+
+        if do_copy_crash {
+            let mut parts = Vec::new();
+            parts.push(format!("Sunset Launcher v{}", env!("CARGO_PKG_VERSION")));
+            let crash_prof = active_pid
+                .as_deref()
+                .and_then(|pid| self.profiles.iter().find(|p| p.id == pid))
+                .or_else(|| self.profiles.get(self.selected_idx));
+            if let Some(p) = crash_prof {
+                parts.push(format!(
+                    "Instance: {} (MC {}, {:?})",
+                    p.name, p.version_id, p.loader
+                ));
+            }
+            if let Some(code) = self.last_crash_code {
+                parts.push(format!("Exit code: {code}"));
+            }
+            if let Some(diag) = &diag_summary {
+                parts.push(format!("Diagnosis: {diag}"));
+            }
+            let tail_start = logs_snapshot.len().saturating_sub(150);
+            parts.push("--- Tail Logs ---".to_string());
+            for l in logs_snapshot.iter().skip(tail_start) {
+                parts.push(format!("[{}] {}", l.timestamp, l.text));
+            }
+            ui.ctx().copy_text(parts.join("\n"));
+            let pos = anim::pointer_or_center(ui.ctx());
+            anim::emit_ring(ui.ctx(), pos, DANGER, 28.0);
+            self.show_toast(ui.ctx(), tr(lang, "console.copy_crash"));
         }
 
         ui.add_space(6.0);

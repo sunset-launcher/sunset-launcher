@@ -34,6 +34,30 @@ pub const CANCELLED_ERR_MSG: &str = "Operation cancelled by user";
 
 static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
 
+std::thread_local! {
+    static SCOPED_CANCEL_TOKEN: std::cell::RefCell<Option<Arc<AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Returns the active thread-local cancellation token, if any.
+pub fn current_cancel_token() -> Option<Arc<AtomicBool>> {
+    SCOPED_CANCEL_TOKEN.with(|slot| slot.borrow().clone())
+}
+
+/// Runs `f` with a per-task cancellation token so concurrent tasks do not clobber each other.
+pub fn with_download_cancel_token<R>(token: Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
+    struct Reset(Option<Arc<AtomicBool>>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SCOPED_CANCEL_TOKEN.with(|slot| {
+                *slot.borrow_mut() = self.0.take();
+            });
+        }
+    }
+    let prev = SCOPED_CANCEL_TOKEN.with(|slot| slot.borrow_mut().replace(token));
+    let _guard = Reset(prev);
+    f()
+}
+
 /// Clears the cooperative download cancellation flag before starting a new background task.
 pub fn reset_download_cancel() {
     DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
@@ -46,7 +70,12 @@ pub fn request_download_cancel() {
 
 /// Returns `true` if the user has requested cancellation of the current download/install task.
 pub fn is_download_cancelled() -> bool {
-    DOWNLOAD_CANCELLED.load(Ordering::Relaxed)
+    let scoped = SCOPED_CANCEL_TOKEN.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|tok| tok.load(Ordering::Relaxed))
+    });
+    scoped.unwrap_or_else(|| DOWNLOAD_CANCELLED.load(Ordering::Relaxed))
 }
 
 /// Returns `Err(CANCELLED_ERR_MSG)` if cancellation has been requested.
@@ -891,6 +920,7 @@ pub fn download_parallel_with_mode(
     let aborted = Arc::new(AtomicBool::new(false));
     let first_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let (prog_tx, prog_rx) = std::sync::mpsc::channel::<usize>();
+    let parent_cancel_token = current_cancel_token();
 
     std::thread::scope(|scope| {
         scope.spawn(move || {
@@ -910,12 +940,16 @@ pub fn download_parallel_with_mode(
                 let aborted = Arc::clone(&aborted);
                 let first_error = Arc::clone(&first_error);
                 let prog_tx = prog_tx.clone();
+                let cancel_token = parent_cancel_token.clone();
                 handles.push(tokio::spawn(async move {
                     loop {
                         if aborted.load(Ordering::Relaxed) {
                             break;
                         }
-                        if is_download_cancelled() {
+                        let cancelled = cancel_token
+                            .as_ref()
+                            .map_or_else(is_download_cancelled, |t| t.load(Ordering::Relaxed));
+                        if cancelled {
                             aborted.store(true, Ordering::Relaxed);
                             if let Ok(mut slot) = first_error.lock() {
                                 slot.get_or_insert_with(|| CANCELLED_ERR_MSG.to_string());
@@ -2241,12 +2275,15 @@ pub fn prepare_version_with_mode(
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_forge_versions, filter_neoforge_versions, neoforge_mc_prefix,
-        parse_manifest_main_class, parse_maven_metadata_versions, resolve_processor_arg,
-        verify_sha1,
+        check_not_cancelled, filter_forge_versions, filter_neoforge_versions,
+        is_download_cancelled, neoforge_mc_prefix, parse_manifest_main_class,
+        parse_maven_metadata_versions, resolve_processor_arg, verify_sha1,
+        with_download_cancel_token,
     };
     use std::collections::HashMap;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn test_verify_sha1_detects_corruption() {
@@ -2569,5 +2606,23 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scoped_cancel_tokens_are_isolated() {
+        let t1 = Arc::new(AtomicBool::new(false));
+        let t2 = Arc::new(AtomicBool::new(true));
+
+        with_download_cancel_token(Arc::clone(&t1), || {
+            assert!(!is_download_cancelled());
+            assert!(check_not_cancelled().is_ok());
+            with_download_cancel_token(Arc::clone(&t2), || {
+                assert!(is_download_cancelled());
+                assert!(check_not_cancelled().is_err());
+            });
+            assert!(!is_download_cancelled());
+            t1.store(true, Ordering::SeqCst);
+            assert!(is_download_cancelled());
+        });
     }
 }

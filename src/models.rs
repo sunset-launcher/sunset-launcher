@@ -456,6 +456,8 @@ pub enum WorkerEvent {
     },
     /// Account tokens were refreshed in the background and must be persisted.
     AccountRefreshed(Account),
+    /// Manual account token refresh triggered from the Accounts page.
+    AccountManualRefreshed(Result<Account, String>),
     MsDeviceCodeReady(Result<DeviceCodeInfo, String>),
     MsAuthFinished(Result<Account, String>),
     ElyAuthFinished(Result<Account, String>),
@@ -465,6 +467,10 @@ pub enum WorkerEvent {
         result: Result<ModrinthSearchPage, String>,
     },
     ModrinthInstallFinished(Result<ModrinthInstallOutcome, String>),
+    BatchImportFinished {
+        imported: usize,
+        errors: Vec<String>,
+    },
     ModUpdatesFinished(Result<Vec<String>, String>),
     ModrinthIdentifyFinished {
         profile_id: String,
@@ -1109,17 +1115,17 @@ pub struct CustomPalette {
 impl Default for CustomPalette {
     fn default() -> Self {
         Self {
-            bg_void: [18, 15, 24],
-            bg_sidebar: [24, 19, 32],
-            bg_elevated: [31, 24, 41],
-            bg_card: [38, 29, 49],
-            bg_card_hover: [48, 37, 61],
-            bg_input: [14, 11, 20],
-            border_subtle: [56, 44, 70],
-            border_strong: [84, 64, 102],
-            text_primary: [247, 240, 236],
-            text_secondary: [188, 169, 178],
-            text_muted: [130, 112, 128],
+            bg_void: [21, 20, 19],
+            bg_sidebar: [16, 15, 14],
+            bg_elevated: [32, 30, 28],
+            bg_card: [27, 26, 24],
+            bg_card_hover: [38, 36, 33],
+            bg_input: [16, 15, 14],
+            border_subtle: [42, 40, 37],
+            border_strong: [58, 55, 51],
+            text_primary: [239, 233, 222],
+            text_secondary: [170, 163, 152],
+            text_muted: [138, 132, 122],
             accent: [255, 128, 66],
         }
     }

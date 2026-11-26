@@ -330,6 +330,19 @@ impl McLauncherApp {
                     .small()
                     .color(text_secondary()),
                 );
+                let target_active = self.is_profile_running(&target.id)
+                    || self.is_profile_launching(&target.id);
+                if target_active {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(tr(
+                            self.settings.language,
+                            "inst.delete_running_blocked",
+                        ))
+                        .small()
+                        .color(WARNING),
+                    );
+                }
                 ui.add_space(12.0);
                 ui_toolbar_row(ui, 30.0, |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
@@ -339,13 +352,16 @@ impl McLauncherApp {
                         Some(Icon::Trash),
                         tr(self.settings.language, "btn.delete"),
                         ButtonVariant::Danger,
-                        true,
+                        !target_active,
                         30.0,
                     )
                     .clicked()
                     {
                         if del_idx < self.profiles.len() && self.profiles.len() > 1 {
                             let removed = self.profiles.remove(del_idx);
+                            let _ = remove_instance_dir(&self.paths, &removed);
+                            self.instance_logs.remove(&removed.id);
+                            self.fs_cache.invalidate();
                             if del_idx < self.selected_idx {
                                 self.selected_idx -= 1;
                             } else if self.selected_idx >= self.profiles.len() {
@@ -355,7 +371,12 @@ impl McLauncherApp {
                             self.persist_selected_profile();
                             self.sync_installed_index();
                             self.sync_discover_for_profile();
-                            self.show_toast(ctx, format!("Removed '{}'", removed.name));
+                            let msg = format!(
+                                "{}: '{}'",
+                                tr(self.settings.language, "toast.removed"),
+                                removed.name
+                            );
+                            self.show_toast(ctx, msg);
                             anim::emit_burst(ctx, anim::pointer_or_center(ctx), DANGER, 8);
                             anim::emit_edge_pulse(ctx, DANGER);
                         }
@@ -445,7 +466,7 @@ impl McLauncherApp {
                                 ui.spacing_mut().item_spacing.x = 8.0;
                                 let (ic_r, _) =
                                     ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                                let ic_scale = 0.7 + 0.3 * ease_out_back(enter).min(1.18);
+                                let ic_scale = 0.72 + 0.28 * ease_out_back(enter).min(1.14);
                                 draw_icon_animated(
                                     ui.painter(),
                                     ic_r,
@@ -578,28 +599,28 @@ impl McLauncherApp {
                         rect.center() + Vec2::new(0.0, (1.0 - eased) * 14.0),
                         Vec2::new(box_w * scale, 128.0 * scale),
                     );
-                    let pulse = pulse_01(ctx.input(|i| i.time), 4.2);
+                    let pulse = pulse_01(ctx.input(|i| i.time), 4.0);
                     ui.painter().rect_stroke(
-                        box_rect.expand(pulse * 4.0),
-                        Rounding::same(16.0),
+                        box_rect.expand(pulse * 3.5),
+                        Rounding::same(14.0),
                         Stroke::new(
-                            1.5_f32,
-                            with_alpha(accent(), ((1.0 - pulse) * eased * 135.0) as u8),
+                            1.4_f32,
+                            with_alpha(accent(), ((1.0 - pulse) * eased * 130.0) as u8),
                         ),
                     );
                     ui.painter().rect(
                         box_rect,
-                        Rounding::same(14.0),
+                        Rounding::same(12.0),
                         with_alpha(bg_card(), a),
-                        Stroke::new(2.0_f32, with_alpha(accent(), a)),
+                        Stroke::new(1.5_f32, with_alpha(accent(), a)),
                     );
                     let mut child = ui.new_child(
                         egui::UiBuilder::new()
                             .max_rect(box_rect.shrink(16.0))
                             .layout(egui::Layout::top_down(egui::Align::Center)),
                     );
-                    let (ic_r, _) = child.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
-                    let bob = (ctx.input(|i| i.time) as f32 * 5.0).sin() * 2.5;
+                    let (ic_r, _) = child.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                    let bob = (ctx.input(|i| i.time) as f32 * 5.0).sin() * 2.0;
                     draw_icon_animated(
                         child.painter(),
                         ic_r,
@@ -607,7 +628,7 @@ impl McLauncherApp {
                         with_alpha(accent(), a),
                         self::anim::IconAnim {
                             offset: Vec2::new(0.0, bob),
-                            scale: 1.0 + pulse * 0.06,
+                            scale: 1.0 + pulse * 0.05,
                             rotation: 0.0,
                         },
                     );
@@ -655,7 +676,8 @@ impl McLauncherApp {
                 ) {
                     Ok(()) => {
                         let _ = save_profiles(&self.paths, &self.profiles);
-                        self.show_toast(ctx, "Instance icon updated");
+                        let msg = tr(self.settings.language, "inst.icon_updated").to_string();
+                        self.show_toast(ctx, msg);
                     }
                     Err(err) => self.show_toast(ctx, &err),
                 }
@@ -668,15 +690,36 @@ impl McLauncherApp {
         let paths = self.paths.clone();
         let cf_key = self.settings.curseforge_api_key.clone();
         let tx = self.tx.clone();
-        reset_download_cancel();
+        let cancel_tok = Arc::new(AtomicBool::new(false));
+        self.mr_cancel_token = Some(Arc::clone(&cancel_tok));
         self.mr_installing = true;
         self.progress = 0.08;
-        self.status_text = format!("Importing {} file(s)...", other_files.len());
+        let total = other_files.len();
+        self.status_text = format!("Importing {total} file(s)...");
         thread::spawn(move || {
-            for path in other_files {
-                let res = import_local_file(&paths, &profile, &path, &active_folder, &cf_key, &tx);
-                let _ = tx.send(WorkerEvent::ModrinthInstallFinished(res));
-            }
+            let mut imported = 0usize;
+            let mut errors = Vec::new();
+            with_download_cancel_token(cancel_tok, || {
+                for (idx, path) in other_files.into_iter().enumerate() {
+                    if crate::mojang::is_download_cancelled() {
+                        errors.push(CANCELLED_ERR_MSG.to_string());
+                        break;
+                    }
+                    let fname = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "file".to_string());
+                    let _ = tx.send(WorkerEvent::Progress {
+                        stage: format!("Importing ({}/{total}): {fname}...", idx + 1),
+                        fraction: (idx as f32 + 0.1) / total.max(1) as f32,
+                    });
+                    match import_local_file(&paths, &profile, &path, &active_folder, &cf_key, &tx) {
+                        Ok(_) => imported += 1,
+                        Err(e) => errors.push(format!("{fname}: {e}")),
+                    }
+                }
+            });
+            let _ = tx.send(WorkerEvent::BatchImportFinished { imported, errors });
         });
     }
 
@@ -987,7 +1030,8 @@ impl McLauncherApp {
             self.mr_detail_hit = None;
         }
         if let Some(version) = install_version_req {
-            reset_download_cancel();
+            let cancel_tok = Arc::new(AtomicBool::new(false));
+            self.mr_cancel_token = Some(Arc::clone(&cancel_tok));
             let target_srv = self
                 .discover_target_server_id
                 .as_ref()
@@ -1021,30 +1065,32 @@ impl McLauncherApp {
                 let icon_url = hit.icon_url.clone();
                 let cf_key = self.settings.curseforge_api_key.clone();
                 thread::spawn(move || {
-                    let res = if let Some(cf_mod_id) = parse_cf_project_id(&pid) {
-                        install_curseforge_server_project(
-                            &cf_key,
-                            &paths,
-                            &srv,
-                            cf_mod_id,
-                            mr_type,
-                            &title,
-                            icon_url.as_deref(),
-                            Some(&version),
-                            &tx,
-                        )
-                    } else {
-                        install_server_specific_version(
-                            &paths,
-                            &srv,
-                            &pid,
-                            mr_type,
-                            &title,
-                            icon_url.as_deref(),
-                            &version,
-                            &tx,
-                        )
-                    };
+                    let res = with_download_cancel_token(cancel_tok, || {
+                        if let Some(cf_mod_id) = parse_cf_project_id(&pid) {
+                            install_curseforge_server_project(
+                                &cf_key,
+                                &paths,
+                                &srv,
+                                cf_mod_id,
+                                mr_type,
+                                &title,
+                                icon_url.as_deref(),
+                                Some(&version),
+                                &tx,
+                            )
+                        } else {
+                            install_server_specific_version(
+                                &paths,
+                                &srv,
+                                &pid,
+                                mr_type,
+                                &title,
+                                icon_url.as_deref(),
+                                &version,
+                                &tx,
+                            )
+                        }
+                    });
                     let _ = tx.send(WorkerEvent::ServerProjectInstalled(res));
                 });
             } else if let Some(profile) = self.profiles.get(self.selected_idx).cloned() {
@@ -1066,30 +1112,32 @@ impl McLauncherApp {
                 let icon_url = hit.icon_url.clone();
                 let cf_key = self.settings.curseforge_api_key.clone();
                 thread::spawn(move || {
-                    let res = if let Some(cf_mod_id) = parse_cf_project_id(&pid) {
-                        install_curseforge_project(
-                            &cf_key,
-                            &paths,
-                            &profile,
-                            cf_mod_id,
-                            mr_type,
-                            &title,
-                            icon_url.as_deref(),
-                            Some(&version),
-                            &tx,
-                        )
-                    } else {
-                        install_specific_version(
-                            &paths,
-                            &profile,
-                            &pid,
-                            mr_type,
-                            &title,
-                            icon_url.as_deref(),
-                            &version,
-                            &tx,
-                        )
-                    };
+                    let res = with_download_cancel_token(cancel_tok, || {
+                        if let Some(cf_mod_id) = parse_cf_project_id(&pid) {
+                            install_curseforge_project(
+                                &cf_key,
+                                &paths,
+                                &profile,
+                                cf_mod_id,
+                                mr_type,
+                                &title,
+                                icon_url.as_deref(),
+                                Some(&version),
+                                &tx,
+                            )
+                        } else {
+                            install_specific_version(
+                                &paths,
+                                &profile,
+                                &pid,
+                                mr_type,
+                                &title,
+                                icon_url.as_deref(),
+                                &version,
+                                &tx,
+                            )
+                        }
+                    });
                     let _ = tx.send(WorkerEvent::ModrinthInstallFinished(res));
                 });
             }
@@ -1182,7 +1230,7 @@ impl McLauncherApp {
             },
             PaletteItem {
                 category: PaletteCategory::Menus,
-                icon: Icon::Sparkle,
+                icon: Icon::Layers,
                 title: format!("{} — {}", tr(lang, "nav.discover"), tr(lang, "content.resourcepacks")),
                 subtitle: tr(lang, "mr.search_placeholder").to_string(),
                 keywords: "discover resourcepacks textures ресурспаки текстуры",
@@ -1227,7 +1275,7 @@ impl McLauncherApp {
             },
             PaletteItem {
                 category: PaletteCategory::Menus,
-                icon: Icon::Sparkle,
+                icon: Icon::Star,
                 title: format!("{} — {}", tr(lang, "nav.instance"), tr(lang, "content.shaderpacks")),
                 subtitle: tr(lang, "lib.manage_content").to_string(),
                 keywords: "instance content shaderpacks shaders шейдеры",
@@ -1245,7 +1293,7 @@ impl McLauncherApp {
             },
             PaletteItem {
                 category: PaletteCategory::Menus,
-                icon: Icon::Sparkle,
+                icon: Icon::Grid,
                 title: format!("{} — {}", tr(lang, "nav.instance"), tr(lang, "inst.tab_shots")),
                 subtitle: tr(lang, "btn.open_shots").to_string(),
                 keywords: "screenshots photos gallery скриншоты фото",
@@ -1517,17 +1565,27 @@ impl McLauncherApp {
                 }
 
                 ui.add_space(6.0);
-                // Category filter pills
-                ui_flow_row(ui, 26.0, |ui| {
-                    for cat in PaletteCategory::ALL {
-                        let active = self.cmd_palette_category == cat;
-                        let cat_lbl = cat.translated_label(self.settings.language);
-                        if ui_pill_tab(ui, ("cmd_cat", cat_lbl), cat_lbl, active).clicked()
-                            && !active
-                        {
-                            self.cmd_palette_category = cat;
-                            self.cmd_palette_selected = 0;
-                        }
+                // Category filter dropdown
+                ui_toolbar_row(ui, 26.0, |ui| {
+                    let prev_cat = self.cmd_palette_category;
+                    egui::ComboBox::from_id_salt("cmd_cat_combo")
+                        .selected_text(
+                            self.cmd_palette_category
+                                .translated_label(self.settings.language),
+                        )
+                        .width(148.0)
+                        .truncate()
+                        .show_ui(ui, |ui| {
+                            for cat in PaletteCategory::ALL {
+                                ui.selectable_value(
+                                    &mut self.cmd_palette_category,
+                                    cat,
+                                    cat.translated_label(self.settings.language),
+                                );
+                            }
+                        });
+                    if self.cmd_palette_category != prev_cat {
+                        self.cmd_palette_selected = 0;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
@@ -1730,14 +1788,19 @@ impl McLauncherApp {
                 PaletteAction::NewInstance => self.show_new_modal = true,
                 PaletteAction::CheckUpdates => {
                     if let Some(profile) = self.profiles.get(self.selected_idx).cloned() {
+                        let cancel_tok = Arc::new(AtomicBool::new(false));
+                        self.mr_cancel_token = Some(Arc::clone(&cancel_tok));
                         self.mr_installing = true;
                         self.progress = 0.08;
                         self.status_text =
                             tr(self.settings.language, "content.checking_updates").to_string();
                         let paths = self.paths.clone();
+                        let cf_key = self.settings.curseforge_api_key.clone();
                         let tx = self.tx.clone();
                         thread::spawn(move || {
-                            let res = update_all_installed_projects(&paths, &profile, &tx);
+                            let res = with_download_cancel_token(cancel_tok, || {
+                                update_all_installed_projects(&paths, &profile, &cf_key, &tx)
+                            });
                             let _ = tx.send(WorkerEvent::ModUpdatesFinished(res));
                         });
                     }

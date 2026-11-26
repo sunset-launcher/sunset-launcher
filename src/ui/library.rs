@@ -4,14 +4,11 @@ impl McLauncherApp {
     pub(super) fn render_library_page(&mut self, ui: &mut egui::Ui) {
         let lang = self.settings.language;
         let avail_w = ui.available_width();
-        let wide_hdr = avail_w >= 620.0;
-        let search_w = (avail_w - 340.0).clamp(110.0, 240.0);
-        ui_toolbar_row(ui, 30.0, |ui| {
-            ui.heading(
-                egui::RichText::new(tr(lang, "lib.title"))
-                    .size(21.0)
-                    .color(text_primary()),
-            );
+        let wide_hdr = avail_w >= 640.0;
+        let search_w = (avail_w - 420.0).clamp(110.0, 240.0);
+        let can_import_pack = !self.mr_installing && !self.file_picker_open && !self.is_busy;
+        ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
+            page_heading(ui, tr(lang, "lib.title"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if ui_button_icon(
@@ -21,11 +18,24 @@ impl McLauncherApp {
                     tr(lang, "btn.create"),
                     ButtonVariant::Primary,
                     true,
-                    30.0,
+                    CTL_HEIGHT,
                 )
                 .clicked()
                 {
                     self.show_new_modal = true;
+                }
+                if ui_button_icon(
+                    ui,
+                    "import_modpack_hdr_btn",
+                    Some(Icon::Download),
+                    tr(lang, "btn.import_modpack"),
+                    ButtonVariant::Secondary,
+                    can_import_pack,
+                    CTL_HEIGHT,
+                )
+                .clicked()
+                {
+                    self.request_file_pick(FilePickPurpose::ModpackImport);
                 }
                 if wide_hdr {
                     ui_search_input(
@@ -41,7 +51,7 @@ impl McLauncherApp {
 
         ui.add_space(6.0);
         if !wide_hdr {
-            ui_toolbar_row(ui, 30.0, |ui| {
+            ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
                 ui_search_input(
                     ui,
                     "lib_search_n",
@@ -112,42 +122,27 @@ impl McLauncherApp {
                 if self.library_sort != prev_sort {
                     self.mark_subtab_switch(ui.ctx());
                 }
-                if ui_icon_button(
-                    ui,
-                    "lib_view_grid",
-                    Icon::Grid,
-                    tr(self.settings.language, "lib.grid_view"),
-                    if self.library_view == LibraryViewMode::Grid {
-                        ButtonVariant::Secondary
-                    } else {
-                        ButtonVariant::Subtle
-                    },
-                    true,
-                    28.0,
-                )
-                .clicked()
-                    && self.library_view != LibraryViewMode::Grid
-                {
-                    self.library_view = LibraryViewMode::Grid;
-                    self.mark_subtab_switch(ui.ctx());
-                }
-                if ui_icon_button(
-                    ui,
-                    "lib_view_list",
-                    Icon::List,
-                    tr(self.settings.language, "lib.list_view"),
-                    if self.library_view == LibraryViewMode::List {
-                        ButtonVariant::Secondary
-                    } else {
-                        ButtonVariant::Subtle
-                    },
-                    true,
-                    28.0,
-                )
-                .clicked()
-                    && self.library_view != LibraryViewMode::List
-                {
-                    self.library_view = LibraryViewMode::List;
+                let prev_view = self.library_view;
+                egui::ComboBox::from_id_salt("lib_view_combo")
+                    .selected_text(match self.library_view {
+                        LibraryViewMode::Grid => tr(lang, "lib.grid_view"),
+                        LibraryViewMode::List => tr(lang, "lib.list_view"),
+                    })
+                    .width(126.0)
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.library_view,
+                            LibraryViewMode::Grid,
+                            tr(lang, "lib.grid_view"),
+                        );
+                        ui.selectable_value(
+                            &mut self.library_view,
+                            LibraryViewMode::List,
+                            tr(lang, "lib.list_view"),
+                        );
+                    });
+                if self.library_view != prev_view {
                     self.mark_subtab_switch(ui.ctx());
                 }
             });
@@ -281,18 +276,21 @@ impl McLauncherApp {
                                         {
                                             action_delete = Some(*idx);
                                         }
-                                        if ui_icon_button(
+                                        let cfg_resp = ui_icon_button(
                                             ui,
                                             ("list_cfg", &p.id),
                                             Icon::Sliders,
                                             tr(self.settings.language, "lib.settings"),
                                             ButtonVariant::Secondary,
-                                            true,
-                                            28.0,
-                                        )
-                                        .clicked()
-                                        {
+                                            selected,
+                                            CTL_HEIGHT,
+                                        );
+                                        if selected && cfg_resp.clicked() {
                                             action_open = Some(*idx);
+                                        } else if !selected
+                                            && cfg_resp.interact(Sense::click()).clicked()
+                                        {
+                                            action_select = Some(*idx);
                                         }
                                         if is_running {
                                             if ui_button_icon(
@@ -335,10 +333,18 @@ impl McLauncherApp {
                                             |ui| {
                                                 ui.set_max_width(left_w);
                                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                                let (av_r, _) = ui.allocate_exact_size(
+                                                let (av_r, av_resp) = ui.allocate_exact_size(
                                                     Vec2::splat(34.0),
-                                                    Sense::hover(),
+                                                    Sense::click(),
                                                 );
+                                                if av_resp.hovered() {
+                                                    ui.ctx().set_cursor_icon(
+                                                        egui::CursorIcon::PointingHand,
+                                                    );
+                                                }
+                                                if av_resp.clicked() {
+                                                    action_select = Some(*idx);
+                                                }
                                                 draw_profile_avatar(
                                                     ui.painter(),
                                                     av_r,
@@ -373,7 +379,7 @@ impl McLauncherApp {
                                                                             &p.name,
                                                                         )
                                                                         .strong()
-                                                                        .size(14.0)
+                                                                        .size(13.5)
                                                                         .color(text_primary()),
                                                                     )
                                                                     .truncate(),
@@ -470,7 +476,7 @@ impl McLauncherApp {
                                                         egui::Label::new(
                                                             egui::RichText::new(&p.name)
                                                                 .strong()
-                                                                .size(14.0)
+                                                                .size(13.5)
                                                                 .color(text_primary()),
                                                         )
                                                         .truncate(),
@@ -545,18 +551,21 @@ impl McLauncherApp {
                                     {
                                         action_play = Some(*idx);
                                     }
-                                    if ui_icon_button(
+                                    let cfg_resp = ui_icon_button(
                                         ui,
                                         ("list_cfg", &p.id),
                                         Icon::Sliders,
                                         tr(self.settings.language, "lib.settings"),
                                         ButtonVariant::Secondary,
-                                        true,
-                                        28.0,
-                                    )
-                                    .clicked()
-                                    {
+                                        selected,
+                                        CTL_HEIGHT,
+                                    );
+                                    if selected && cfg_resp.clicked() {
                                         action_open = Some(*idx);
+                                    } else if !selected
+                                        && cfg_resp.interact(Sense::click()).clicked()
+                                    {
+                                        action_select = Some(*idx);
                                     }
                                     if can_delete
                                         && ui_icon_button(
@@ -632,7 +641,7 @@ impl McLauncherApp {
                                                             egui::Label::new(
                                                                 egui::RichText::new(&p.name)
                                                                     .strong()
-                                                                    .size(14.5)
+                                                                    .size(13.5)
                                                                     .color(text_primary()),
                                                             )
                                                             .truncate(),
@@ -787,7 +796,7 @@ impl McLauncherApp {
                                                         {
                                                             action_delete = Some(*idx);
                                                         }
-                                                        if ui_icon_button(
+                                                        let cfg_resp = ui_icon_button(
                                                             ui,
                                                             ("card_cfg", &p.id),
                                                             Icon::Sliders,
@@ -796,12 +805,17 @@ impl McLauncherApp {
                                                                 "lib.settings",
                                                             ),
                                                             ButtonVariant::Secondary,
-                                                            true,
-                                                            28.0,
-                                                        )
-                                                        .clicked()
-                                                        {
+                                                            selected,
+                                                            CTL_HEIGHT,
+                                                        );
+                                                        if selected && cfg_resp.clicked() {
                                                             action_open = Some(*idx);
+                                                        } else if !selected
+                                                            && cfg_resp
+                                                                .interact(Sense::click())
+                                                                .clicked()
+                                                        {
+                                                            action_select = Some(*idx);
                                                         }
                                                     },
                                                 );

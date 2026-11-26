@@ -833,31 +833,57 @@ fn run_shell_hook(
         cmd.env(k, v);
     }
 
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("{label} command failed to start: {e}"))?;
 
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if !line.trim().is_empty() {
-            let _ = tx.send(WorkerEvent::InstanceLog {
-                profile_id: profile_id.to_string(),
-                line: format!("[Hook:{label}] {line}"),
-            });
-        }
+    let out_handle = child.stdout.take().map(|stdout| {
+        let tx = tx.clone();
+        let pid = profile_id.to_string();
+        let lbl = label.to_string();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    let _ = tx.send(WorkerEvent::InstanceLog {
+                        profile_id: pid.clone(),
+                        line: format!("[Hook:{lbl}] {line}"),
+                    });
+                }
+            }
+        })
+    });
+    let err_handle = child.stderr.take().map(|stderr| {
+        let tx = tx.clone();
+        let pid = profile_id.to_string();
+        let lbl = label.to_string();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if !line.trim().is_empty() {
+                    let _ = tx.send(WorkerEvent::InstanceLog {
+                        profile_id: pid.clone(),
+                        line: format!("[Hook:{lbl} ERR] {line}"),
+                    });
+                }
+            }
+        })
+    });
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("{label} command wait failed: {e}"))?;
+    if let Some(h) = out_handle {
+        let _ = h.join();
     }
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
-        if !line.trim().is_empty() {
-            let _ = tx.send(WorkerEvent::InstanceLog {
-                profile_id: profile_id.to_string(),
-                line: format!("[Hook:{label} ERR] {line}"),
-            });
-        }
+    if let Some(h) = err_handle {
+        let _ = h.join();
     }
 
-    if !output.status.success() {
+    if !status.success() {
         return Err(format!(
             "{label} command exited with code {:?}",
-            output.status.code()
+            status.code()
         ));
     }
     Ok(())
@@ -1247,6 +1273,50 @@ pub fn append_profile_launch_args(profile: &Profile, cmd_args: &mut Vec<String>)
     append_profile_launch_args_with_world(profile, None, cmd_args);
 }
 
+/// Returns `true` if `version_id` supports `--quickPlaySingleplayer` / `--quickPlayMultiplayer` (MC 1.20+).
+pub fn mc_supports_quick_play(version_id: &str) -> bool {
+    let trimmed = version_id.trim();
+    if let Some(rest) = trimmed.strip_prefix("1.") {
+        let minor_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(minor) = minor_str.parse::<u32>() {
+            return minor >= 20;
+        }
+    }
+    // Modern year-based release numbers (e.g. 26.x) or snapshot IDs like 23w14a+
+    if let Some(major_str) = trimmed.split('.').next() {
+        if let Ok(major) = major_str.parse::<u32>() {
+            return major >= 26;
+        }
+    }
+    if let Some((yr, _)) = trimmed.split_once('w') {
+        if let Ok(y) = yr.parse::<u32>() {
+            return y >= 23;
+        }
+    }
+    false
+}
+
+/// Splits `host:port` (including `[ipv6]:port`) into `(host, Option<port>)`.
+pub fn split_server_host_port(addr: &str) -> (&str, Option<&str>) {
+    let addr = addr.trim();
+    if let Some(rest) = addr.strip_prefix('[') {
+        if let Some((host, after)) = rest.split_once(']') {
+            if let Some(port) = after.strip_prefix(':') {
+                if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+                    return (host, Some(port));
+                }
+            }
+            return (host, None);
+        }
+    }
+    if let Some((host, port)) = addr.rsplit_once(':') {
+        if !host.contains(':') && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+            return (host, Some(port));
+        }
+    }
+    (addr, None)
+}
+
 /// Appends instance launch flags, preferring `quick_world` (`--quickPlaySingleplayer`) over
 /// `profile.server_address` when launching directly into a saved world.
 pub fn append_profile_launch_args_with_world(
@@ -1270,16 +1340,29 @@ pub fn append_profile_launch_args_with_world(
             cmd_args.push(h.to_string());
         }
     }
+    let quick_play = mc_supports_quick_play(&profile.version_id);
     if let Some(world) = quick_world.map(str::trim).filter(|w| !w.is_empty()) {
-        if !cmd_args.iter().any(|a| a == "--quickPlaySingleplayer") {
+        if quick_play && !cmd_args.iter().any(|a| a == "--quickPlaySingleplayer") {
             cmd_args.push("--quickPlaySingleplayer".to_string());
             cmd_args.push(world.to_string());
         }
     } else {
         let addr = profile.server_address.trim();
-        if !addr.is_empty() && !cmd_args.iter().any(|a| a == "--quickPlayMultiplayer") {
-            cmd_args.push("--quickPlayMultiplayer".to_string());
-            cmd_args.push(addr.to_string());
+        if !addr.is_empty() {
+            if quick_play {
+                if !cmd_args.iter().any(|a| a == "--quickPlayMultiplayer") {
+                    cmd_args.push("--quickPlayMultiplayer".to_string());
+                    cmd_args.push(addr.to_string());
+                }
+            } else if !cmd_args.iter().any(|a| a == "--server") {
+                let (host, port) = split_server_host_port(addr);
+                cmd_args.push("--server".to_string());
+                cmd_args.push(host.to_string());
+                if let Some(p) = port {
+                    cmd_args.push("--port".to_string());
+                    cmd_args.push(p.to_string());
+                }
+            }
         }
     }
 }
@@ -1330,6 +1413,27 @@ mod tests {
                 "play.example.com",
             ]
         );
+    }
+
+    #[test]
+    fn test_legacy_server_args_for_pre_1_20() {
+        let mut profile = Profile::new(
+            "Legacy".to_string(),
+            "1.12.2".to_string(),
+            ModLoader::Vanilla,
+            "Player".to_string(),
+        );
+        profile.server_address = "play.example.com:25566".to_string();
+        let mut args = Vec::new();
+        append_profile_launch_args(&profile, &mut args);
+        assert_eq!(
+            args,
+            vec!["--server", "play.example.com", "--port", "25566"]
+        );
+        assert!(mc_supports_quick_play("1.20"));
+        assert!(mc_supports_quick_play("1.21.11"));
+        assert!(!mc_supports_quick_play("1.19.4"));
+        assert!(!mc_supports_quick_play("1.8.9"));
     }
 
     #[test]

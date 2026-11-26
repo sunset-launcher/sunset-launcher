@@ -9,7 +9,7 @@ mod widgets;
 
 use self::anim::{
     compute_icon_anim, ease_out_back, ease_out_cubic, paint_click_ripple, paint_fade_veil,
-    paint_shimmer_sweep, pulse_01, track_click_anim,
+    pulse_01, track_click_anim,
 };
 use self::widgets::*;
 use crate::auth::{
@@ -26,7 +26,7 @@ use crate::discord::{
 };
 use crate::i18n::{tr, Language};
 use crate::icons::{
-    draw_brand_logo_animated, draw_icon, draw_icon_animated, draw_player_pixel_avatar, Icon,
+    draw_brand_logo, draw_icon, draw_icon_animated, draw_player_pixel_avatar, Icon,
 };
 use crate::launcher::{
     detect_java_installations, download_java_major, ensure_java_runtime_with_mode,
@@ -56,7 +56,7 @@ use crate::modrinth::{
 };
 use crate::mojang::{
     fetch_loader_versions, fetch_version_manifest, prepare_version_with_mode,
-    request_download_cancel, reset_download_cancel, CANCELLED_ERR_MSG,
+    request_download_cancel, with_download_cancel_token, CANCELLED_ERR_MSG,
 };
 use crate::servers::{
     delete_server_property_entry, detect_local_lan_ip, is_server_provisioned,
@@ -67,10 +67,12 @@ use crate::servers::{
     write_server_properties_entries,
 };
 use crate::storage::{
-    delete_account_secret, ensure_instance_mods_dir, instance_dir, load_selected_profile_id,
-    load_servers, rename_instance_dir_for_profile, resolve_selected_profile_index, save_accounts,
-    save_launcher_settings, save_profiles, save_selected_profile_id, save_servers, server_dir,
-    unique_instance_dir_name, unique_server_dir_name,
+    copy_instance_dir_contents, delete_account_secret, ensure_instance_mods_dir, instance_dir,
+    load_selected_profile_id, load_selected_server_id, load_servers, remove_instance_dir,
+    rename_instance_dir_for_profile, resolve_selected_profile_index, resolve_selected_server_index,
+    save_accounts, save_launcher_settings, save_profiles, save_selected_profile_id,
+    save_selected_server_id, save_servers, server_dir, unique_instance_dir_name,
+    unique_server_dir_name,
 };
 use crate::theme::{
     self, accent, accent_text, animated_card, animated_progress_bar, apply_modrinth_theme,
@@ -78,16 +80,17 @@ use crate::theme::{
     bg_input, bg_sidebar, bg_void, border_subtle, card_frame, discover_system_fonts,
     draw_icon_placeholder, draw_instance_avatar, draw_instance_image_avatar,
     draw_ram_allocation_bar, draw_running_pulse_dot, draw_server_avatar, draw_skeleton_card,
-    lerp_color, loader_badge, loader_badge_sized, mod_toggle_switch, mono_spinner,
+    lerp_color, loader_badge, loader_badge_sized, mod_toggle_switch, mono_spinner, page_heading,
     primary_action_button, section_header, server_software_badge, set_theme_palette,
     solid_accent_badge, text_muted, text_primary, text_secondary, tick_theme_transition,
     transition_theme_palette, ui_alert_banner, ui_button, ui_button_icon, ui_button_sized,
-    ui_checkbox, ui_flow_row, ui_icon_button, ui_int_slider, ui_pill_tab, ui_pill_tab_icon,
-    ui_ram_slider, ui_search_input, ui_text_input, ui_toolbar_row, ui_wrap_row, with_alpha,
-    AlertKind, ButtonVariant, SystemFont, DANGER, INFO, WARNING,
+    ui_checkbox, ui_flow_row, ui_icon_button, ui_int_slider, ui_ram_slider, ui_search_input,
+    ui_text_input, ui_toolbar_row, ui_wrap_row, with_alpha, AlertKind, ButtonVariant, SystemFont,
+    CTL_HEIGHT, DANGER, INFO, WARNING,
 };
 use eframe::egui::{self, Color32, Margin, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -148,7 +151,7 @@ impl NavPage {
             NavPage::Servers => Icon::Server,
             NavPage::Console => Icon::Terminal,
             NavPage::Accounts => Icon::User,
-            NavPage::Settings => Icon::Sparkle,
+            NavPage::Settings => Icon::Sliders,
         }
     }
 }
@@ -178,6 +181,7 @@ impl InstanceSubTab {
         InstanceSubTab::Settings,
     ];
 
+    #[allow(dead_code)]
     fn label(self) -> &'static str {
         match self {
             InstanceSubTab::Content => "Content",
@@ -440,6 +444,10 @@ pub struct McLauncherApp {
     is_busy: bool,
     running_games: HashMap<String, RunningGame>,
     launching_profiles: HashSet<String>,
+    launch_cancel_tokens: HashMap<String, Arc<AtomicBool>>,
+    mr_cancel_token: Option<Arc<AtomicBool>>,
+    java_cancel_token: Option<Arc<AtomicBool>>,
+    server_cancel_token: Option<Arc<AtomicBool>>,
     instance_logs: HashMap<String, VecDeque<LogEntry>>,
     console_profile_id: Option<String>,
     progress: f32,
@@ -457,6 +465,7 @@ pub struct McLauncherApp {
 
     // SHA-1 identification, logs viewer & export modal
     identifying_mods: bool,
+    auto_identified_files: HashSet<(String, String)>,
     inst_log_files: Vec<InstanceLogFile>,
     inst_log_files_pid: String,
     inst_log_selected: Option<std::path::PathBuf>,
@@ -492,6 +501,8 @@ pub struct McLauncherApp {
     ms_show_custom_id: bool,
     ms_device_code: Option<DeviceCodeInfo>,
     ms_busy: bool,
+    ms_login_cancel: Option<Arc<AtomicBool>>,
+    acc_refresh_busy: bool,
     auth_error: Option<String>,
     auth_status: Option<String>,
 
@@ -515,6 +526,8 @@ pub struct McLauncherApp {
     mr_icons_pending: HashSet<String>,
     mr_installed_cache: HashMap<String, InstalledProject>,
     mr_installed_profile_id: String,
+    server_installed_cache: HashMap<String, InstalledProject>,
+    server_installed_id: String,
     mr_detail_hit: Option<ModrinthSearchHit>,
     mr_detail_versions: Option<Result<Vec<ModrinthVersion>, String>>,
     mr_detail_loading: bool,
@@ -544,8 +557,9 @@ pub struct McLauncherApp {
     update_checking: bool,
     update_installing: bool,
     update_available: Option<LauncherUpdateInfo>,
-    update_checked_up_to_date: bool,
-    update_error: Option<String>,
+    update_checked_once: bool,
+    confirm_exit_modal: bool,
+    force_exit_confirmed: bool,
     discord_rpc: DiscordRpc,
     rpc_started_at: i64,
     java_downloading_major: Option<u32>,
@@ -618,6 +632,9 @@ impl McLauncherApp {
         let servers = load_servers(&paths);
         let saved_profile_id = load_selected_profile_id(&paths);
         let selected_idx = resolve_selected_profile_index(&profiles, saved_profile_id.as_deref());
+        let saved_server_id = load_selected_server_id(&paths);
+        let selected_server_idx =
+            resolve_selected_server_index(&servers, saved_server_id.as_deref());
         let mut app = Self {
             paths,
             profiles,
@@ -648,6 +665,10 @@ impl McLauncherApp {
             is_busy: false,
             running_games: HashMap::new(),
             launching_profiles: HashSet::new(),
+            launch_cancel_tokens: HashMap::new(),
+            mr_cancel_token: None,
+            java_cancel_token: None,
+            server_cancel_token: None,
             instance_logs: HashMap::new(),
             console_profile_id: None,
             progress: 0.0,
@@ -661,6 +682,7 @@ impl McLauncherApp {
             log_cache: ConsoleLayoutCache::default(),
             fs_cache: FsUiCache::default(),
             identifying_mods: false,
+            auto_identified_files: HashSet::new(),
             inst_log_files: Vec::new(),
             inst_log_files_pid: String::new(),
             inst_log_selected: None,
@@ -690,6 +712,8 @@ impl McLauncherApp {
             ms_show_custom_id: false,
             ms_device_code: None,
             ms_busy: false,
+            ms_login_cancel: None,
+            acc_refresh_busy: false,
             auth_error: None,
             auth_status: None,
             discover_source: ProjectSource::Modrinth,
@@ -711,6 +735,8 @@ impl McLauncherApp {
             mr_icons_pending: HashSet::new(),
             mr_installed_cache: HashMap::new(),
             mr_installed_profile_id: String::new(),
+            server_installed_cache: HashMap::new(),
+            server_installed_id: String::new(),
             mr_detail_hit: None,
             mr_detail_versions: None,
             mr_detail_loading: false,
@@ -737,13 +763,14 @@ impl McLauncherApp {
             update_checking: false,
             update_installing: false,
             update_available: None,
-            update_checked_up_to_date: false,
-            update_error: None,
+            update_checked_once: false,
+            confirm_exit_modal: false,
+            force_exit_confirmed: false,
             discord_rpc: DiscordRpc::spawn(),
             rpc_started_at: unix_now_secs(),
             java_downloading_major: None,
             servers,
-            selected_server_idx: 0,
+            selected_server_idx,
             server_detail_open: false,
             server_tab: ServerSubTab::Console,
             server_content_is_plugins: true,
@@ -785,7 +812,7 @@ impl McLauncherApp {
         app.sync_installed_index();
         app.trigger_modrinth_search(false);
         app.sync_discord_presence();
-        if app.settings.check_updates_on_startup {
+        if !app.settings.offline_mode && app.settings.check_updates_on_startup {
             app.check_launcher_updates();
         }
         app
@@ -847,10 +874,15 @@ impl McLauncherApp {
             return;
         }
         self.java_downloading_major = Some(major);
+        let cancel_tok = Arc::new(AtomicBool::new(false));
+        self.java_cancel_token = Some(Arc::clone(&cancel_tok));
         let paths = self.paths.clone();
         let tx = self.tx.clone();
         thread::spawn(move || {
-            match download_java_major(&paths, major, Some(&tx)) {
+            let res = with_download_cancel_token(cancel_tok, || {
+                download_java_major(&paths, major, Some(&tx))
+            });
+            match res {
                 Ok(bin) => {
                     let _ = tx.send(WorkerEvent::Log(format!(
                         "[Java] Ready: Java {major} at {}",
@@ -1007,6 +1039,37 @@ impl McLauncherApp {
         !self.running_games.is_empty()
     }
 
+    pub(super) fn maybe_auto_identify_selected_profile(&mut self) {
+        if self.identifying_mods || self.mr_installing || self.settings.offline_mode {
+            return;
+        }
+        let Some(profile) = self.profiles.get(self.selected_idx).cloned() else {
+            return;
+        };
+        let indexed: HashSet<String> = self
+            .mr_installed_cache
+            .values()
+            .map(|p| format!("{}/{}", p.folder, p.filename))
+            .collect();
+        let mut has_new_unindexed = false;
+        for folder in ["mods", "resourcepacks", "shaderpacks"] {
+            let items = self.cached_content_items(&profile, folder);
+            for item in items {
+                let rel = format!("{folder}/{}", item.base_name);
+                if !indexed.contains(&rel)
+                    && self
+                        .auto_identified_files
+                        .insert((profile.id.clone(), rel))
+                {
+                    has_new_unindexed = true;
+                }
+            }
+        }
+        if has_new_unindexed {
+            self.start_identify_mods();
+        }
+    }
+
     fn start_identify_mods(&mut self) {
         if self.identifying_mods || self.mr_installing {
             return;
@@ -1016,10 +1079,11 @@ impl McLauncherApp {
         };
         self.identifying_mods = true;
         let paths = self.paths.clone();
+        let cf_key = self.settings.curseforge_api_key.clone();
         let tx = self.tx.clone();
         let pid = profile.id.clone();
         thread::spawn(move || {
-            let result = identify_instance_content_by_hash(&paths, &profile);
+            let result = identify_instance_content_by_hash(&paths, &profile, &cf_key);
             let _ = tx.send(WorkerEvent::ModrinthIdentifyFinished {
                 profile_id: pid,
                 result,
@@ -1074,6 +1138,21 @@ impl McLauncherApp {
         let _ = save_selected_profile_id(&self.paths, id);
     }
 
+    pub(super) fn persist_selected_server(&self) {
+        let id = self
+            .servers
+            .get(self.selected_server_idx)
+            .map(|s| s.id.as_str());
+        let _ = save_selected_server_id(&self.paths, id);
+    }
+
+    pub(super) fn select_server(&mut self, idx: usize) {
+        if idx < self.servers.len() {
+            self.selected_server_idx = idx;
+            self.persist_selected_server();
+        }
+    }
+
     fn select_profile(&mut self, idx: usize) {
         if idx < self.profiles.len() {
             self.selected_idx = idx;
@@ -1117,6 +1196,14 @@ impl McLauncherApp {
                 self.fs_cache.invalidate();
             }
         }
+        self.maybe_auto_identify_selected_profile();
+    }
+
+    pub(super) fn sync_server_installed_index(&mut self, srv: &DedicatedServer) {
+        if self.server_installed_id != srv.id {
+            self.server_installed_cache = load_server_installed_index(&self.paths, srv);
+            self.server_installed_id = srv.id.clone();
+        }
     }
 
     fn duplicate_profile(&mut self, ctx: &egui::Context, idx: usize) {
@@ -1127,11 +1214,26 @@ impl McLauncherApp {
         copy.id = uuid::Uuid::new_v4().to_string();
         copy.name = disambiguate_profile_name(&format!("{} (Copy)", orig.name), &self.profiles);
         copy.dir_name = unique_instance_dir_name(&self.paths, &copy.name, &self.profiles);
+        let src_dir = instance_dir(&self.paths, &orig);
+        let dst_dir = instance_dir(&self.paths, &copy);
+        if let Err(err) = copy_instance_dir_contents(&src_dir, &dst_dir) {
+            self.show_toast(
+                ctx,
+                format!("{}: {err}", tr(self.settings.language, "status.error")),
+            );
+            return;
+        }
+        if !copy.icon_path.trim().is_empty() {
+            if let Ok(rel) = std::path::Path::new(copy.icon_path.trim()).strip_prefix(&src_dir) {
+                copy.icon_path = dst_dir.join(rel).to_string_lossy().to_string();
+            }
+        }
         if copy.loader.is_modded() {
             let _ = ensure_instance_mods_dir(&self.paths, &copy);
         }
         copy.created_at = chrono::Utc::now().to_rfc3339();
         copy.last_played = None;
+        copy.playtime_secs = 0;
         self.profiles.push(copy);
         let new_idx = self.profiles.len() - 1;
         let _ = save_profiles(&self.paths, &self.profiles);
@@ -1264,12 +1366,57 @@ impl McLauncherApp {
         let _ = self.icon_tx.send(url.to_string());
     }
 
+    fn upsert_authenticated_account(&mut self, acc: Account) -> String {
+        let name = acc.username.clone();
+        let existing_idx = self.account_store.accounts.iter().position(|existing| {
+            match (&existing.kind, &acc.kind) {
+                (
+                    AccountKind::Microsoft { uuid: u1, .. },
+                    AccountKind::Microsoft { uuid: u2, .. },
+                ) => u1.eq_ignore_ascii_case(u2),
+                (
+                    AccountKind::ElyBy { uuid: u1, .. },
+                    AccountKind::ElyBy { uuid: u2, .. },
+                ) => u1.eq_ignore_ascii_case(u2),
+                _ => false,
+            }
+        });
+        if let Some(idx) = existing_idx {
+            let keep_id = self.account_store.accounts[idx].id.clone();
+            let mut updated = acc;
+            updated.id = keep_id.clone();
+            self.account_store.accounts[idx] = updated;
+            self.account_store.active_id = Some(keep_id);
+        } else {
+            self.account_store.active_id = Some(acc.id.clone());
+            self.account_store.accounts.push(acc);
+        }
+        let _ = save_accounts(&self.paths, &self.account_store);
+        name
+    }
+
+    fn cancel_active_tasks(&mut self) {
+        request_download_cancel();
+        for tok in self.launch_cancel_tokens.values() {
+            tok.store(true, Ordering::SeqCst);
+        }
+        if let Some(tok) = &self.mr_cancel_token {
+            tok.store(true, Ordering::SeqCst);
+        }
+        if let Some(tok) = &self.java_cancel_token {
+            tok.store(true, Ordering::SeqCst);
+        }
+        if let Some(tok) = &self.server_cancel_token {
+            tok.store(true, Ordering::SeqCst);
+        }
+    }
+
     fn start_launch(&mut self) {
         self.start_launch_with_world(None);
     }
 
     fn start_launch_with_world(&mut self, quick_world: Option<String>) {
-        if self.is_busy || self.update_installing {
+        if self.update_installing {
             return;
         }
         let Some(profile) = self.profiles.get_mut(self.selected_idx) else {
@@ -1292,7 +1439,9 @@ impl McLauncherApp {
             .cloned()
             .unwrap_or_else(|| Account::offline(profile_clone.username.clone()));
 
-        reset_download_cancel();
+        let cancel_tok = Arc::new(AtomicBool::new(false));
+        self.launch_cancel_tokens
+            .insert(profile_id.clone(), Arc::clone(&cancel_tok));
         self.last_crash_code = None;
         self.progress = 0.03;
         self.status_text = format!(
@@ -1322,7 +1471,7 @@ impl McLauncherApp {
         let offline_mode = self.settings.offline_mode;
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let res = (|| -> Result<GameHandle, String> {
+            let res = with_download_cancel_token(cancel_tok, || -> Result<GameHandle, String> {
                 let before_token_check = serde_json::to_string(&account).ok();
                 ensure_valid_account_with_mode(&mut account, &ms_client_id, offline_mode)?;
                 if serde_json::to_string(&account).ok() != before_token_check {
@@ -1366,7 +1515,7 @@ impl McLauncherApp {
                     offline_mode,
                     tx.clone(),
                 )
-            })();
+            });
             let _ = tx.send(WorkerEvent::LaunchFinished {
                 profile_id,
                 result: res,
@@ -1379,7 +1528,6 @@ impl McLauncherApp {
             return;
         }
         self.update_checking = true;
-        self.update_error = None;
         let tx = self.tx.clone();
         thread::spawn(move || {
             let res = check_github_latest_release(env!("CARGO_PKG_VERSION"));
@@ -1395,14 +1543,11 @@ impl McLauncherApp {
             return;
         };
         if info.download_url.is_none() {
-            self.update_error =
-                Some("No downloadable binary asset found for this platform".to_string());
             return;
         }
         self.update_installing = true;
         self.is_busy = true;
         self.progress = 0.05;
-        self.update_error = None;
         self.status_text = format!(
             "{} {}...",
             tr(self.settings.language, "status.downloading_update"),
@@ -1513,7 +1658,8 @@ impl McLauncherApp {
         if self.mr_installing {
             return;
         }
-        reset_download_cancel();
+        let cancel_tok = Arc::new(AtomicBool::new(false));
+        self.mr_cancel_token = Some(Arc::clone(&cancel_tok));
         let username = self
             .active_account()
             .map(|a| a.username.clone())
@@ -1533,7 +1679,9 @@ impl McLauncherApp {
                 .unwrap_or_else(|| "modpack".to_string())
         );
         thread::spawn(move || {
-            let res = import_modpack_archive(&paths, &mrpack_path, username, &cf_key, &tx);
+            let res = with_download_cancel_token(cancel_tok, || {
+                import_modpack_archive(&paths, &mrpack_path, username, &cf_key, &tx)
+            });
             let _ = tx.send(WorkerEvent::ModrinthInstallFinished(res));
         });
     }
@@ -1610,6 +1758,7 @@ impl McLauncherApp {
                 WorkerEvent::JavaDetected(installs) => {
                     self.java_scanning = false;
                     self.java_downloading_major = None;
+                    self.java_cancel_token = None;
                     self.java_installs = installs;
                 }
                 WorkerEvent::Progress { stage, fraction } => {
@@ -1635,8 +1784,34 @@ impl McLauncherApp {
                         let _ = save_accounts(&self.paths, &self.account_store);
                     }
                 }
+                WorkerEvent::AccountManualRefreshed(res) => {
+                    self.acc_refresh_busy = false;
+                    let lang = self.settings.language;
+                    match res {
+                        Ok(updated) => {
+                            if let Some(slot) = self
+                                .account_store
+                                .accounts
+                                .iter_mut()
+                                .find(|a| a.id == updated.id)
+                            {
+                                *slot = updated;
+                                let _ = save_accounts(&self.paths, &self.account_store);
+                            }
+                            self.auth_error = None;
+                            let msg = tr(lang, "acc.session_refreshed").to_string();
+                            self.auth_status = Some(msg.clone());
+                            self.show_toast(ctx, msg);
+                        }
+                        Err(e) => {
+                            self.auth_error = Some(e.clone());
+                            self.show_toast(ctx, format!("{}: {e}", tr(lang, "status.error")));
+                        }
+                    }
+                }
                 WorkerEvent::LaunchFinished { profile_id, result } => {
                     self.launching_profiles.remove(&profile_id);
+                    self.launch_cancel_tokens.remove(&profile_id);
                     let prof_name = self
                         .profiles
                         .iter()
@@ -1751,12 +1926,10 @@ impl McLauncherApp {
                 WorkerEvent::MsAuthFinished(res) => {
                     self.ms_busy = false;
                     self.ms_device_code = None;
+                    self.ms_login_cancel = None;
                     match res {
                         Ok(acc) => {
-                            let name = acc.username.clone();
-                            self.account_store.active_id = Some(acc.id.clone());
-                            self.account_store.accounts.push(acc);
-                            let _ = save_accounts(&self.paths, &self.account_store);
+                            let name = self.upsert_authenticated_account(acc);
                             self.auth_error = None;
                             let msg = format!("Signed in with Microsoft: {name}");
                             self.auth_status = Some(msg.clone());
@@ -1774,10 +1947,7 @@ impl McLauncherApp {
                     self.ely_busy = false;
                     match res {
                         Ok(acc) => {
-                            let name = acc.username.clone();
-                            self.account_store.active_id = Some(acc.id.clone());
-                            self.account_store.accounts.push(acc);
-                            let _ = save_accounts(&self.paths, &self.account_store);
+                            let name = self.upsert_authenticated_account(acc);
                             self.ely_password.clear();
                             self.ely_totp.clear();
                             self.auth_error = None;
@@ -1830,6 +2000,7 @@ impl McLauncherApp {
                     self.is_busy = false;
                     self.mr_installing = false;
                     self.mr_installing_id = None;
+                    self.mr_cancel_token = None;
                     self.progress = 0.0;
                     if let Some(p) = self.profiles.get(self.selected_idx) {
                         self.mr_installed_cache = load_installed_index(&self.paths, p);
@@ -1951,8 +2122,45 @@ impl McLauncherApp {
                         }
                     }
                 }
+                WorkerEvent::BatchImportFinished { imported, errors } => {
+                    self.is_busy = false;
+                    self.mr_installing = false;
+                    self.mr_installing_id = None;
+                    self.mr_cancel_token = None;
+                    self.progress = 0.0;
+                    if let Some(p) = self.profiles.get(self.selected_idx) {
+                        self.mr_installed_cache = load_installed_index(&self.paths, p);
+                        self.fs_cache.invalidate();
+                        self.mr_installed_profile_id = p.id.clone();
+                    }
+                    let lang = self.settings.language;
+                    if !errors.is_empty() && imported == 0 {
+                        let first_err = errors.into_iter().next().unwrap_or_default();
+                        self.mr_error = Some(first_err.clone());
+                        self.status_text = format!("{}: {first_err}", tr(lang, "status.error"));
+                        self.show_toast(ctx, self.status_text.clone());
+                        anim::emit_edge_pulse(ctx, DANGER);
+                    } else {
+                        let msg = if errors.is_empty() {
+                            format!("{}: {imported}", tr(lang, "toast.import_batch"))
+                        } else {
+                            format!(
+                                "{}: {imported} ({}: {})",
+                                tr(lang, "toast.import_batch"),
+                                tr(lang, "status.error"),
+                                errors.len()
+                            )
+                        };
+                        self.mr_status = Some(msg.clone());
+                        self.status_text = msg.clone();
+                        self.show_toast(ctx, msg);
+                        anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 10);
+                        anim::emit_edge_pulse(ctx, accent());
+                    }
+                }
                 WorkerEvent::ModUpdatesFinished(res) => {
                     self.mr_installing = false;
+                    self.mr_cancel_token = None;
                     self.progress = 0.0;
                     if let Some(p) = self.profiles.get(self.selected_idx) {
                         self.mr_installed_cache = load_installed_index(&self.paths, p);
@@ -1984,27 +2192,19 @@ impl McLauncherApp {
                 }
                 WorkerEvent::ModrinthIdentifyFinished { profile_id, result } => {
                     self.identifying_mods = false;
-                    if let Some(p) = self.profiles.get(self.selected_idx) {
-                        if p.id == profile_id {
-                            self.mr_installed_cache = load_installed_index(&self.paths, p);
-                            self.fs_cache.invalidate();
-                        }
-                    }
-                    let lang = self.settings.language;
-                    match result {
-                        Ok((found, total)) => {
-                            let msg = format!(
-                                "{}: {found}/{total}",
-                                tr(lang, "content.identified_toast")
-                            );
+                    if let Ok((found, _total)) = result {
+                        if found > 0 {
+                            if let Some(p) = self.profiles.get(self.selected_idx) {
+                                if p.id == profile_id {
+                                    self.mr_installed_cache = load_installed_index(&self.paths, p);
+                                    self.fs_cache.invalidate();
+                                }
+                            }
+                            let lang = self.settings.language;
+                            let msg = format!("{}: {found}", tr(lang, "content.identified_toast"));
                             self.status_text = msg.clone();
                             self.show_toast(ctx, msg);
-                            if found > 0 {
-                                anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 8);
-                            }
-                        }
-                        Err(e) => {
-                            self.show_toast(ctx, format!("{}: {e}", tr(lang, "status.error")));
+                            anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 8);
                         }
                     }
                 }
@@ -2091,7 +2291,8 @@ impl McLauncherApp {
                             }
                             FilePickPurpose::InstanceContentImport => {
                                 if let Some(prof) = self.profiles.get(self.selected_idx).cloned() {
-                                    reset_download_cancel();
+                                    let cancel_tok = Arc::new(AtomicBool::new(false));
+                                    self.mr_cancel_token = Some(Arc::clone(&cancel_tok));
                                     let active_folder = self.content_folder.dir_name().to_string();
                                     let paths = self.paths.clone();
                                     let cf_key = self.settings.curseforge_api_key.clone();
@@ -2099,14 +2300,16 @@ impl McLauncherApp {
                                     self.mr_installing = true;
                                     self.progress = 0.08;
                                     thread::spawn(move || {
-                                        let res = import_local_file(
-                                            &paths,
-                                            &prof,
-                                            &chosen,
-                                            &active_folder,
-                                            &cf_key,
-                                            &tx,
-                                        );
+                                        let res = with_download_cancel_token(cancel_tok, || {
+                                            import_local_file(
+                                                &paths,
+                                                &prof,
+                                                &chosen,
+                                                &active_folder,
+                                                &cf_key,
+                                                &tx,
+                                            )
+                                        });
                                         let _ = tx.send(WorkerEvent::ModrinthInstallFinished(res));
                                     });
                                 }
@@ -2137,7 +2340,10 @@ impl McLauncherApp {
                                     ) {
                                         Ok(()) => {
                                             let _ = save_profiles(&self.paths, &self.profiles);
-                                            self.show_toast(ctx, "Instance icon updated");
+                                            let msg =
+                                                tr(self.settings.language, "inst.icon_updated")
+                                                    .to_string();
+                                            self.show_toast(ctx, msg);
                                         }
                                         Err(e) => self.show_toast(ctx, e),
                                     }
@@ -2219,30 +2425,24 @@ impl McLauncherApp {
                 }
                 WorkerEvent::LauncherUpdateChecked(res) => {
                     self.update_checking = false;
+                    self.update_checked_once = true;
                     match res {
                         Ok(Some(info)) => {
-                            let can_auto = self.settings.auto_update
+                            let can_download = self.settings.auto_update
                                 && info.download_url.is_some()
                                 && !self.is_busy
                                 && !self.any_game_running()
                                 && self.launching_profiles.is_empty()
                                 && !self.update_installing;
                             self.update_available = Some(info);
-                            self.update_checked_up_to_date = false;
-                            self.update_error = None;
-                            if can_auto {
+                            if can_download {
                                 self.start_launcher_update();
                             }
                         }
                         Ok(None) => {
                             self.update_available = None;
-                            self.update_checked_up_to_date = true;
-                            self.update_error = None;
                         }
-                        Err(e) => {
-                            self.update_checked_up_to_date = false;
-                            self.update_error = Some(e);
-                        }
+                        Err(_) => {}
                     }
                 }
                 WorkerEvent::LauncherUpdateInstalled(res) => {
@@ -2266,7 +2466,6 @@ impl McLauncherApp {
                                 }
                                 Err(e) => {
                                     let msg = format!("Update installed, restart failed: {e}");
-                                    self.update_error = Some(msg.clone());
                                     self.status_text = msg.clone();
                                     self.show_toast(ctx, msg);
                                 }
@@ -2274,7 +2473,6 @@ impl McLauncherApp {
                         }
                         Err(e) => {
                             let lang = self.settings.language;
-                            self.update_error = Some(e.clone());
                             self.status_text = e.clone();
                             self.show_toast(
                                 ctx,
@@ -2359,6 +2557,9 @@ impl McLauncherApp {
                 WorkerEvent::ServerProjectInstalled(res) => {
                     self.mr_installing = false;
                     self.mr_installing_id = None;
+                    self.mr_cancel_token = None;
+                    self.server_installed_id.clear();
+                    self.fs_cache.invalidate();
                     self.progress = 0.0;
                     match res {
                         Ok(ModrinthInstallOutcome::FileInstalled {
@@ -2421,6 +2622,7 @@ impl McLauncherApp {
                 self.show_create_server_modal = false;
                 self.confirm_delete_server_idx = None;
                 self.show_export_mrpack_modal = false;
+                self.confirm_exit_modal = false;
                 self.show_cmd_palette = false;
                 self.mr_detail_hit = None;
             }
@@ -2441,6 +2643,10 @@ impl McLauncherApp {
                     Some(3)
                 } else if i.key_pressed(egui::Key::Num5) {
                     Some(4)
+                } else if i.key_pressed(egui::Key::Num6) {
+                    Some(5)
+                } else if i.key_pressed(egui::Key::Num7) {
+                    Some(6)
                 } else {
                     None
                 }
@@ -2455,6 +2661,8 @@ impl McLauncherApp {
             self.confirm_delete_idx = None;
             self.show_create_server_modal = false;
             self.confirm_delete_server_idx = None;
+            self.show_export_mrpack_modal = false;
+            self.confirm_exit_modal = false;
             self.show_cmd_palette = false;
             self.mr_detail_hit = None;
         }
@@ -2628,15 +2836,15 @@ impl McLauncherApp {
                 }
 
                 let frame_resp = card_frame(self.nav_page == NavPage::Accounts, hov_t)
-                    .inner_margin(Margin::symmetric(foot_pad_x, 7.0))
+                    .inner_margin(Margin::symmetric(5.0, 5.0))
                     .show(ui, |ui| {
                         ui.set_min_width(foot_inner_w);
                         ui.set_max_width(foot_inner_w);
                         let (slot_r, _) =
-                            ui.allocate_exact_size(Vec2::new(foot_inner_w, 30.0), Sense::hover());
+                            ui.allocate_exact_size(Vec2::new(foot_inner_w, 26.0), Sense::hover());
                         let av_r = Rect::from_min_size(
-                            Pos2::new(slot_r.left(), slot_r.center().y - 14.0),
-                            Vec2::splat(28.0),
+                            Pos2::new(slot_r.left(), slot_r.center().y - 12.0),
+                            Vec2::splat(24.0),
                         );
                         draw_account_avatar(
                             ui.painter(),
@@ -2648,31 +2856,31 @@ impl McLauncherApp {
                         );
                         let dot_c = Pos2::new(av_r.right() - 1.5, av_r.bottom() - 1.5);
                         if hov_t > 0.05 {
-                            let ring_r = 3.6 + hov_t * 2.2;
+                            let ring_r = 3.2 + hov_t * 2.0;
                             ui.painter().circle_stroke(
                                 dot_c,
                                 ring_r,
                                 Stroke::new(1.0_f32, with_alpha(acc_col, (hov_t * 150.0) as u8)),
                             );
                         }
-                        ui.painter().circle_filled(dot_c, 4.2, bg_sidebar());
-                        ui.painter().circle_filled(dot_c, 3.0, acc_col);
+                        ui.painter().circle_filled(dot_c, 3.8, bg_sidebar());
+                        ui.painter().circle_filled(dot_c, 2.6, acc_col);
 
-                        if slot_r.width() > 36.0 {
+                        if slot_r.width() > 32.0 {
                             let clipped = ui.painter().with_clip_rect(slot_r);
-                            let text_x = av_r.right() + 9.0;
+                            let text_x = av_r.right() + 8.0;
                             clipped.text(
-                                Pos2::new(text_x, slot_r.top() + 8.5),
+                                Pos2::new(text_x, slot_r.top() + 7.5),
                                 egui::Align2::LEFT_CENTER,
                                 &acc_name,
-                                egui::FontId::proportional(13.0),
+                                egui::FontId::proportional(12.0),
                                 text_primary(),
                             );
                             clipped.text(
-                                Pos2::new(text_x, slot_r.top() + 22.0),
+                                Pos2::new(text_x, slot_r.top() + 19.5),
                                 egui::Align2::LEFT_CENTER,
                                 acc_kind,
-                                egui::FontId::proportional(10.5),
+                                egui::FontId::proportional(10.0),
                                 acc_col,
                             );
                         }
@@ -2754,17 +2962,12 @@ impl McLauncherApp {
                 ui.ctx().request_repaint();
             }
             let brand_click_info =
-                track_click_anim(ui.ctx(), brand_id, Rect::NOTHING, false, None, 0.42);
+                track_click_anim(ui.ctx(), brand_id, Rect::NOTHING, false, None, 0.40);
             let brand_click_t = brand_click_info.map(|(t, _)| t);
             let brand_fill = if brand_ht > 0.01 {
-                with_alpha(accent(), (brand_ht * 18.0) as u8)
+                lerp_color(Color32::TRANSPARENT, bg_card(), brand_ht)
             } else {
                 Color32::TRANSPARENT
-            };
-            let brand_stroke = if brand_ht > 0.01 {
-                Stroke::new(1.0_f32, with_alpha(accent(), (brand_ht * 120.0) as u8))
-            } else {
-                Stroke::NONE
             };
             if self.brand_logo_tex.is_none() {
                 let loaded = decode_icon_bytes(include_bytes!("../../logo.png"))
@@ -2783,64 +2986,45 @@ impl McLauncherApp {
             }
             let brand_resp = egui::Frame::none()
                 .fill(brand_fill)
-                .stroke(brand_stroke)
-                .rounding(Rounding::same(10.0))
-                .inner_margin(Margin::symmetric(4.0, 5.0))
+                .rounding(Rounding::same(8.0))
+                .inner_margin(Margin::symmetric(4.0, 3.0))
                 .show(ui, |ui| {
-                    let row_w = ui.available_width().max(36.0);
+                    let row_w = ui.available_width().max(28.0);
                     let (row_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(row_w, 36.0), Sense::hover());
+                        ui.allocate_exact_size(Vec2::new(row_w, 30.0), Sense::hover());
                     let pop =
-                        brand_click_t.map_or(0.0, |t| (t * std::f32::consts::PI).sin() * 0.08);
+                        brand_click_t.map_or(0.0, |t| (t * std::f32::consts::PI).sin() * 0.07);
                     let scale = (1.0 + brand_ht * 0.04 - brand_pt * 0.06 + pop).max(0.85);
-                    let base_icon_rect = Rect::from_min_size(row_rect.min, Vec2::splat(36.0));
+                    let base_icon_rect = if compact && row_rect.width() < 44.0 {
+                        Rect::from_center_size(row_rect.center(), Vec2::splat(28.0))
+                    } else {
+                        Rect::from_min_size(
+                            Pos2::new(row_rect.left(), row_rect.center().y - 14.0),
+                            Vec2::splat(28.0),
+                        )
+                    };
                     let icon_rect = Rect::from_center_size(
                         base_icon_rect.center(),
                         base_icon_rect.size() * scale,
                     );
                     if let Some(Some(tex)) = &self.brand_logo_tex {
-                        if brand_ht > 0.02 {
-                            ui.painter().rect_filled(
-                                icon_rect.expand(2.0 + brand_ht * 2.0),
-                                Rounding::same(10.0),
-                                with_alpha(accent(), (brand_ht * 42.0) as u8),
-                            );
-                        }
                         ui.painter().image(
                             tex.id(),
                             icon_rect,
                             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                             Color32::WHITE,
                         );
-                        if let Some(t) = brand_click_t {
-                            let inv = 1.0 - t;
-                            let expand = self::anim::ease_out_quint(t) * 6.0;
-                            ui.painter().rect_stroke(
-                                icon_rect.expand(expand),
-                                Rounding::same(9.0 + expand * 0.4),
-                                Stroke::new(
-                                    1.5_f32,
-                                    with_alpha(accent(), (inv * inv * 180.0) as u8),
-                                ),
-                            );
-                        }
                     } else {
-                        draw_brand_logo_animated(
-                            ui.painter(),
-                            base_icon_rect,
-                            brand_ht,
-                            brand_click_t,
-                        );
+                        draw_brand_logo(ui.painter(), icon_rect);
                     }
-                    if row_rect.width() > 42.0 {
+                    if row_rect.width() >= 44.0 {
                         let clipped = ui.painter().with_clip_rect(row_rect);
-                        let text_x = row_rect.left() + 45.0;
                         clipped.text(
-                            Pos2::new(text_x, row_rect.center().y),
+                            Pos2::new(row_rect.left() + 36.0, row_rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             "Sunset Launcher",
-                            egui::FontId::proportional(15.0),
-                            lerp_color(text_primary(), accent_text(), brand_ht * 0.35),
+                            egui::FontId::proportional(13.5),
+                            lerp_color(text_primary(), accent_text(), brand_ht * 0.3),
                         );
                     }
                 });
@@ -2869,12 +3053,12 @@ impl McLauncherApp {
                 brand_rect,
                 brand_click.clicked(),
                 brand_click.interact_pointer_pos(),
-                0.42,
+                0.40,
             ) {
                 paint_click_ripple(
                     ui.painter(),
                     brand_rect,
-                    Rounding::same(10.0),
+                    Rounding::same(8.0),
                     origin,
                     ct,
                     accent(),
@@ -2885,13 +3069,13 @@ impl McLauncherApp {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             if brand_click.clicked() {
-                anim::emit_ring(ui.ctx(), brand_rect.center(), accent(), 34.0);
+                anim::emit_ring(ui.ctx(), brand_rect.center(), accent(), 28.0);
                 self.switch_page(ui.ctx(), NavPage::Library);
             }
 
-            ui.add_space(6.0);
+            ui.add_space(5.0);
             ui.separator();
-            ui.add_space(6.0);
+            ui.add_space(5.0);
 
             let is_game_running = self.any_game_running();
             let is_server_running = self.running_server_id.is_some();
@@ -2914,7 +3098,7 @@ impl McLauncherApp {
                                 ui.ctx().request_repaint();
                             }
 
-                            let desired = Vec2::new(nav_w, 35.0);
+                            let desired = Vec2::new(nav_w, 30.0);
                             let (rect, mut resp) = ui.allocate_exact_size(desired, Sense::click());
                             if compact {
                                 resp = resp.on_hover_text(format!(
@@ -2951,18 +3135,18 @@ impl McLauncherApp {
                             );
                             let click_t = click_info.map(|(t, _)| t);
 
-                            let draw_rect = rect.shrink(press_t * 0.8);
+                            let draw_rect = rect.shrink(press_t * 0.7);
                             let bg = lerp_color(
                                 lerp_color(Color32::TRANSPARENT, bg_card(), hover_t),
                                 bg_card_active(),
                                 active_t,
                             );
                             let painter = ui.painter();
-                            painter.rect_filled(draw_rect, Rounding::same(8.0), bg);
+                            painter.rect_filled(draw_rect, Rounding::same(7.0), bg);
                             if active_t > 0.05 {
                                 painter.rect_stroke(
                                     draw_rect,
-                                    Rounding::same(8.0),
+                                    Rounding::same(7.0),
                                     Stroke::new(
                                         1.0_f32,
                                         with_alpha(accent(), (active_t * 95.0) as u8),
@@ -2973,7 +3157,7 @@ impl McLauncherApp {
                                 paint_click_ripple(
                                     painter,
                                     draw_rect,
-                                    Rounding::same(8.0),
+                                    Rounding::same(7.0),
                                     origin,
                                     ct,
                                     accent(),
@@ -2991,17 +3175,19 @@ impl McLauncherApp {
                                 accent(),
                                 active_t,
                             );
-                            let slide_x = if compact || rect.width() < 64.0 {
+                            let slide_x = if compact || rect.width() < 56.0 {
                                 0.0
                             } else {
-                                hover_t * 2.2
+                                hover_t * 1.8
+                            };
+                            let ic_center_x = if compact && rect.width() < 56.0 {
+                                draw_rect.center().x
+                            } else {
+                                draw_rect.left() + 16.0 + slide_x * 0.5
                             };
                             let ic_rect = Rect::from_center_size(
-                                Pos2::new(
-                                    draw_rect.left() + 20.0 + slide_x * 0.5,
-                                    draw_rect.center().y,
-                                ),
-                                Vec2::splat(16.0),
+                                Pos2::new(ic_center_x, draw_rect.center().y),
+                                Vec2::splat(14.5),
                             );
                             let ic_anim = compute_icon_anim(
                                 page.icon(),
@@ -3011,7 +3197,7 @@ impl McLauncherApp {
                             );
                             draw_icon_animated(painter, ic_rect, page.icon(), icon_col, ic_anim);
 
-                            if compact && rect.width() < 64.0 {
+                            if compact && rect.width() < 56.0 {
                                 if page == NavPage::Console
                                     && (self.log_error_count > 0 || is_game_running)
                                 {
@@ -3022,39 +3208,39 @@ impl McLauncherApp {
                                     };
                                     draw_running_pulse_dot(
                                         ui,
-                                        Pos2::new(rect.right() - 7.0, rect.top() + 7.0),
-                                        3.2,
+                                        Pos2::new(rect.right() - 6.0, rect.top() + 6.0),
+                                        2.8,
                                         dot_col,
                                         bg_sidebar(),
                                     );
                                 } else if page == NavPage::Servers && is_server_running {
                                     draw_running_pulse_dot(
                                         ui,
-                                        Pos2::new(rect.right() - 7.0, rect.top() + 7.0),
-                                        3.2,
+                                        Pos2::new(rect.right() - 6.0, rect.top() + 6.0),
+                                        2.8,
                                         accent(),
                                         bg_sidebar(),
                                     );
                                 }
-                            } else if rect.width() > 48.0 {
+                            } else if rect.width() > 44.0 {
                                 let clipped =
-                                    painter.with_clip_rect(rect.shrink2(Vec2::new(6.0, 0.0)));
+                                    painter.with_clip_rect(rect.shrink2(Vec2::new(5.0, 0.0)));
                                 clipped.text(
-                                    Pos2::new(rect.left() + 38.0 + slide_x, rect.center().y),
+                                    Pos2::new(rect.left() + 32.0 + slide_x, rect.center().y),
                                     egui::Align2::LEFT_CENTER,
                                     page.translated_label(self.settings.language),
-                                    egui::FontId::proportional(13.5),
+                                    egui::FontId::proportional(12.5),
                                     fg,
                                 );
 
                                 // Live running / error indicators only
-                                if rect.width() >= 140.0 {
+                                if rect.width() >= 120.0 {
                                     match page {
                                         NavPage::Servers if is_server_running => {
                                             draw_running_pulse_dot(
                                                 ui,
-                                                Pos2::new(rect.right() - 13.0, rect.center().y),
-                                                3.0,
+                                                Pos2::new(rect.right() - 10.0, rect.center().y),
+                                                2.8,
                                                 accent(),
                                                 bg_sidebar(),
                                             );
@@ -3063,41 +3249,30 @@ impl McLauncherApp {
                                             if self.log_error_count > 0 {
                                                 let pulse = pulse_01(ui.input(|i| i.time), 4.0);
                                                 let pill = Rect::from_center_size(
-                                                    Pos2::new(rect.right() - 16.0, rect.center().y),
-                                                    Vec2::new(20.0, 16.0),
+                                                    Pos2::new(rect.right() - 14.0, rect.center().y),
+                                                    Vec2::new(18.0, 14.0),
                                                 );
                                                 painter.rect_filled(
                                                     pill,
-                                                    Rounding::same(8.0),
+                                                    Rounding::same(7.0),
                                                     with_alpha(
                                                         DANGER,
-                                                        (185.0 + pulse * 65.0) as u8,
-                                                    ),
-                                                );
-                                                painter.rect_stroke(
-                                                    pill.expand(pulse * 1.5),
-                                                    Rounding::same(9.0),
-                                                    Stroke::new(
-                                                        1.0_f32,
-                                                        with_alpha(
-                                                            DANGER,
-                                                            ((1.0 - pulse) * 140.0) as u8,
-                                                        ),
+                                                        (185.0 + pulse * 60.0) as u8,
                                                     ),
                                                 );
                                                 painter.text(
                                                     pill.center(),
                                                     egui::Align2::CENTER_CENTER,
                                                     format!("{}", self.log_error_count.min(99)),
-                                                    egui::FontId::proportional(10.0),
+                                                    egui::FontId::proportional(9.5),
                                                     text_primary(),
                                                 );
                                                 ui.ctx().request_repaint();
                                             } else if is_game_running {
                                                 draw_running_pulse_dot(
                                                     ui,
-                                                    Pos2::new(rect.right() - 13.0, rect.center().y),
-                                                    3.2,
+                                                    Pos2::new(rect.right() - 10.0, rect.center().y),
+                                                    2.8,
                                                     accent(),
                                                     bg_sidebar(),
                                                 );
@@ -3114,7 +3289,7 @@ impl McLauncherApp {
                             if resp.clicked() {
                                 self.switch_page(ui.ctx(), page);
                             }
-                            ui.add_space(3.0);
+                            ui.add_space(2.0);
                         }
 
                         // Gliding accent indicator along the left rail
@@ -3144,47 +3319,47 @@ impl McLauncherApp {
     fn render_top_bar(&mut self, ui: &mut egui::Ui) {
         let avail_w = ui.available_width();
         let btn_w = if avail_w < 540.0 {
-            104.0
+            94.0
         } else if avail_w < 680.0 {
-            122.0
+            108.0
         } else {
-            142.0
+            124.0
         };
         let show_status_badges = avail_w >= 680.0;
         let show_update_btn = self.update_available.is_some() && avail_w >= 540.0;
         let right_reserve = btn_w
             + if show_status_badges {
                 (if self.settings.offline_mode {
-                    84.0
+                    76.0
                 } else {
                     0.0
                 }) + (if self.running_games.len() > 1 {
-                    92.0
+                    84.0
                 } else {
                     0.0
                 })
             } else {
                 0.0
             }
-            + if show_update_btn { 96.0 } else { 0.0 }
-            + 24.0;
+            + if show_update_btn { 88.0 } else { 0.0 }
+            + 20.0;
         let left_w = (avail_w - right_reserve).max(90.0);
 
-        ui_toolbar_row(ui, 34.0, |ui| {
+        ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
             ui.allocate_ui_with_layout(
-                Vec2::new(left_w, 34.0),
+                Vec2::new(left_w, CTL_HEIGHT),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.set_min_height(34.0);
-                    ui.set_max_height(34.0);
-                    ui.spacing_mut().interact_size.y = 34.0;
-                    ui.spacing_mut().button_padding = Vec2::new(11.0, 9.5);
+                    ui.set_min_height(CTL_HEIGHT);
+                    ui.set_max_height(CTL_HEIGHT);
+                    ui.spacing_mut().interact_size.y = CTL_HEIGHT;
+                    ui.spacing_mut().button_padding = Vec2::new(10.0, 5.0);
                     ui.spacing_mut().item_spacing.x = 6.0;
 
                     if let Some(cur) = self.profiles.get(self.selected_idx).cloned() {
-                        let show_badge = left_w >= 290.0;
-                        let reserve = (if show_badge { 88.0 } else { 0.0 }) + 12.0;
-                        let combo_w = (left_w - reserve).clamp(80.0, 280.0);
+                        let show_badge = left_w >= 270.0;
+                        let reserve = (if show_badge { 78.0 } else { 0.0 }) + 10.0;
+                        let combo_w = (left_w - reserve).clamp(80.0, 260.0);
 
                         let combo_resp = egui::ComboBox::from_id_salt("topbar_instance_combo")
                             .selected_text(format!("{} ({})", cur.name, cur.version_id))
@@ -3220,7 +3395,7 @@ impl McLauncherApp {
                                 ui.ctx(),
                                 combo_resp.response.rect.center(),
                                 accent(),
-                                32.0,
+                                26.0,
                             );
                         }
 
@@ -3229,7 +3404,7 @@ impl McLauncherApp {
                                 ui,
                                 cur.loader.kind(),
                                 cur.loader.short_name(),
-                                34.0,
+                                CTL_HEIGHT,
                             );
                         }
                     }
@@ -3237,7 +3412,7 @@ impl McLauncherApp {
             );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().item_spacing.x = 6.0;
                 let is_launching = self.is_selected_launching();
                 let is_running = self.is_selected_running();
                 let (btn_text, icon, enabled, stop_style, pulsing) = if is_launching || self.is_busy
@@ -3275,7 +3450,7 @@ impl McLauncherApp {
                     enabled,
                     stop_style,
                     pulsing,
-                    Vec2::new(btn_w, 34.0),
+                    Vec2::new(btn_w, 30.0),
                 );
                 if play_btn_resp.clicked() {
                     if is_running {
@@ -3323,33 +3498,18 @@ impl McLauncherApp {
                             &format!("v{ver}"),
                             ButtonVariant::Secondary,
                             !self.update_installing,
-                            30.0,
+                            32.0,
                         )
                         .on_hover_text(format!(
                             "{}: v{ver}",
                             tr(self.settings.language, "settings.updates.available")
                         ));
-                        let pulse = pulse_01(ui.input(|i| i.time), 3.2);
-                        ui.painter().rect_stroke(
-                            resp.rect.expand(pulse * 1.8),
-                            Rounding::same(8.5),
-                            Stroke::new(
-                                1.1_f32,
-                                with_alpha(accent(), (90.0 + (1.0 - pulse) * 110.0) as u8),
-                            ),
-                        );
-                        paint_shimmer_sweep(
-                            ui.painter(),
-                            resp.rect,
-                            Rounding::same(7.5),
-                            (ui.input(|i| i.time) as f32 * 0.75).fract(),
-                            accent(),
-                            30,
-                        );
-                        ui.ctx().request_repaint();
                         if resp.clicked() {
-                            anim::emit_ring(ui.ctx(), resp.rect.center(), accent(), 28.0);
-                            self.switch_page(ui.ctx(), NavPage::Settings);
+                            if upd.download_url.is_some() {
+                                self.start_launcher_update();
+                            } else {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(&upd.html_url));
+                            }
                         }
                     }
                 }
@@ -3364,11 +3524,11 @@ impl McLauncherApp {
             || self.server_busy
             || self.java_downloading_major.is_some();
         if can_cancel {
-            ui_toolbar_row(ui, 26.0, |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                let bar_w = (ui.available_width() - 96.0).max(60.0);
+            ui_toolbar_row(ui, 22.0, |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let bar_w = (ui.available_width() - 88.0).max(60.0);
                 ui.allocate_ui_with_layout(
-                    Vec2::new(bar_w, 26.0),
+                    Vec2::new(bar_w, 22.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         animated_progress_bar(
@@ -3387,12 +3547,12 @@ impl McLauncherApp {
                     tr(self.settings.language, "btn.cancel"),
                     ButtonVariant::Danger,
                     true,
-                    24.0,
+                    22.0,
                 )
                 .clicked()
                 {
-                    request_download_cancel();
-                    anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), DANGER, 26.0);
+                    self.cancel_active_tasks();
+                    anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), DANGER, 24.0);
                 }
             });
         } else {
@@ -3466,12 +3626,20 @@ impl Drop for McLauncherApp {
 
 impl eframe::App for McLauncherApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_active_playtimes();
         if let Some(handle) = self.server_handle.take() {
             kill_dedicated_server(&handle);
         }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested())
+            && !self.force_exit_confirmed
+            && (self.any_game_running() || self.server_handle.is_some())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.confirm_exit_modal = true;
+        }
         self.poll_events(ctx);
         self.handle_shortcuts(ctx);
         tick_theme_transition(ctx);
@@ -3479,8 +3647,8 @@ impl eframe::App for McLauncherApp {
         self.ensure_account_skins_requested();
 
         let screen_w = ctx.screen_rect().width();
-        let compact_sidebar = screen_w < 900.0;
-        let target_sidebar_w = if compact_sidebar { 58.0 } else { 196.0 };
+        let compact_sidebar = screen_w < 860.0;
+        let target_sidebar_w = if compact_sidebar { 52.0 } else { 178.0 };
         let sidebar_w = ctx.animate_value_with_time(
             egui::Id::new("sidebar_width_anim"),
             target_sidebar_w,
@@ -3491,23 +3659,23 @@ impl eframe::App for McLauncherApp {
         }
         let compact_pad = screen_w < 600.0;
 
-        // 1. Top Play Bar spanning full window width
+        // 1. Compact Top Play Bar spanning full window width
         egui::TopBottomPanel::top("top_play_bar")
-            .exact_height(54.0)
+            .exact_height(42.0)
             .frame(
                 egui::Frame::none()
                     .fill(bg_sidebar())
                     .stroke(Stroke::new(1.0_f32, border_subtle()))
                     .inner_margin(Margin::symmetric(
-                        if compact_pad { 10.0 } else { 14.0 },
-                        9.0,
+                        if compact_pad { 8.0 } else { 12.0 },
+                        7.0,
                     )),
             )
             .show(ctx, |ui| {
                 self.render_top_bar(ui);
             });
 
-        // 2. Bottom Progress Bar (smooth animated height slide-in/out)
+        // 2. Smooth animated Bottom Progress Bar
         let show_bottom_bar = self.is_busy
             || !self.launching_profiles.is_empty()
             || self.mr_installing
@@ -3520,9 +3688,9 @@ impl eframe::App for McLauncherApp {
         if bar_t > 0.01 && bar_t < 0.99 {
             ctx.request_repaint();
         }
-        let bar_h = (34.0 * ease_out_cubic(bar_t)).round();
+        let bar_h = (36.0 * ease_out_cubic(bar_t)).round();
         if bar_t > 0.02 && bar_h >= 6.0 {
-            let v_pad = ((bar_h - 22.0) * 0.5).clamp(0.0, 6.0);
+            let v_pad = ((bar_h - CTL_HEIGHT) * 0.5).clamp(0.0, 5.0);
             egui::TopBottomPanel::bottom("bottom_status_bar")
                 .exact_height(bar_h)
                 .frame(
@@ -3530,7 +3698,7 @@ impl eframe::App for McLauncherApp {
                         .fill(bg_sidebar())
                         .stroke(Stroke::new(1.0_f32, border_subtle()))
                         .inner_margin(Margin::symmetric(
-                            if compact_pad { 10.0 } else { 14.0 },
+                            if compact_pad { 8.0 } else { 12.0 },
                             v_pad,
                         )),
                 )
@@ -3539,13 +3707,13 @@ impl eframe::App for McLauncherApp {
                 });
         }
 
-        // 3. Left navigation rail
+        // 3. Compact Left navigation rail
         egui::SidePanel::left("nav_sidebar")
             .frame(
                 egui::Frame::none()
                     .fill(bg_sidebar())
                     .stroke(Stroke::new(1.0_f32, border_subtle()))
-                    .inner_margin(Margin::symmetric(8.0, 9.0)),
+                    .inner_margin(Margin::symmetric(6.0, 7.0)),
             )
             .resizable(false)
             .exact_width(sidebar_w)
@@ -3553,12 +3721,12 @@ impl eframe::App for McLauncherApp {
                 self.render_nav_sidebar(ui, compact_sidebar);
             });
 
-        // 4. Main scrollable page area
+        // 4. Compact Main scrollable page area
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
                     .fill(theme::bg_void())
-                    .inner_margin(Margin::same(if compact_pad { 10.0 } else { 16.0 })),
+                    .inner_margin(Margin::same(if compact_pad { 8.0 } else { 12.0 })),
             )
             .show(ctx, |ui| {
                 let panel_w = ui.available_width().max(120.0);
@@ -3594,9 +3762,116 @@ impl eframe::App for McLauncherApp {
         self.render_delete_server_modal(ctx);
         self.render_project_details_modal(ctx);
         self.render_command_palette_modal(ctx);
+        self.render_exit_confirm_modal(ctx);
         self.handle_file_drop(ctx);
         self.render_toast(ctx);
         anim::render_action_fx(ctx);
+    }
+}
+
+impl McLauncherApp {
+    fn save_active_playtimes(&mut self) {
+        if self.running_games.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut changed = false;
+        for (pid, rg) in &mut self.running_games {
+            let elapsed = now.duration_since(rg.started_at).as_secs();
+            if elapsed > 0 {
+                if let Some(p) = self.profiles.iter_mut().find(|p| &p.id == pid) {
+                    p.playtime_secs = p.playtime_secs.saturating_add(elapsed);
+                    changed = true;
+                }
+                rg.started_at = now;
+            }
+        }
+        if changed {
+            let _ = save_profiles(&self.paths, &self.profiles);
+        }
+    }
+
+    fn render_exit_confirm_modal(&mut self, ctx: &egui::Context) {
+        if !self.confirm_exit_modal {
+            return;
+        }
+        let lang = self.settings.language;
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("exit_confirm_backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
+                ui.painter().rect_filled(
+                    rect,
+                    Rounding::ZERO,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 170),
+                );
+                if resp.clicked() {
+                    self.confirm_exit_modal = false;
+                }
+            });
+
+        let mut open = true;
+        let max_w = (screen.width() - 32.0).clamp(260.0, 420.0);
+        egui::Window::new(tr(lang, "exit.confirm_title"))
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .max_width(max_w)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(tr(lang, "exit.confirm_body")).color(text_secondary()),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(12.0);
+                ui_toolbar_row(ui, 30.0, |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui_button_icon(
+                        ui,
+                        "confirm_exit_stop_btn",
+                        Some(Icon::Stop),
+                        tr(lang, "exit.confirm_close"),
+                        ButtonVariant::Danger,
+                        true,
+                        30.0,
+                    )
+                    .clicked()
+                    {
+                        self.save_active_playtimes();
+                        for rg in self.running_games.values() {
+                            if let Ok(mut child) = rg.handle.lock() {
+                                let _ = child.kill();
+                            }
+                        }
+                        if let Some(handle) = self.server_handle.take() {
+                            kill_dedicated_server(&handle);
+                        }
+                        self.force_exit_confirmed = true;
+                        self.confirm_exit_modal = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui_button(
+                        ui,
+                        "confirm_exit_cancel_btn",
+                        tr(lang, "btn.cancel"),
+                        ButtonVariant::Secondary,
+                        true,
+                        30.0,
+                    )
+                    .clicked()
+                    {
+                        self.confirm_exit_modal = false;
+                    }
+                });
+            });
+        if !open {
+            self.confirm_exit_modal = false;
+        }
     }
 }
 

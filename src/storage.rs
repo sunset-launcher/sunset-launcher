@@ -755,6 +755,68 @@ pub fn ensure_instance_mods_dir(
     Ok(mods_dir)
 }
 
+/// Recursively copies an instance folder into `dst`, skipping transient lock files.
+pub fn copy_instance_dir_contents(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst)
+        .map_err(|e| format!("Failed to create directory {}: {e}", dst.display()))?;
+    let entries = fs::read_dir(src)
+        .map_err(|e| format!("Failed to read directory {}: {e}", src.display()))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str == "session.lock" || name_str.ends_with(".lck") {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            copy_instance_dir_contents(&src_path, &dst_path)?;
+        } else if ft.is_file() {
+            fs::copy(&src_path, &dst_path).map_err(|e| {
+                format!(
+                    "Failed to copy {} to {}: {e}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Safely removes an instance's directory inside `paths.instances_dir`.
+pub fn remove_instance_dir(paths: &LauncherPaths, profile: &Profile) -> Result<(), String> {
+    let dir = if !profile.dir_name.is_empty() {
+        paths.instances_dir.join(&profile.dir_name)
+    } else {
+        let legacy = paths.instances_dir.join(&profile.id);
+        if legacy.exists() {
+            legacy
+        } else {
+            paths
+                .instances_dir
+                .join(sanitize_instance_dir_name(&profile.name))
+        }
+    };
+    if !dir.starts_with(&paths.instances_dir) || dir == paths.instances_dir {
+        return Err("Refusing to delete path outside instances directory".to_string());
+    }
+    if dir.exists() {
+        fs::remove_dir_all(&dir)
+            .map_err(|e| format!("Failed to remove {}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
 /// Picks a unique, human-readable folder name inside `servers/` for a dedicated server.
 pub fn unique_server_dir_name(
     paths: &LauncherPaths,
@@ -857,38 +919,72 @@ pub fn save_accounts(paths: &LauncherPaths, store: &AccountStore) -> Result<(), 
 struct LauncherState {
     #[serde(default)]
     selected_profile_id: Option<String>,
+    #[serde(default)]
+    selected_server_id: Option<String>,
 }
 
 fn state_file_path(paths: &LauncherPaths) -> PathBuf {
     paths.root.join("state.json")
 }
 
-/// Loads the previously selected profile ID from state.json, if present.
-pub fn load_selected_profile_id(paths: &LauncherPaths) -> Option<String> {
-    let content = fs::read_to_string(state_file_path(paths)).ok()?;
-    serde_json::from_str::<LauncherState>(&content)
+fn load_launcher_state(paths: &LauncherPaths) -> LauncherState {
+    fs::read_to_string(state_file_path(paths))
         .ok()
-        .and_then(|s| s.selected_profile_id)
+        .and_then(|c| serde_json::from_str::<LauncherState>(&c).ok())
+        .unwrap_or_default()
 }
 
-/// Persists the currently selected profile ID to state.json.
+fn save_launcher_state(paths: &LauncherPaths, state: &LauncherState) -> Result<(), String> {
+    let path = state_file_path(paths);
+    let json = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize launcher state: {e}"))?;
+    atomic_write(&path, json)
+}
+
+/// Loads the previously selected profile ID from state.json, if present.
+pub fn load_selected_profile_id(paths: &LauncherPaths) -> Option<String> {
+    load_launcher_state(paths).selected_profile_id
+}
+
+/// Persists the currently selected profile ID to state.json while preserving other state fields.
 pub fn save_selected_profile_id(
     paths: &LauncherPaths,
     profile_id: Option<&str>,
 ) -> Result<(), String> {
-    let path = state_file_path(paths);
-    let state = LauncherState {
-        selected_profile_id: profile_id.map(str::to_string),
-    };
-    let json = serde_json::to_string_pretty(&state)
-        .map_err(|e| format!("Failed to serialize launcher state: {e}"))?;
-    atomic_write(&path, json)
+    let mut state = load_launcher_state(paths);
+    state.selected_profile_id = profile_id.map(str::to_string);
+    save_launcher_state(paths, &state)
 }
 
 /// Resolves the initial profile index from a persisted profile ID, falling back to 0.
 pub fn resolve_selected_profile_index(profiles: &[Profile], saved_id: Option<&str>) -> usize {
     saved_id
         .and_then(|id| profiles.iter().position(|p| p.id == id))
+        .unwrap_or(0)
+}
+
+/// Loads the previously selected dedicated server ID from state.json, if present.
+pub fn load_selected_server_id(paths: &LauncherPaths) -> Option<String> {
+    load_launcher_state(paths).selected_server_id
+}
+
+/// Persists the currently selected dedicated server ID to state.json while preserving other state fields.
+pub fn save_selected_server_id(
+    paths: &LauncherPaths,
+    server_id: Option<&str>,
+) -> Result<(), String> {
+    let mut state = load_launcher_state(paths);
+    state.selected_server_id = server_id.map(str::to_string);
+    save_launcher_state(paths, &state)
+}
+
+/// Resolves the initial server index from a persisted server ID, falling back to 0.
+pub fn resolve_selected_server_index(
+    servers: &[crate::models::DedicatedServer],
+    saved_id: Option<&str>,
+) -> usize {
+    saved_id
+        .and_then(|id| servers.iter().position(|s| s.id == id))
         .unwrap_or(0)
 }
 
@@ -1200,6 +1296,55 @@ mod tests {
     }
 
     #[test]
+    fn selected_server_id_persists_alongside_profile_id() {
+        use crate::models::{DedicatedServer, ServerSoftware};
+
+        let paths = test_paths("selected_server");
+        assert_eq!(load_selected_server_id(&paths), None);
+
+        let s1 = DedicatedServer::new(
+            "Srv1".into(),
+            ServerSoftware::Paper,
+            "1.21.4".into(),
+            25565,
+            2048,
+            true,
+            "MOTD".into(),
+            true,
+        );
+        let s2 = DedicatedServer::new(
+            "Srv2".into(),
+            ServerSoftware::Fabric,
+            "1.20.1".into(),
+            25566,
+            4096,
+            true,
+            "MOTD".into(),
+            true,
+        );
+        let servers = vec![s1.clone(), s2.clone()];
+
+        save_selected_profile_id(&paths, Some("prof-abc")).unwrap();
+        save_selected_server_id(&paths, Some(&s2.id)).unwrap();
+
+        assert_eq!(load_selected_profile_id(&paths).as_deref(), Some("prof-abc"));
+        let loaded_srv = load_selected_server_id(&paths);
+        assert_eq!(loaded_srv.as_deref(), Some(s2.id.as_str()));
+        assert_eq!(
+            resolve_selected_server_index(&servers, loaded_srv.as_deref()),
+            1
+        );
+
+        save_selected_profile_id(&paths, Some("prof-xyz")).unwrap();
+        assert_eq!(
+            load_selected_server_id(&paths).as_deref(),
+            Some(s2.id.as_str())
+        );
+
+        let _ = fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
     fn windows_icon_generation_produces_valid_256_ico() {
         let paths = test_paths("win_ico");
         let ico_path = ensure_windows_icon(&paths).unwrap();
@@ -1467,6 +1612,42 @@ mod tests {
 
         let ensured = ensure_instance_mods_dir(&paths, &vanilla).unwrap();
         assert!(ensured.is_dir());
+
+        let _ = fs::remove_dir_all(&paths.root);
+    }
+
+    #[test]
+    fn copy_and_remove_instance_dir_work_and_skip_locks() {
+        let paths = test_paths("copy_remove_inst");
+        let mut orig = Profile::new(
+            "Orig".into(),
+            "1.21.4".into(),
+            ModLoader::Vanilla,
+            "Player".into(),
+        );
+        orig.dir_name = "Orig".into();
+        let src = instance_dir(&paths, &orig);
+        fs::create_dir_all(src.join("saves/World1")).unwrap();
+        fs::write(src.join("options.txt"), b"fov:90\n").unwrap();
+        fs::write(src.join("saves/World1/level.dat"), b"world").unwrap();
+        fs::write(src.join("saves/World1/session.lock"), b"lock").unwrap();
+
+        let mut clone = orig.clone();
+        clone.id = "clone-id".into();
+        clone.dir_name = "Orig (Copy)".into();
+        let dst = instance_dir(&paths, &clone);
+        copy_instance_dir_contents(&src, &dst).unwrap();
+
+        assert_eq!(fs::read(dst.join("options.txt")).unwrap(), b"fov:90\n");
+        assert_eq!(
+            fs::read(dst.join("saves/World1/level.dat")).unwrap(),
+            b"world"
+        );
+        assert!(!dst.join("saves/World1/session.lock").exists());
+
+        remove_instance_dir(&paths, &clone).unwrap();
+        assert!(!dst.exists());
+        assert!(src.exists());
 
         let _ = fs::remove_dir_all(&paths.root);
     }

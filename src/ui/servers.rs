@@ -2,7 +2,8 @@ use super::*;
 
 impl McLauncherApp {
     pub(super) fn start_provision_server(&mut self, server: DedicatedServer) {
-        reset_download_cancel();
+        let cancel_tok = Arc::new(AtomicBool::new(false));
+        self.server_cancel_token = Some(Arc::clone(&cancel_tok));
         self.server_busy = true;
         self.is_busy = true;
         self.progress = 0.08;
@@ -15,7 +16,9 @@ impl McLauncherApp {
         let manifest = self.manifest.clone();
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let res = provision_server_jar(&paths, &server, manifest.as_ref(), Some(&tx));
+            let res = with_download_cancel_token(cancel_tok, || {
+                provision_server_jar(&paths, &server, manifest.as_ref(), Some(&tx))
+            });
             let _ = tx.send(WorkerEvent::ServerProvisioned(res));
         });
     }
@@ -24,7 +27,8 @@ impl McLauncherApp {
         if self.server_handle.is_some() || self.server_busy {
             return;
         }
-        reset_download_cancel();
+        let cancel_tok = Arc::new(AtomicBool::new(false));
+        self.server_cancel_token = Some(Arc::clone(&cancel_tok));
         self.server_busy = true;
         self.is_busy = true;
         self.progress = 0.1;
@@ -36,7 +40,9 @@ impl McLauncherApp {
         let manifest = self.manifest.clone();
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let res = start_dedicated_server(&paths, &server, manifest.as_ref(), Some(&tx));
+            let res = with_download_cancel_token(cancel_tok, || {
+                start_dedicated_server(&paths, &server, manifest.as_ref(), Some(&tx))
+            });
             let _ = tx.send(WorkerEvent::ServerStarted(res));
         });
     }
@@ -52,12 +58,8 @@ impl McLauncherApp {
             let avail_w = ui.available_width();
             let wide_hdr = avail_w >= 540.0;
             let search_w = (avail_w - 280.0).clamp(110.0, 220.0);
-            ui_toolbar_row(ui, 30.0, |ui| {
-                ui.heading(
-                    egui::RichText::new(tr(lang, "srv.title"))
-                        .size(21.0)
-                        .color(text_primary()),
-                );
+            ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
+                page_heading(ui, tr(lang, "srv.title"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     if ui_button_icon(
@@ -100,7 +102,7 @@ impl McLauncherApp {
             }
         } else {
             let srv_name = self.servers[self.selected_server_idx].name.clone();
-            ui_toolbar_row(ui, 32.0, |ui| {
+            ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
                 if ui_button_icon(
                     ui,
                     "srv_back_btn",
@@ -108,18 +110,14 @@ impl McLauncherApp {
                     tr(lang, "srv.back"),
                     ButtonVariant::Secondary,
                     true,
-                    28.0,
+                    CTL_HEIGHT,
                 )
                 .clicked()
                 {
                     self.server_detail_open = false;
                     self.mark_subtab_switch(ctx);
                 }
-                ui.heading(
-                    egui::RichText::new(&srv_name)
-                        .size(20.0)
-                        .color(text_primary()),
-                );
+                page_heading(ui, &srv_name);
             });
             ui.add_space(12.0);
         }
@@ -130,9 +128,9 @@ impl McLauncherApp {
             card_frame(false, 0.0).show(ui, |ui| {
                 ui.set_min_width((card_w - 28.0).max(160.0));
                 ui.set_max_width((card_w - 28.0).max(160.0));
-                ui.heading(
+                ui.strong(
                     egui::RichText::new(tr(lang, "srv.empty_title"))
-                        .size(16.0)
+                        .size(13.5)
                         .color(text_primary()),
                 );
                 ui.add_space(4.0);
@@ -234,42 +232,27 @@ impl McLauncherApp {
                     if self.server_sort != prev_sort {
                         self.mark_subtab_switch(ctx);
                     }
-                    if ui_icon_button(
-                        ui,
-                        "srv_view_grid",
-                        Icon::Grid,
-                        tr(lang, "lib.grid_view"),
-                        if self.server_view == LibraryViewMode::Grid {
-                            ButtonVariant::Secondary
-                        } else {
-                            ButtonVariant::Subtle
-                        },
-                        true,
-                        28.0,
-                    )
-                    .clicked()
-                        && self.server_view != LibraryViewMode::Grid
-                    {
-                        self.server_view = LibraryViewMode::Grid;
-                        self.mark_subtab_switch(ctx);
-                    }
-                    if ui_icon_button(
-                        ui,
-                        "srv_view_list",
-                        Icon::List,
-                        tr(lang, "lib.list_view"),
-                        if self.server_view == LibraryViewMode::List {
-                            ButtonVariant::Secondary
-                        } else {
-                            ButtonVariant::Subtle
-                        },
-                        true,
-                        28.0,
-                    )
-                    .clicked()
-                        && self.server_view != LibraryViewMode::List
-                    {
-                        self.server_view = LibraryViewMode::List;
+                    let prev_view = self.server_view;
+                    egui::ComboBox::from_id_salt("srv_view_combo")
+                        .selected_text(match self.server_view {
+                            LibraryViewMode::Grid => tr(lang, "lib.grid_view"),
+                            LibraryViewMode::List => tr(lang, "lib.list_view"),
+                        })
+                        .width(126.0)
+                        .truncate()
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.server_view,
+                                LibraryViewMode::Grid,
+                                tr(lang, "lib.grid_view"),
+                            );
+                            ui.selectable_value(
+                                &mut self.server_view,
+                                LibraryViewMode::List,
+                                tr(lang, "lib.list_view"),
+                            );
+                        });
+                    if self.server_view != prev_view {
                         self.mark_subtab_switch(ctx);
                     }
                 });
@@ -279,7 +262,7 @@ impl McLauncherApp {
             let query = self.server_search.trim().to_lowercase();
             let mut action_start: Option<(usize, DedicatedServer)> = None;
             let mut action_stop = false;
-            let mut action_open: Option<usize> = None;
+            let mut action_select: Option<usize> = None;
             let mut action_settings: Option<usize> = None;
             let mut action_delete: Option<usize> = None;
             let mut reset_srv_filters = false;
@@ -421,8 +404,14 @@ impl McLauncherApp {
                                 };
                                 ui_toolbar_row(ui, 38.0, |ui| {
                                     ui.spacing_mut().item_spacing.x = 8.0;
-                                    let (av_r, _) =
-                                        ui.allocate_exact_size(Vec2::splat(34.0), Sense::hover());
+                                    let (av_r, av_resp) =
+                                        ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+                                    if av_resp.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if av_resp.clicked() {
+                                        action_select = Some(*idx);
+                                    }
                                     draw_server_card_avatar(
                                         ui.painter(),
                                         av_r,
@@ -451,7 +440,7 @@ impl McLauncherApp {
                                                         egui::Label::new(
                                                             egui::RichText::new(&item.name)
                                                                 .strong()
-                                                                .size(14.0)
+                                                                .size(13.5)
                                                                 .color(text_primary()),
                                                         )
                                                         .truncate(),
@@ -493,7 +482,7 @@ impl McLauncherApp {
                                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
                                     if info_resp.clicked() {
-                                        action_open = Some(*idx);
+                                        action_select = Some(*idx);
                                     }
 
                                     if wide_srv_list {
@@ -515,18 +504,21 @@ impl McLauncherApp {
                                                 {
                                                     action_delete = Some(*idx);
                                                 }
-                                                if ui_icon_button(
+                                                let cfg_resp = ui_icon_button(
                                                     ui,
                                                     ("srv_list_cfg", &item.id),
                                                     Icon::Sliders,
                                                     tr(lang, "srv.settings"),
                                                     ButtonVariant::Secondary,
-                                                    true,
+                                                    selected,
                                                     28.0,
-                                                )
-                                                .clicked()
-                                                {
+                                                );
+                                                if selected && cfg_resp.clicked() {
                                                     action_settings = Some(*idx);
+                                                } else if !selected
+                                                    && cfg_resp.interact(Sense::click()).clicked()
+                                                {
+                                                    action_select = Some(*idx);
                                                 }
                                                 if is_running {
                                                     if ui_button_icon(
@@ -618,18 +610,21 @@ impl McLauncherApp {
                                                 action_start = Some((*idx, item.clone()));
                                             }
                                         }
-                                        if ui_icon_button(
+                                        let cfg_resp = ui_icon_button(
                                             ui,
                                             ("srv_list_cfg", &item.id),
                                             Icon::Sliders,
                                             tr(lang, "srv.settings"),
                                             ButtonVariant::Secondary,
-                                            true,
+                                            selected,
                                             28.0,
-                                        )
-                                        .clicked()
-                                        {
+                                        );
+                                        if selected && cfg_resp.clicked() {
                                             action_settings = Some(*idx);
+                                        } else if !selected
+                                            && cfg_resp.interact(Sense::click()).clicked()
+                                        {
+                                            action_select = Some(*idx);
                                         }
                                         if !is_running
                                             && ui_icon_button(
@@ -711,7 +706,7 @@ impl McLauncherApp {
                                                                 egui::Label::new(
                                                                     egui::RichText::new(&item.name)
                                                                         .strong()
-                                                                        .size(14.5)
+                                                                        .size(13.5)
                                                                         .color(text_primary()),
                                                                 )
                                                                 .truncate(),
@@ -763,7 +758,7 @@ impl McLauncherApp {
                                                     );
                                                 }
                                                 if hdr_resp.clicked() {
-                                                    action_open = Some(*idx);
+                                                    action_select = Some(*idx);
                                                 }
 
                                                 ui.add_space(6.0);
@@ -846,18 +841,23 @@ impl McLauncherApp {
                                                             {
                                                                 action_delete = Some(*idx);
                                                             }
-                                                            if ui_icon_button(
+                                                            let cfg_resp = ui_icon_button(
                                                                 ui,
                                                                 ("srv_card_open", &item.id),
                                                                 Icon::Sliders,
                                                                 tr(lang, "srv.settings"),
                                                                 ButtonVariant::Secondary,
-                                                                true,
+                                                                selected,
                                                                 28.0,
-                                                            )
-                                                            .clicked()
-                                                            {
+                                                            );
+                                                            if selected && cfg_resp.clicked() {
                                                                 action_settings = Some(*idx);
+                                                            } else if !selected
+                                                                && cfg_resp
+                                                                    .interact(Sense::click())
+                                                                    .clicked()
+                                                            {
+                                                                action_select = Some(*idx);
                                                             }
                                                         },
                                                     );
@@ -878,15 +878,12 @@ impl McLauncherApp {
                 self.server_filter = ServerFilter::All;
                 self.mark_subtab_switch(ctx);
             }
-            if let Some(idx) = action_open {
-                self.selected_server_idx = idx;
-                self.server_detail_open = true;
-                self.server_tab = ServerSubTab::Console;
-                self.mark_subtab_switch(ctx);
+            if let Some(idx) = action_select {
+                self.select_server(idx);
                 anim::emit_ring(ctx, anim::pointer_or_center(ctx), accent(), 30.0);
             }
             if let Some(idx) = action_settings {
-                self.selected_server_idx = idx;
+                self.select_server(idx);
                 self.server_detail_open = true;
                 self.server_tab = ServerSubTab::Settings;
                 self.mark_subtab_switch(ctx);
@@ -905,7 +902,7 @@ impl McLauncherApp {
                 }
             }
             if let Some((idx, srv_to_start)) = action_start {
-                self.selected_server_idx = idx;
+                self.select_server(idx);
                 self.server_detail_open = true;
                 self.server_tab = ServerSubTab::Console;
                 self.mark_subtab_switch(ctx);
@@ -966,7 +963,7 @@ impl McLauncherApp {
                     }
                     ui.strong(
                         egui::RichText::new(&srv.name)
-                            .size(16.0)
+                            .size(13.5)
                             .color(text_primary()),
                     );
                     ui.label(
@@ -1168,69 +1165,38 @@ impl McLauncherApp {
                 }
             });
 
-            ui.add_space(12.0);
-
-            if ui.available_width() < 460.0 {
-                let cur_lbl = match self.server_tab {
-                    ServerSubTab::Console => tr(lang, "nav.console"),
-                    ServerSubTab::Content => tr(lang, "srv.tab_content"),
-                    ServerSubTab::Settings => tr(lang, "inst.settings"),
-                };
-                let prev_tab = self.server_tab;
-                egui::ComboBox::from_id_salt("srv_subtab_combo")
-                    .selected_text(cur_lbl)
-                    .width((ui.available_width() - 24.0).clamp(150.0, 240.0))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.server_tab,
-                            ServerSubTab::Console,
-                            tr(lang, "nav.console"),
-                        );
-                        ui.selectable_value(
-                            &mut self.server_tab,
-                            ServerSubTab::Content,
-                            tr(lang, "srv.tab_content"),
-                        );
-                        ui.selectable_value(
-                            &mut self.server_tab,
-                            ServerSubTab::Settings,
-                            tr(lang, "inst.settings"),
-                        );
-                    });
-                if self.server_tab != prev_tab {
-                    self.mark_subtab_switch(ctx);
-                }
-            } else {
-                ui_wrap_row(ui, 30.0, |ui| {
-                    for (tab, ic, lbl) in [
-                        (
-                            ServerSubTab::Console,
-                            Icon::Terminal,
-                            tr(lang, "nav.console"),
-                        ),
-                        (
-                            ServerSubTab::Content,
-                            Icon::Layers,
-                            tr(lang, "srv.tab_content"),
-                        ),
-                        (
-                            ServerSubTab::Settings,
-                            Icon::Sliders,
-                            tr(lang, "inst.settings"),
-                        ),
-                    ] {
-                        let is_act = self.server_tab == tab;
-                        if ui_pill_tab_icon(ui, ("srv_subtab", lbl), Some(ic), lbl, is_act)
-                            .clicked()
-                            && !is_act
-                        {
-                            self.server_tab = tab;
-                            self.mark_subtab_switch(ctx);
-                        }
-                    }
+            ui.add_space(8.0);
+            let cur_lbl = match self.server_tab {
+                ServerSubTab::Console => tr(lang, "nav.console"),
+                ServerSubTab::Content => tr(lang, "srv.tab_content"),
+                ServerSubTab::Settings => tr(lang, "inst.settings"),
+            };
+            let prev_tab = self.server_tab;
+            egui::ComboBox::from_id_salt("srv_subtab_combo")
+                .selected_text(cur_lbl)
+                .width(176.0)
+                .truncate()
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.server_tab,
+                        ServerSubTab::Console,
+                        tr(lang, "nav.console"),
+                    );
+                    ui.selectable_value(
+                        &mut self.server_tab,
+                        ServerSubTab::Content,
+                        tr(lang, "srv.tab_content"),
+                    );
+                    ui.selectable_value(
+                        &mut self.server_tab,
+                        ServerSubTab::Settings,
+                        tr(lang, "inst.settings"),
+                    );
                 });
+            if self.server_tab != prev_tab {
+                self.mark_subtab_switch(ctx);
             }
-            ui.add_space(12.0);
+            ui.add_space(8.0);
             let subtab_t = self.subtab_switch_time;
             Self::apply_subtab_transition(ui, subtab_t, |ui| {
                 if self.server_tab == ServerSubTab::Content {
@@ -1496,7 +1462,7 @@ impl McLauncherApp {
                                 ui.set_max_width(card_inner_w);
                                 let compact_row = card_inner_w < 480.0;
                                 ui.allocate_ui_with_layout(
-                                    Vec2::new(card_inner_w, 38.0),
+                                    Vec2::new(card_inner_w, 32.0),
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         ui.set_max_width(card_inner_w);
@@ -1509,7 +1475,7 @@ impl McLauncherApp {
                                                 tr(lang, "btn.remove"),
                                                 ButtonVariant::Danger,
                                                 true,
-                                                28.0,
+                                                26.0,
                                             )
                                             .clicked()
                                         } else {
@@ -1520,7 +1486,7 @@ impl McLauncherApp {
                                                 tr(lang, "btn.remove"),
                                                 ButtonVariant::Danger,
                                                 true,
-                                                28.0,
+                                                26.0,
                                             )
                                             .clicked()
                                         };
@@ -1648,6 +1614,7 @@ impl McLauncherApp {
                                                         ui.add(
                                                             egui::Label::new(
                                                                 egui::RichText::new(&display_title)
+                                                                    .size(13.5)
                                                                     .strong()
                                                                     .color(if item.enabled {
                                                                         text_primary()
@@ -1675,7 +1642,7 @@ impl McLauncherApp {
                                     },
                                 );
                             });
-                            ui.add_space(4.0);
+                            ui.add_space(10.0);
                         }
                         for url in icons_to_request {
                             self.request_icon(&url);
@@ -2026,7 +1993,7 @@ impl McLauncherApp {
                                                     egui::Label::new(
                                                         egui::RichText::new(title_txt)
                                                             .strong()
-                                                            .size(14.0)
+                                                            .size(13.5)
                                                             .color(text_primary()),
                                                     )
                                                     .truncate(),
@@ -3595,7 +3562,7 @@ impl McLauncherApp {
                             srv.dir_name =
                                 unique_server_dir_name(&self.paths, &srv.name, &self.servers);
                             self.servers.push(srv.clone());
-                            self.selected_server_idx = self.servers.len() - 1;
+                            self.select_server(self.servers.len() - 1);
                             let _ = save_servers(&self.paths, &self.servers);
                             self.show_create_server_modal = false;
                             anim::emit_burst(ctx, anim::pointer_or_center(ctx), accent(), 10);
@@ -3733,9 +3700,12 @@ impl McLauncherApp {
                         let dir = server_dir(&self.paths, &removed);
                         let _ = std::fs::remove_dir_all(dir);
                         let _ = save_servers(&self.paths, &self.servers);
-                        if self.selected_server_idx >= self.servers.len() {
+                        if idx < self.selected_server_idx {
+                            self.selected_server_idx = self.selected_server_idx.saturating_sub(1);
+                        } else if self.selected_server_idx >= self.servers.len() {
                             self.selected_server_idx = self.servers.len().saturating_sub(1);
                         }
+                        self.persist_selected_server();
                         self.server_detail_open = false;
                         self.confirm_delete_server_idx = None;
                         self.show_toast(ctx, format!("Removed '{}'", removed.name));

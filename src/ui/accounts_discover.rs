@@ -3,12 +3,8 @@ use super::*;
 impl McLauncherApp {
     pub(super) fn render_accounts_page(&mut self, ui: &mut egui::Ui) {
         let lang = self.settings.language;
-        ui_toolbar_row(ui, 32.0, |ui| {
-            ui.heading(
-                egui::RichText::new(tr(lang, "nav.accounts"))
-                    .size(21.0)
-                    .color(text_primary()),
-            );
+        ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
+            page_heading(ui, tr(lang, "nav.accounts"));
             ui.label(
                 egui::RichText::new(format!("{}", self.account_store.accounts.len()))
                     .monospace()
@@ -108,7 +104,7 @@ impl McLauncherApp {
                                 ui.spacing_mut().interact_size.y = 20.0;
                                 ui.strong(
                                     egui::RichText::new(&active.username)
-                                        .size(16.0)
+                                        .size(13.5)
                                         .color(text_primary()),
                                 );
                                 badge_sized(ui, active.kind_label(), true, 20.0, None);
@@ -133,6 +129,7 @@ impl McLauncherApp {
             let active_id = self.account_store.active_id.clone();
             let mut select_id: Option<String> = None;
             let mut delete_id: Option<String> = None;
+            let mut refresh_acc: Option<Account> = None;
 
             for acc in &self.account_store.accounts {
                 let is_active = active_id.as_deref() == Some(acc.id.as_str());
@@ -166,7 +163,7 @@ impl McLauncherApp {
                             );
                             ui.strong(
                                 egui::RichText::new(&acc.username)
-                                    .size(14.5)
+                                    .size(13.5)
                                     .color(text_primary()),
                             );
                             ui.label(
@@ -196,7 +193,7 @@ impl McLauncherApp {
                                             ui,
                                             ("acc_del", &acc.id),
                                             Icon::Trash,
-                                            "Delete account",
+                                            tr(self.settings.language, "acc.delete_tooltip"),
                                             ButtonVariant::Danger,
                                             true,
                                             26.0,
@@ -204,6 +201,20 @@ impl McLauncherApp {
                                         .clicked()
                                     {
                                         delete_id = Some(acc.id.clone());
+                                    }
+                                    if !matches!(acc.kind, AccountKind::Offline)
+                                        && ui_icon_button(
+                                            ui,
+                                            ("acc_ref", &acc.id),
+                                            Icon::Refresh,
+                                            tr(self.settings.language, "acc.refresh_session"),
+                                            ButtonVariant::Subtle,
+                                            !self.acc_refresh_busy && !self.settings.offline_mode,
+                                            26.0,
+                                        )
+                                        .clicked()
+                                    {
+                                        refresh_acc = Some(acc.clone());
                                     }
                                     if !is_active
                                         && ui_button(
@@ -255,12 +266,26 @@ impl McLauncherApp {
                             {
                                 select_id = Some(acc.id.clone());
                             }
+                            if !matches!(acc.kind, AccountKind::Offline)
+                                && ui_icon_button(
+                                    ui,
+                                    ("acc_ref_n", &acc.id),
+                                    Icon::Refresh,
+                                    tr(self.settings.language, "acc.refresh_session"),
+                                    ButtonVariant::Subtle,
+                                    !self.acc_refresh_busy && !self.settings.offline_mode,
+                                    28.0,
+                                )
+                                .clicked()
+                            {
+                                refresh_acc = Some(acc.clone());
+                            }
                             if self.account_store.accounts.len() > 1
                                 && ui_icon_button(
                                     ui,
                                     ("acc_del", &acc.id),
                                     Icon::Trash,
-                                    "Delete account",
+                                    tr(self.settings.language, "acc.delete_tooltip"),
                                     ButtonVariant::Danger,
                                     true,
                                     28.0,
@@ -275,6 +300,17 @@ impl McLauncherApp {
                 ui.add_space(4.0);
             }
 
+            if let Some(mut acc) = refresh_acc {
+                self.acc_refresh_busy = true;
+                self.auth_error = None;
+                let ms_client_id = self.ms_client_id.clone();
+                let tx = self.tx.clone();
+                thread::spawn(move || {
+                    let res = ensure_valid_account_with_mode(&mut acc, &ms_client_id, false)
+                        .map(|()| acc);
+                    let _ = tx.send(WorkerEvent::AccountManualRefreshed(res));
+                });
+            }
             if let Some(id) = select_id {
                 self.account_store.active_id = Some(id);
                 let _ = save_accounts(&self.paths, &self.account_store);
@@ -293,314 +329,373 @@ impl McLauncherApp {
 
             ui.add_space(12.0);
 
-            // Microsoft OAuth card
+            // Unified Add Account card with provider ComboBox
+            let prov_id = egui::Id::new("acc_add_provider_idx");
+            let mut prov: u8 = ui.ctx().data_mut(|d| d.get_temp::<u8>(prov_id).unwrap_or(0));
+            let prov_label = |p: u8, lang: Language| -> &'static str {
+                match p {
+                    0 => tr(lang, "acc.ms_title"),
+                    1 => "Ely.by",
+                    _ => tr(lang, "acc.offline_title"),
+                }
+            };
+
             card_frame(false, 0.0).show(ui, |ui| {
                 ui.set_min_width(card_inner_w);
                 ui.set_max_width(card_inner_w);
-                ui_toolbar_row(ui, 24.0, |ui| {
-                    ui.strong(
-                        egui::RichText::new(tr(self.settings.language, "acc.ms_title"))
-                            .color(text_primary()),
-                    );
+                ui_toolbar_row(ui, 26.0, |ui| {
+                    let prev_prov = prov;
+                    egui::ComboBox::from_id_salt("acc_provider_combo")
+                        .selected_text(prov_label(prov, self.settings.language))
+                        .width(172.0)
+                        .truncate()
+                        .show_ui(ui, |ui| {
+                            for opt in [0_u8, 1, 2] {
+                                ui.selectable_value(
+                                    &mut prov,
+                                    opt,
+                                    prov_label(opt, self.settings.language),
+                                );
+                            }
+                        });
+                    if prov != prev_prov {
+                        ui.ctx().data_mut(|d| d.insert_temp(prov_id, prov));
+                        self.mark_subtab_switch(ui.ctx());
+                    }
+
+                    if prov == 0 {
+                        ui.label(
+                            egui::RichText::new("OAuth Device Code")
+                                .small()
+                                .color(text_muted()),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let toggle_lbl = if self.ms_show_custom_id {
+                                tr(self.settings.language, "acc.hide")
+                            } else {
+                                tr(self.settings.language, "acc.custom_id")
+                            };
+                            if ui_button(
+                                ui,
+                                "ms_toggle_cid",
+                                toggle_lbl,
+                                ButtonVariant::Subtle,
+                                true,
+                                22.0,
+                            )
+                            .clicked()
+                            {
+                                self.ms_show_custom_id = !self.ms_show_custom_id;
+                            }
+                        });
+                    } else if prov == 1 {
+                        ui.label(
+                            egui::RichText::new("authlib-injector")
+                                .small()
+                                .color(text_muted()),
+                        );
+                    }
+                });
+                ui.add_space(6.0);
+
+                if prov == 0 {
                     ui.label(
-                        egui::RichText::new("OAuth Device Code")
+                        egui::RichText::new(tr(self.settings.language, "acc.ms_desc"))
                             .small()
-                            .color(text_muted()),
+                            .color(text_secondary()),
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let toggle_lbl = if self.ms_show_custom_id {
-                            tr(self.settings.language, "acc.hide")
-                        } else {
-                            tr(self.settings.language, "acc.custom_id")
-                        };
+                    if self.ms_show_custom_id {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(tr(self.settings.language, "acc.client_id"))
+                                .small()
+                                .color(text_secondary()),
+                        );
+                        ui_text_input(
+                            ui,
+                            "ms_cid_input",
+                            &mut self.ms_client_id,
+                            DEFAULT_MS_CLIENT_ID,
+                            inner_w,
+                            false,
+                        );
+                    }
+                    ui.add_space(6.0);
+
+                    if let Some(dc) = self.ms_device_code.clone() {
+                        ui.label(&dc.message);
+                        ui.add_space(6.0);
+                        ui_wrap_row(ui, 26.0, |ui| {
+                            ui.label(tr(self.settings.language, "acc.code"));
+                            solid_accent_badge(ui, &dc.user_code);
+                            if ui_button_icon(
+                                ui,
+                                "ms_copy_code_btn",
+                                Some(Icon::Copy),
+                                tr(self.settings.language, "btn.copy"),
+                                ButtonVariant::Secondary,
+                                true,
+                                26.0,
+                            )
+                            .clicked()
+                            {
+                                ui.ctx().copy_text(dc.user_code.clone());
+                                let pos = anim::pointer_or_center(ui.ctx());
+                                anim::emit_ring(ui.ctx(), pos, accent(), 26.0);
+                                self.show_toast(
+                                    ui.ctx(),
+                                    tr(self.settings.language, "acc.code_copied"),
+                                );
+                            }
+                            if ui_button_icon(
+                                ui,
+                                "ms_open_browser_btn",
+                                Some(Icon::External),
+                                tr(self.settings.language, "acc.open_browser"),
+                                ButtonVariant::Primary,
+                                true,
+                                26.0,
+                            )
+                            .clicked()
+                            {
+                                anim::emit_ring(
+                                    ui.ctx(),
+                                    anim::pointer_or_center(ui.ctx()),
+                                    accent(),
+                                    26.0,
+                                );
+                                ui.ctx()
+                                    .open_url(egui::OpenUrl::new_tab(&dc.verification_uri));
+                            }
+                            if ui_button_icon(
+                                ui,
+                                "ms_cancel_login_btn",
+                                Some(Icon::Close),
+                                tr(self.settings.language, "acc.cancel_login"),
+                                ButtonVariant::Danger,
+                                true,
+                                26.0,
+                            )
+                            .clicked()
+                            {
+                                if let Some(tok) = self.ms_login_cancel.take() {
+                                    tok.store(true, Ordering::SeqCst);
+                                }
+                                self.ms_busy = false;
+                                self.ms_device_code = None;
+                                self.auth_status = None;
+                            }
+                            mono_spinner(ui, 15.0);
+                        });
+                    } else {
+                        ui_toolbar_row(ui, 26.0, |ui| {
+                            if ui_button_icon(
+                                ui,
+                                "ms_login_btn",
+                                Some(Icon::User),
+                                tr(self.settings.language, "acc.ms_signin"),
+                                ButtonVariant::Primary,
+                                !self.ms_busy,
+                                26.0,
+                            )
+                            .clicked()
+                            {
+                                anim::emit_ring(
+                                    ui.ctx(),
+                                    anim::pointer_or_center(ui.ctx()),
+                                    accent(),
+                                    26.0,
+                                );
+                                let cancel_tok = Arc::new(AtomicBool::new(false));
+                                self.ms_login_cancel = Some(Arc::clone(&cancel_tok));
+                                self.ms_busy = true;
+                                self.auth_error = None;
+                                self.auth_status =
+                                    Some("Requesting Microsoft device code...".to_string());
+                                start_microsoft_device_login(
+                                    self.ms_client_id.clone(),
+                                    cancel_tok,
+                                    self.tx.clone(),
+                                );
+                            }
+                            if self.ms_busy {
+                                if ui_button_icon(
+                                    ui,
+                                    "ms_cancel_login_init_btn",
+                                    Some(Icon::Close),
+                                    tr(self.settings.language, "acc.cancel_login"),
+                                    ButtonVariant::Danger,
+                                    true,
+                                    26.0,
+                                )
+                                .clicked()
+                                {
+                                    if let Some(tok) = self.ms_login_cancel.take() {
+                                        tok.store(true, Ordering::SeqCst);
+                                    }
+                                    self.ms_busy = false;
+                                    self.auth_status = None;
+                                }
+                                mono_spinner(ui, 15.0);
+                            }
+                        });
+                    }
+                } else if prov == 1 {
+                    ui.label(
+                        egui::RichText::new(tr(self.settings.language, "acc.ely_desc"))
+                            .small()
+                            .color(text_secondary()),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(tr(self.settings.language, "acc.login_label"))
+                            .small()
+                            .color(text_secondary()),
+                    );
+                    ui_toolbar_row(ui, 26.0, |ui| {
+                        ui_text_input(
+                            ui,
+                            "ely_login_in",
+                            &mut self.ely_login,
+                            tr(self.settings.language, "acc.login_hint"),
+                            inner_w,
+                            false,
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(tr(self.settings.language, "acc.password"))
+                            .small()
+                            .color(text_secondary()),
+                    );
+                    ui_toolbar_row(ui, 26.0, |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui_text_input(
+                            ui,
+                            "ely_pass_in",
+                            &mut self.ely_password,
+                            tr(self.settings.language, "acc.pass_hint"),
+                            (inner_w - 60.0).max(80.0),
+                            !self.ely_show_password,
+                        );
                         if ui_button(
                             ui,
-                            "ms_toggle_cid",
-                            toggle_lbl,
+                            "ely_show_pw",
+                            if self.ely_show_password {
+                                tr(self.settings.language, "acc.hide")
+                            } else {
+                                tr(self.settings.language, "acc.show")
+                            },
                             ButtonVariant::Subtle,
                             true,
-                            22.0,
+                            26.0,
                         )
                         .clicked()
                         {
-                            self.ms_show_custom_id = !self.ms_show_custom_id;
+                            self.ely_show_password = !self.ely_show_password;
                         }
                     });
-                });
-                ui.label(
-                    egui::RichText::new(tr(self.settings.language, "acc.ms_desc"))
-                        .small()
-                        .color(text_secondary()),
-                );
-                if self.ms_show_custom_id {
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new(tr(self.settings.language, "acc.client_id"))
+                        egui::RichText::new(tr(self.settings.language, "acc.2fa_label"))
                             .small()
                             .color(text_secondary()),
                     );
                     ui_text_input(
                         ui,
-                        "ms_cid_input",
-                        &mut self.ms_client_id,
-                        DEFAULT_MS_CLIENT_ID,
+                        "ely_totp_in",
+                        &mut self.ely_totp,
+                        tr(self.settings.language, "acc.2fa_hint"),
                         inner_w,
                         false,
                     );
-                }
-                ui.add_space(8.0);
-
-                if let Some(dc) = self.ms_device_code.clone() {
-                    ui.label(&dc.message);
                     ui.add_space(6.0);
-                    ui_wrap_row(ui, 30.0, |ui| {
-                        ui.label(tr(self.settings.language, "acc.code"));
-                        solid_accent_badge(ui, &dc.user_code);
+                    ui_toolbar_row(ui, 26.0, |ui| {
+                        let ely_valid = !self.ely_busy
+                            && !self.ely_login.trim().is_empty()
+                            && !self.ely_password.is_empty();
                         if ui_button_icon(
                             ui,
-                            "ms_copy_code_btn",
-                            Some(Icon::Copy),
-                            tr(self.settings.language, "btn.copy"),
-                            ButtonVariant::Secondary,
-                            true,
-                            30.0,
-                        )
-                        .clicked()
-                        {
-                            ui.ctx().copy_text(dc.user_code.clone());
-                            let pos = anim::pointer_or_center(ui.ctx());
-                            anim::emit_ring(ui.ctx(), pos, accent(), 28.0);
-                            anim::emit_floating_badge(
-                                ui.ctx(),
-                                pos,
-                                Some(Icon::Check),
-                                "",
-                                accent(),
-                            );
-                            self.show_toast(ui.ctx(), "Code copied to clipboard");
-                        }
-                        if ui_button_icon(
-                            ui,
-                            "ms_open_browser_btn",
-                            Some(Icon::External),
-                            tr(self.settings.language, "acc.open_browser"),
+                            "ely_login_btn",
+                            Some(Icon::User),
+                            tr(self.settings.language, "acc.ely_signin"),
                             ButtonVariant::Primary,
-                            true,
-                            30.0,
+                            ely_valid,
+                            26.0,
                         )
                         .clicked()
                         {
-                            anim::emit_ring(
-                                ui.ctx(),
-                                anim::pointer_or_center(ui.ctx()),
-                                accent(),
-                                30.0,
-                            );
-                            ui.ctx()
-                                .open_url(egui::OpenUrl::new_tab(&dc.verification_uri));
+                            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), INFO, 26.0);
+                            self.ely_busy = true;
+                            self.auth_error = None;
+                            self.auth_status = Some("Signing in to Ely.by...".to_string());
+                            let login = self.ely_login.clone();
+                            let password = self.ely_password.clone();
+                            let totp = self.ely_totp.clone();
+                            let tx = self.tx.clone();
+                            thread::spawn(move || {
+                                let res = login_ely_by(&login, &password, &totp);
+                                let _ = tx.send(WorkerEvent::ElyAuthFinished(res));
+                            });
                         }
-                        mono_spinner(ui, 16.0);
+                        if self.ely_busy {
+                            mono_spinner(ui, 15.0);
+                        }
                     });
                 } else {
-                    ui_toolbar_row(ui, 30.0, |ui| {
-                        if ui_button_icon(
+                    ui_wrap_row(ui, 26.0, |ui| {
+                        ui.label(tr(self.settings.language, "acc.username"));
+                        let edit_resp = ui_text_input(
                             ui,
-                            "ms_login_btn",
-                            Some(Icon::User),
-                            tr(self.settings.language, "acc.ms_signin"),
+                            "offline_user_in",
+                            &mut self.offline_input,
+                            "Steve",
+                            (card_inner_w - 150.0).clamp(110.0, 260.0),
+                            false,
+                        );
+                        let enter = edit_resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let valid = !self.offline_input.trim().is_empty();
+                        if (ui_button_icon(
+                            ui,
+                            "offline_add_btn",
+                            Some(Icon::Plus),
+                            tr(self.settings.language, "btn.add"),
                             ButtonVariant::Primary,
-                            !self.ms_busy,
-                            30.0,
+                            valid,
+                            26.0,
                         )
                         .clicked()
+                            || enter)
+                            && valid
                         {
-                            anim::emit_ring(
+                            let name = self.offline_input.trim().to_string();
+                            if let Some(existing) = self.account_store.accounts.iter().find(|a| {
+                                matches!(a.kind, AccountKind::Offline)
+                                    && a.username.eq_ignore_ascii_case(&name)
+                            }) {
+                                self.account_store.active_id = Some(existing.id.clone());
+                            } else {
+                                let acc = Account::offline(name.clone());
+                                self.account_store.active_id = Some(acc.id.clone());
+                                self.account_store.accounts.push(acc);
+                            }
+                            let _ = save_accounts(&self.paths, &self.account_store);
+                            self.offline_input.clear();
+                            self.auth_error = None;
+                            self.auth_status = Some(format!(
+                                "{}: {name}",
+                                tr(self.settings.language, "acc.offline_added")
+                            ));
+                            anim::emit_burst(
                                 ui.ctx(),
                                 anim::pointer_or_center(ui.ctx()),
                                 accent(),
-                                30.0,
+                                8,
                             );
-                            self.ms_busy = true;
-                            self.auth_error = None;
-                            self.auth_status =
-                                Some("Requesting Microsoft device code...".to_string());
-                            start_microsoft_device_login(
-                                self.ms_client_id.clone(),
-                                self.tx.clone(),
-                            );
-                        }
-                        if self.ms_busy {
-                            mono_spinner(ui, 16.0);
                         }
                     });
                 }
-            });
-
-            ui.add_space(8.0);
-
-            // Ely.by card
-            card_frame(false, 0.0).show(ui, |ui| {
-                ui.set_min_width(card_inner_w);
-                ui.set_max_width(card_inner_w);
-                ui_wrap_row(ui, 22.0, |ui| {
-                    ui.strong(egui::RichText::new("Ely.by").color(text_primary()));
-                    ui.label(
-                        egui::RichText::new("authlib-injector")
-                            .small()
-                            .color(text_muted()),
-                    );
-                });
-                ui.label(
-                    egui::RichText::new(tr(self.settings.language, "acc.ely_desc"))
-                        .small()
-                        .color(text_secondary()),
-                );
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(tr(self.settings.language, "acc.login_label"))
-                        .small()
-                        .color(text_secondary()),
-                );
-                ui_toolbar_row(ui, 30.0, |ui| {
-                    ui_text_input(
-                        ui,
-                        "ely_login_in",
-                        &mut self.ely_login,
-                        tr(self.settings.language, "acc.login_hint"),
-                        inner_w,
-                        false,
-                    );
-                });
-                ui.add_space(5.0);
-                ui.label(
-                    egui::RichText::new(tr(self.settings.language, "acc.password"))
-                        .small()
-                        .color(text_secondary()),
-                );
-                ui_toolbar_row(ui, 30.0, |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui_text_input(
-                        ui,
-                        "ely_pass_in",
-                        &mut self.ely_password,
-                        tr(self.settings.language, "acc.pass_hint"),
-                        (inner_w - 64.0).max(80.0),
-                        !self.ely_show_password,
-                    );
-                    if ui_button(
-                        ui,
-                        "ely_show_pw",
-                        if self.ely_show_password {
-                            tr(self.settings.language, "acc.hide")
-                        } else {
-                            tr(self.settings.language, "acc.show")
-                        },
-                        ButtonVariant::Subtle,
-                        true,
-                        30.0,
-                    )
-                    .clicked()
-                    {
-                        self.ely_show_password = !self.ely_show_password;
-                    }
-                });
-                ui.add_space(5.0);
-                ui.label(
-                    egui::RichText::new(tr(self.settings.language, "acc.2fa_label"))
-                        .small()
-                        .color(text_secondary()),
-                );
-                ui_text_input(
-                    ui,
-                    "ely_totp_in",
-                    &mut self.ely_totp,
-                    tr(self.settings.language, "acc.2fa_hint"),
-                    inner_w,
-                    false,
-                );
-                ui.add_space(8.0);
-                ui_toolbar_row(ui, 28.0, |ui| {
-                    let ely_valid = !self.ely_busy
-                        && !self.ely_login.trim().is_empty()
-                        && !self.ely_password.is_empty();
-                    if ui_button_icon(
-                        ui,
-                        "ely_login_btn",
-                        Some(Icon::User),
-                        tr(self.settings.language, "acc.ely_signin"),
-                        ButtonVariant::Secondary,
-                        ely_valid,
-                        28.0,
-                    )
-                    .clicked()
-                    {
-                        anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), INFO, 30.0);
-                        self.ely_busy = true;
-                        self.auth_error = None;
-                        self.auth_status = Some("Signing in to Ely.by...".to_string());
-                        let login = self.ely_login.clone();
-                        let password = self.ely_password.clone();
-                        let totp = self.ely_totp.clone();
-                        let tx = self.tx.clone();
-                        thread::spawn(move || {
-                            let res = login_ely_by(&login, &password, &totp);
-                            let _ = tx.send(WorkerEvent::ElyAuthFinished(res));
-                        });
-                    }
-                    if self.ely_busy {
-                        mono_spinner(ui, 16.0);
-                    }
-                });
-            });
-
-            ui.add_space(8.0);
-
-            // Offline card
-            card_frame(false, 0.0).show(ui, |ui| {
-                ui.set_min_width(card_inner_w);
-                ui.set_max_width(card_inner_w);
-                ui.strong(
-                    egui::RichText::new(tr(self.settings.language, "acc.offline_title"))
-                        .color(text_primary()),
-                );
-                ui.add_space(6.0);
-                ui_wrap_row(ui, 30.0, |ui| {
-                    ui.label(tr(self.settings.language, "acc.username"));
-                    let edit_resp = ui_text_input(
-                        ui,
-                        "offline_user_in",
-                        &mut self.offline_input,
-                        "Steve",
-                        (card_inner_w - 150.0).clamp(110.0, 260.0),
-                        false,
-                    );
-                    let enter =
-                        edit_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let valid = !self.offline_input.trim().is_empty();
-                    if (ui_button_icon(
-                        ui,
-                        "offline_add_btn",
-                        Some(Icon::Plus),
-                        tr(self.settings.language, "btn.add"),
-                        ButtonVariant::Primary,
-                        valid,
-                        30.0,
-                    )
-                    .clicked()
-                        || enter)
-                        && valid
-                    {
-                        let name = self.offline_input.trim().to_string();
-                        let acc = Account::offline(name.clone());
-                        self.account_store.active_id = Some(acc.id.clone());
-                        self.account_store.accounts.push(acc);
-                        let _ = save_accounts(&self.paths, &self.account_store);
-                        self.offline_input.clear();
-                        self.auth_error = None;
-                        self.auth_status = Some(format!("Added Offline account: {name}"));
-                        anim::emit_burst(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 8);
-                    }
-                });
             });
         });
     }
@@ -647,12 +742,8 @@ impl McLauncherApp {
 
         let avail_w = ui.available_width();
         if avail_w >= 460.0 {
-            ui_toolbar_row(ui, 30.0, |ui| {
-                ui.heading(
-                    egui::RichText::new(self.discover_source.label())
-                        .size(21.0)
-                        .color(text_primary()),
-                );
+            ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
+                page_heading(ui, self.discover_source.label());
                 if avail_w >= 540.0 {
                     let max_badge_w = (avail_w - 320.0).max(80.0);
                     badge_sized(ui, &target_label, !is_vanilla_mods, 26.0, Some(max_badge_w));
@@ -689,12 +780,8 @@ impl McLauncherApp {
                 });
             });
         } else {
-            ui_wrap_row(ui, 28.0, |ui| {
-                ui.heading(
-                    egui::RichText::new(self.discover_source.label())
-                        .size(21.0)
-                        .color(text_primary()),
-                );
+            ui_wrap_row(ui, CTL_HEIGHT, |ui| {
+                page_heading(ui, self.discover_source.label());
                 if target_server.is_some() {
                     if ui_button_icon(
                         ui,
@@ -727,94 +814,59 @@ impl McLauncherApp {
         }
 
         ui.add_space(6.0);
-        if !self.servers.is_empty() {
-            let lang = self.settings.language;
-            let inst_lbl = cur_profile
-                .as_ref()
-                .map(|p| format!("{}: {}", tr(lang, "nav.instance"), p.name))
-                .unwrap_or_else(|| tr(lang, "nav.instance").to_string());
-            let active_srv_idx = self
-                .discover_target_server_id
-                .as_ref()
-                .and_then(|id| self.servers.iter().position(|s| &s.id == id))
-                .unwrap_or(self.selected_server_idx.min(self.servers.len() - 1));
-            let active_srv = self.servers[active_srv_idx].clone();
-            let srv_lbl = format!("{}: {}", tr(lang, "nav.servers"), active_srv.name);
-
-            ui_wrap_row(ui, 30.0, |ui| {
-                if ui_pill_tab_icon(
-                    ui,
-                    "mr_target_inst_pill",
-                    Some(Icon::Grid),
-                    &inst_lbl,
-                    target_server.is_none(),
-                )
-                .clicked()
-                    && target_server.is_some()
-                {
-                    self.discover_target_server_id = None;
-                    if self.mr_type == ModrinthProjectType::Plugin {
-                        self.mr_type = ModrinthProjectType::Mod;
-                    }
-                    self.mark_subtab_switch(ui.ctx());
-                    self.trigger_modrinth_search(false);
-                }
-                if ui_pill_tab_icon(
-                    ui,
-                    "mr_target_srv_pill",
-                    Some(Icon::Server),
-                    &srv_lbl,
-                    target_server.is_some(),
-                )
-                .clicked()
-                    && target_server.is_none()
-                {
-                    self.discover_target_server_id = Some(active_srv.id.clone());
-                    let srv_dir = server_dir(&self.paths, &active_srv);
-                    if !active_srv.software.supports_mods()
-                        && server_supports_plugins_live(&srv_dir, active_srv.software)
-                    {
-                        self.mr_type = ModrinthProjectType::Plugin;
-                    } else if active_srv.software.supports_mods() {
-                        self.mr_type = ModrinthProjectType::Mod;
-                    }
-                    self.mark_subtab_switch(ui.ctx());
-                    self.trigger_modrinth_search(false);
-                }
-                if target_server.is_some() && self.servers.len() > 1 {
-                    let mut chosen_id = active_srv.id.clone();
-                    egui::ComboBox::from_id_salt("mr_target_srv_combo")
-                        .selected_text(&active_srv.name)
-                        .width(150.0)
-                        .show_ui(ui, |ui| {
-                            for s in &self.servers {
-                                ui.selectable_value(&mut chosen_id, s.id.clone(), &s.name);
-                            }
-                        });
-                    if chosen_id != active_srv.id {
-                        if let Some(chosen_srv) = self.servers.iter().find(|s| s.id == chosen_id) {
+        ui_wrap_row(ui, 26.0, |ui| {
+            if !self.servers.is_empty() {
+                let lang = self.settings.language;
+                let inst_lbl = cur_profile
+                    .as_ref()
+                    .map(|p| format!("{}: {}", tr(lang, "nav.instance"), p.name))
+                    .unwrap_or_else(|| tr(lang, "nav.instance").to_string());
+                let selected_target_lbl = if let Some(srv) = &target_server {
+                    format!("{}: {}", tr(lang, "nav.servers"), srv.name)
+                } else {
+                    inst_lbl.clone()
+                };
+                let mut chosen_srv_id = self.discover_target_server_id.clone();
+                egui::ComboBox::from_id_salt("mr_target_combo")
+                    .selected_text(selected_target_lbl)
+                    .width(164.0)
+                    .truncate()
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut chosen_srv_id, None, inst_lbl);
+                        for s in &self.servers {
+                            ui.selectable_value(
+                                &mut chosen_srv_id,
+                                Some(s.id.clone()),
+                                format!("{}: {}", tr(lang, "nav.servers"), s.name),
+                            );
+                        }
+                    });
+                if chosen_srv_id != self.discover_target_server_id {
+                    if let Some(ref sid) = chosen_srv_id {
+                        if let Some(chosen_srv) = self.servers.iter().find(|s| &s.id == sid) {
                             let srv_dir = server_dir(&self.paths, chosen_srv);
-                            if self.mr_type == ModrinthProjectType::Mod
-                                && !chosen_srv.software.supports_mods()
+                            if !chosen_srv.software.supports_mods()
                                 && server_supports_plugins_live(&srv_dir, chosen_srv.software)
                             {
                                 self.mr_type = ModrinthProjectType::Plugin;
-                            } else if self.mr_type == ModrinthProjectType::Plugin
-                                && !server_supports_plugins_live(&srv_dir, chosen_srv.software)
-                                && chosen_srv.software.supports_mods()
+                            } else if chosen_srv.software.supports_mods()
+                                && (self.mr_type != ModrinthProjectType::Plugin
+                                    || !server_supports_plugins_live(
+                                        &srv_dir,
+                                        chosen_srv.software,
+                                    ))
                             {
                                 self.mr_type = ModrinthProjectType::Mod;
                             }
                         }
-                        self.discover_target_server_id = Some(chosen_id);
-                        self.mark_subtab_switch(ui.ctx());
-                        self.trigger_modrinth_search(false);
+                    } else if self.mr_type == ModrinthProjectType::Plugin {
+                        self.mr_type = ModrinthProjectType::Mod;
                     }
+                    self.discover_target_server_id = chosen_srv_id;
+                    self.mark_subtab_switch(ui.ctx());
+                    self.trigger_modrinth_search(false);
                 }
-            });
-            ui.add_space(6.0);
-        }
-        ui_wrap_row(ui, 30.0, |ui| {
+            }
             let prev_src = self.discover_source;
             egui::ComboBox::from_id_salt("discover_src_combo")
                 .selected_text(self.discover_source.label())
@@ -976,6 +1028,10 @@ impl McLauncherApp {
         let subtab_t = self.subtab_switch_time;
         let mut open_inst_settings_req = false;
 
+        let is_server_target = target_server.is_some();
+        if let Some(ref srv) = target_server {
+            self.sync_server_installed_index(srv);
+        }
         Self::apply_subtab_transition(ui, subtab_t, |ui| {
             bounded_scroll(ui, "modrinth_scroll", |ui| {
                 let usable_w = (ui.available_width() - 12.0).max(160.0);
@@ -1032,7 +1088,11 @@ impl McLauncherApp {
                 let active_loader_slug = cur_loader.and_then(|l| l.modrinth_slug());
                 let wide_card = card_inner_w >= 540.0;
                 for hit in &results {
-                    let is_installed = self.mr_installed_cache.contains_key(&hit.project_id);
+                    let is_installed = if is_server_target {
+                        self.server_installed_cache.contains_key(&hit.project_id)
+                    } else {
+                        self.mr_installed_cache.contains_key(&hit.project_id)
+                    };
                     let is_this_installing = mr_installing
                         && mr_installing_id.as_deref() == Some(hit.project_id.as_str());
                     let btn_lbl = if is_this_installing {
@@ -1155,7 +1215,7 @@ impl McLauncherApp {
                                                                 egui::Label::new(
                                                                     egui::RichText::new(&hit.title)
                                                                         .strong()
-                                                                        .size(14.5)
+                                                                        .size(13.5)
                                                                         .color(title_col),
                                                                 )
                                                                 .truncate()
@@ -1561,7 +1621,8 @@ impl McLauncherApp {
         }
 
         if let Some((project_id, title, icon_url)) = install_req {
-            reset_download_cancel();
+            let cancel_tok = Arc::new(AtomicBool::new(false));
+            self.mr_cancel_token = Some(Arc::clone(&cancel_tok));
             anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), accent(), 34.0);
             if let Some(srv) = target_server.or_else(|| {
                 if mr_type == ModrinthProjectType::Plugin {
@@ -1579,29 +1640,31 @@ impl McLauncherApp {
                 let tx = self.tx.clone();
                 let cf_key = self.settings.curseforge_api_key.clone();
                 thread::spawn(move || {
-                    let res = if let Some(cf_mod_id) = parse_cf_project_id(&project_id) {
-                        install_curseforge_server_project(
-                            &cf_key,
-                            &paths,
-                            &srv,
-                            cf_mod_id,
-                            mr_type,
-                            &title,
-                            icon_url.as_deref(),
-                            None,
-                            &tx,
-                        )
-                    } else {
-                        install_server_project(
-                            &paths,
-                            &srv,
-                            &project_id,
-                            mr_type,
-                            &title,
-                            icon_url.as_deref(),
-                            &tx,
-                        )
-                    };
+                    let res = with_download_cancel_token(cancel_tok, || {
+                        if let Some(cf_mod_id) = parse_cf_project_id(&project_id) {
+                            install_curseforge_server_project(
+                                &cf_key,
+                                &paths,
+                                &srv,
+                                cf_mod_id,
+                                mr_type,
+                                &title,
+                                icon_url.as_deref(),
+                                None,
+                                &tx,
+                            )
+                        } else {
+                            install_server_project(
+                                &paths,
+                                &srv,
+                                &project_id,
+                                mr_type,
+                                &title,
+                                icon_url.as_deref(),
+                                &tx,
+                            )
+                        }
+                    });
                     let _ = tx.send(WorkerEvent::ServerProjectInstalled(res));
                 });
             } else if let Some(profile) = self.profiles.get(self.selected_idx).cloned() {
@@ -1614,29 +1677,31 @@ impl McLauncherApp {
                 let tx = self.tx.clone();
                 let cf_key = self.settings.curseforge_api_key.clone();
                 thread::spawn(move || {
-                    let res = if let Some(cf_mod_id) = parse_cf_project_id(&project_id) {
-                        install_curseforge_project(
-                            &cf_key,
-                            &paths,
-                            &profile,
-                            cf_mod_id,
-                            mr_type,
-                            &title,
-                            icon_url.as_deref(),
-                            None,
-                            &tx,
-                        )
-                    } else {
-                        install_project(
-                            &paths,
-                            &profile,
-                            &project_id,
-                            mr_type,
-                            &title,
-                            icon_url.as_deref(),
-                            &tx,
-                        )
-                    };
+                    let res = with_download_cancel_token(cancel_tok, || {
+                        if let Some(cf_mod_id) = parse_cf_project_id(&project_id) {
+                            install_curseforge_project(
+                                &cf_key,
+                                &paths,
+                                &profile,
+                                cf_mod_id,
+                                mr_type,
+                                &title,
+                                icon_url.as_deref(),
+                                None,
+                                &tx,
+                            )
+                        } else {
+                            install_project(
+                                &paths,
+                                &profile,
+                                &project_id,
+                                mr_type,
+                                &title,
+                                icon_url.as_deref(),
+                                &tx,
+                            )
+                        }
+                    });
                     let _ = tx.send(WorkerEvent::ModrinthInstallFinished(res));
                 });
             }
