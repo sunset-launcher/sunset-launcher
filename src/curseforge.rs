@@ -1008,7 +1008,8 @@ mod tests {
         let b = compute_curseforge_fingerprint(b"helloworld!");
         assert_eq!(a, b);
         assert_ne!(a, compute_curseforge_fingerprint(b"helloworld?"));
-        // Known MurmurHash2 (seed=1) of empty slice:
-        assert_eq!(compute_curseforge_fingerprint(b""), 0x058d_6359);
+        // Known MurmurHash2 (seed=1) test vectors:
+        assert_eq!(compute_curseforge_fingerprint(b""), 0x5bd1_5e36);
+        assert_eq!(compute_curseforge_fingerprint(b"hello"), 0xa631_918e);
     }
 }
