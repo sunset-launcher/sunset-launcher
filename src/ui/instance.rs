@@ -1731,8 +1731,7 @@ impl McLauncherApp {
                                                 })
                                                 .clicked()
                                                 {
-                                                    toggle_disk_name =
-                                                        Some(item.disk_name.clone());
+                                                    toggle_disk_name = Some(item.disk_name.clone());
                                                 }
 
                                                 let icon_url_opt =
@@ -1742,8 +1741,8 @@ impl McLauncherApp {
                                                     let tex_opt = icon_url_opt
                                                         .and_then(|u| self.mr_icons.get(u))
                                                         .and_then(|o| o.as_ref());
-                                                    let is_icon_loading = icon_url_opt
-                                                        .is_some_and(|u| {
+                                                    let is_icon_loading =
+                                                        icon_url_opt.is_some_and(|u| {
                                                             self.mr_icons_pending
                                                                 .contains(u.as_str())
                                                         });
@@ -2016,7 +2015,6 @@ impl McLauncherApp {
                 ui.label(egui::RichText::new(tr(lang, "logs.empty")).color(text_secondary()));
             });
         } else {
-
             let filter_q = self.inst_log_filter.trim().to_lowercase();
             let content = self.inst_log_content.clone();
             egui::Frame::none()

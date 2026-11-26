@@ -331,7 +331,9 @@ impl McLauncherApp {
 
             // Unified Add Account card with provider ComboBox
             let prov_id = egui::Id::new("acc_add_provider_idx");
-            let mut prov: u8 = ui.ctx().data_mut(|d| d.get_temp::<u8>(prov_id).unwrap_or(0));
+            let mut prov: u8 = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<u8>(prov_id).unwrap_or(0));
             let prov_label = |p: u8, lang: Language| -> &'static str {
                 match p {
                     0 => tr(lang, "acc.ms_title"),
@@ -625,7 +627,12 @@ impl McLauncherApp {
                         )
                         .clicked()
                         {
-                            anim::emit_ring(ui.ctx(), anim::pointer_or_center(ui.ctx()), INFO, 26.0);
+                            anim::emit_ring(
+                                ui.ctx(),
+                                anim::pointer_or_center(ui.ctx()),
+                                INFO,
+                                26.0,
+                            );
                             self.ely_busy = true;
                             self.auth_error = None;
                             self.auth_status = Some("Signing in to Ely.by...".to_string());
@@ -653,8 +660,8 @@ impl McLauncherApp {
                             (card_inner_w - 150.0).clamp(110.0, 260.0),
                             false,
                         );
-                        let enter = edit_resp.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let enter =
+                            edit_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         let valid = !self.offline_input.trim().is_empty();
                         if (ui_button_icon(
                             ui,
@@ -851,10 +858,7 @@ impl McLauncherApp {
                                 self.mr_type = ModrinthProjectType::Plugin;
                             } else if chosen_srv.software.supports_mods()
                                 && (self.mr_type != ModrinthProjectType::Plugin
-                                    || !server_supports_plugins_live(
-                                        &srv_dir,
-                                        chosen_srv.software,
-                                    ))
+                                    || !server_supports_plugins_live(&srv_dir, chosen_srv.software))
                             {
                                 self.mr_type = ModrinthProjectType::Mod;
                             }

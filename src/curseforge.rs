@@ -837,8 +837,8 @@ pub fn compute_curseforge_fingerprint(bytes: &[u8]) -> u32 {
 }
 
 pub fn compute_file_curseforge_fingerprint(path: &Path) -> Result<u32, String> {
-    let bytes =
-        fs::read(path).map_err(|e| format!("Failed to read {} for fingerprint: {e}", path.display()))?;
+    let bytes = fs::read(path)
+        .map_err(|e| format!("Failed to read {} for fingerprint: {e}", path.display()))?;
     Ok(compute_curseforge_fingerprint(&bytes))
 }
 
@@ -891,7 +891,10 @@ pub fn identify_curseforge_files_by_fingerprint(
     let mut all_fps: Vec<u64> = Vec::with_capacity(items.len());
     for (folder, base_name, fp) in items {
         let fp64 = *fp as u64;
-        if fp_to_meta.insert(fp64, (folder.as_str(), base_name.as_str())).is_none() {
+        if fp_to_meta
+            .insert(fp64, (folder.as_str(), base_name.as_str()))
+            .is_none()
+        {
             all_fps.push(fp64);
         }
     }

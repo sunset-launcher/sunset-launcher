@@ -972,8 +972,8 @@ pub fn ui_loader_pill(
         }
 
         if active_t > 0.03 {
-            let bar_w =
-                ((draw_rect.width() - 16.0).max(8.0) * ease_out_cubic(active_t)).min(draw_rect.width() - 8.0);
+            let bar_w = ((draw_rect.width() - 16.0).max(8.0) * ease_out_cubic(active_t))
+                .min(draw_rect.width() - 8.0);
             let bar_rect = Rect::from_center_size(
                 Pos2::new(draw_rect.center().x, draw_rect.bottom() - 2.0),
                 Vec2::new(bar_w, 2.0),
@@ -1491,10 +1491,7 @@ pub fn ui_alert_banner(ui: &mut egui::Ui, kind: AlertKind, text: &str, width: f3
     let border_alpha = ((180.0 + (1.0 - enter_eased) * 75.0) * alpha_scale) as u8;
     let frame_resp = egui::Frame::none()
         .fill(with_alpha(bg, (255.0 * alpha_scale) as u8))
-        .stroke(Stroke::new(
-            1.0_f32,
-            with_alpha(border, border_alpha),
-        ))
+        .stroke(Stroke::new(1.0_f32, with_alpha(border, border_alpha)))
         .rounding(Rounding::same(8.0))
         .inner_margin(Margin::symmetric(12.0, 8.0))
         .show(ui, |ui| {
@@ -1907,11 +1904,7 @@ pub fn server_software_badge(ui: &mut egui::Ui, software: crate::models::ServerS
         .rounding(Rounding::same(4.0))
         .inner_margin(Margin::symmetric(6.0, 2.0))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(software.label())
-                    .size(11.5)
-                    .color(fg),
-            );
+            ui.label(egui::RichText::new(software.label()).size(11.5).color(fg));
         });
 }
 

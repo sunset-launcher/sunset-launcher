@@ -811,8 +811,7 @@ pub fn remove_instance_dir(paths: &LauncherPaths, profile: &Profile) -> Result<(
         return Err("Refusing to delete path outside instances directory".to_string());
     }
     if dir.exists() {
-        fs::remove_dir_all(&dir)
-            .map_err(|e| format!("Failed to remove {}: {e}", dir.display()))?;
+        fs::remove_dir_all(&dir).map_err(|e| format!("Failed to remove {}: {e}", dir.display()))?;
     }
     Ok(())
 }
@@ -1327,7 +1326,10 @@ mod tests {
         save_selected_profile_id(&paths, Some("prof-abc")).unwrap();
         save_selected_server_id(&paths, Some(&s2.id)).unwrap();
 
-        assert_eq!(load_selected_profile_id(&paths).as_deref(), Some("prof-abc"));
+        assert_eq!(
+            load_selected_profile_id(&paths).as_deref(),
+            Some("prof-abc")
+        );
         let loaded_srv = load_selected_server_id(&paths);
         assert_eq!(loaded_srv.as_deref(), Some(s2.id.as_str()));
         assert_eq!(

@@ -330,8 +330,8 @@ impl McLauncherApp {
                     .small()
                     .color(text_secondary()),
                 );
-                let target_active = self.is_profile_running(&target.id)
-                    || self.is_profile_launching(&target.id);
+                let target_active =
+                    self.is_profile_running(&target.id) || self.is_profile_launching(&target.id);
                 if target_active {
                     ui.add_space(6.0);
                     ui.label(

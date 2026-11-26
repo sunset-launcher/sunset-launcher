@@ -805,7 +805,9 @@ impl McLauncherApp {
                         Some(Icon::Refresh),
                         tr(lang, "settings.updates.check"),
                         ButtonVariant::Secondary,
-                        !self.update_checking && !self.update_installing && !self.settings.offline_mode,
+                        !self.update_checking
+                            && !self.update_installing
+                            && !self.settings.offline_mode,
                         28.0,
                     )
                     .clicked()
@@ -829,7 +831,9 @@ impl McLauncherApp {
                                 Some(Icon::Download),
                                 tr(lang, "settings.updates.install"),
                                 ButtonVariant::Primary,
-                                !self.update_installing && !self.is_busy && !self.any_game_running(),
+                                !self.update_installing
+                                    && !self.is_busy
+                                    && !self.any_game_running(),
                                 28.0,
                             )
                             .clicked()
@@ -901,8 +905,7 @@ impl McLauncherApp {
         ui_toolbar_row(ui, CTL_HEIGHT, |ui| {
             page_heading(ui, tr(lang, "nav.console"));
             if is_running {
-                let (dot_r, dot_resp) =
-                    ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                let (dot_r, dot_resp) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
                 draw_running_pulse_dot(ui, dot_r.center(), 3.0, accent(), bg_void());
                 dot_resp.on_hover_text(tr(lang, "console.live"));
             }

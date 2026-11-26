@@ -1057,9 +1057,7 @@ impl McLauncherApp {
             for item in items {
                 let rel = format!("{folder}/{}", item.base_name);
                 if !indexed.contains(&rel)
-                    && self
-                        .auto_identified_files
-                        .insert((profile.id.clone(), rel))
+                    && self.auto_identified_files.insert((profile.id.clone(), rel))
                 {
                     has_new_unindexed = true;
                 }
@@ -1374,10 +1372,9 @@ impl McLauncherApp {
                     AccountKind::Microsoft { uuid: u1, .. },
                     AccountKind::Microsoft { uuid: u2, .. },
                 ) => u1.eq_ignore_ascii_case(u2),
-                (
-                    AccountKind::ElyBy { uuid: u1, .. },
-                    AccountKind::ElyBy { uuid: u2, .. },
-                ) => u1.eq_ignore_ascii_case(u2),
+                (AccountKind::ElyBy { uuid: u1, .. }, AccountKind::ElyBy { uuid: u2, .. }) => {
+                    u1.eq_ignore_ascii_case(u2)
+                }
                 _ => false,
             }
         });
@@ -3666,10 +3663,7 @@ impl eframe::App for McLauncherApp {
                 egui::Frame::none()
                     .fill(bg_sidebar())
                     .stroke(Stroke::new(1.0_f32, border_subtle()))
-                    .inner_margin(Margin::symmetric(
-                        if compact_pad { 8.0 } else { 12.0 },
-                        7.0,
-                    )),
+                    .inner_margin(Margin::symmetric(if compact_pad { 8.0 } else { 12.0 }, 7.0)),
             )
             .show(ctx, |ui| {
                 self.render_top_bar(ui);
